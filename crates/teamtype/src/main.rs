@@ -23,7 +23,7 @@ use teamtype::{
 };
 use tempfile::{TempDir, tempdir_in};
 use tokio::signal;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use self::cli::{Cli, Commands, ShareJoinFlags};
 
@@ -315,10 +315,10 @@ fn setup_teamtype_directory(
     if has_ethersync_directory(directory) {
         let old_directory = directory.join(config::LEGACY_CONFIG_DIR);
 
-        warn!(
+        ui.error(&format!(
             "You have an '{}/' directory, back from when the project was called \"Ethersync\" until October 2025.",
             &old_directory.display()
-        );
+        ));
 
         if ui.confirm(&format!(
             "Do you want to rename {}/ to {}/?",
