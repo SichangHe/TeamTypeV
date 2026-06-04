@@ -4612,6 +4612,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "console",
  "constant_time_eq",
  "derive_more 2.1.1",
  "dialoguer",
