@@ -21,7 +21,7 @@ use tokio_util::{
     bytes::BytesMut,
     codec::{Decoder, Encoder, FramedRead, FramedWrite, LinesCodec},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::daemon::{DocMessage, DocumentActorHandle};
 use crate::editor_protocol::{
@@ -221,5 +221,5 @@ async fn handle_editor_connection(
     document_handle
         .send_message(DocMessage::CloseEditorConnection(editor_id))
         .await;
-    info!("Editor #{editor_id} disconnected.");
+    ui.log(&format!("Editor #{editor_id} disconnected."));
 }

@@ -15,8 +15,9 @@ use automerge::{
     transaction::Transactable,
 };
 use dissimilar::Chunk;
-use tracing::{debug, info};
+use tracing::debug;
 
+use crate::types::UserInterface;
 use crate::{
     path::RelativePath,
     types::{EditorTextDelta, PatchEffect, TextDelta},
@@ -36,33 +37,34 @@ pub enum Content {
 /// - applying a delta (coming from an editor) directly
 ///
 /// Furthermore, there's a way to retrieve and initialize the content.
-#[derive(Debug)]
 #[must_use]
 pub struct Document {
     files: HashMap<RelativePath, Content>,
     doc: AutoCommit,
+    ui: UserInterface,
 }
 
-impl Default for Document {
-    fn default() -> Self {
+impl Document {
+    pub fn default(ui: &UserInterface) -> Self {
         // We're baking a single static initial state into the binary rather than generating new documents
         // from a random seed in each client so that documents created by independent peers can be merged.
         // See build.rs for how to force a rebuild of this initial state, but be aware updating the initial
         // state is a breaking change that will make Teamtype peers incompatible with each other.
         // See https://automerge.org/docs/cookbook/modeling-data/#setting-up-an-initial-document-structure
         let initial_automerge_doc_bytes = include_bytes!("initial_automerge_doc.bin");
-        Self::load(initial_automerge_doc_bytes)
+        Self::load(initial_automerge_doc_bytes, ui)
     }
 }
 
 impl Document {
     // TODO: use sth like try_load + Result to bubble up potential errors.
-    pub fn load(bytes: &[u8]) -> Self {
+    pub fn load(bytes: &[u8], ui: &UserInterface) -> Self {
         let doc =
             AutoCommit::load(bytes).expect("Failed to load Automerge document from given bytes");
         let mut result = Self {
             files: HashMap::default(),
             doc,
+            ui: ui.clone(),
         };
         result.update_files();
         result
@@ -243,7 +245,8 @@ impl Document {
             }
 
             let text_delta: TextDelta = chunks.into();
-            info!("Detected change of {file_path}. Updating.");
+            self.ui
+                .log(&format!("Detected change of {file_path}. Updating."));
             debug!("Full delta of this update: {text_delta}");
             self.apply_delta_to_doc(&text_delta, file_path).expect("Failed to apply delta to document while updating text. Probably the delta doesn't fit the document content.");
 
@@ -266,7 +269,8 @@ impl Document {
             return;
         }
 
-        info!("Removing {file_path} from the Teamtype history.");
+        self.ui
+            .log(&format!("Removing {file_path} from the Teamtype history."));
 
         // Remove from Automerge document.
         let file_map = self
@@ -283,7 +287,9 @@ impl Document {
     pub fn set_file(&mut self, content: Content, file_path: &RelativePath) {
         match content {
             Content::String(ref text) => {
-                info!("Initializing {file_path} in the Teamtype history.");
+                self.ui.log(&format!(
+                    "Initializing {file_path} in the Teamtype history."
+                ));
                 self.files
                     .insert(file_path.clone(), Content::String(text.clone()));
 
@@ -315,7 +321,9 @@ impl Document {
 
                 // If the file was not in the document before, log this.
                 if !self.file_exists(file_path) {
-                    info!("Initializing binary {file_path} in the Teamtype history.");
+                    self.ui.log(&format!(
+                        "Initializing binary {file_path} in the Teamtype history."
+                    ));
                 }
 
                 self.doc

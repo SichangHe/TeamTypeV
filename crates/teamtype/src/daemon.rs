@@ -28,7 +28,7 @@ use tokio::{
     time::sleep,
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::config::{self, AppConfig};
 use crate::document::{self, Document};
@@ -117,6 +117,7 @@ pub struct DocumentActor {
     /// The Document is the main I/O managed resource of this actor.
     crdt_doc: Document,
     app_config: AppConfig,
+    ui: UserInterface,
     save_fully: bool,
 }
 
@@ -126,6 +127,7 @@ impl DocumentActor {
         doc_changed_ping_tx: DocChangedSender,
         ephemeral_message_tx: EphemeralMessageSender,
         app_config: AppConfig,
+        ui: &UserInterface,
         init: bool,
         is_host: bool,
         persist: bool,
@@ -144,9 +146,9 @@ impl DocumentActor {
             );
             let bytes = sandbox::read_file(&app_config.base_dir, &persistence_file)
                 .unwrap_or_else(|_| panic!("Could not read file '{}'", persistence_file.display()));
-            Document::load(&bytes)
+            Document::load(&bytes, ui)
         } else {
-            Document::default()
+            Document::default(ui)
         };
         debug!("Loading CRDT document completed.");
 
@@ -157,6 +159,7 @@ impl DocumentActor {
             editor_connections: HashMap::default(),
             ephemeral_states: HashMap::default(),
             app_config,
+            ui: ui.clone(),
             crdt_doc,
             save_fully: true,
         };
@@ -249,7 +252,7 @@ impl DocumentActor {
                         }
                         PatchEffect::FileRemoval(file_path) => {
                             if self.owns(&file_path) {
-                                info!("Removing file {file_path}.");
+                                self.ui.log(&format!("Removing file {file_path}."));
 
                                 sandbox::remove_file(
                                     &self.app_config.base_dir,
@@ -292,9 +295,9 @@ impl DocumentActor {
                                     // modifications to the editors, and these contents should be
                                     // consistent. So we don't need to do anything.
                                 } else {
-                                    info!(
+                                    self.ui.warn(&format!(
                                         "Peer deleted {file_path}, but you have it open in an editor. Bringing back an empty version."
-                                    );
+                                    ));
                                     self.crdt_doc.update_text("", &file_path);
                                 }
                             }
@@ -603,7 +606,7 @@ impl DocumentActor {
                 debug!("Failed to read {abs_path} to check for equal content before writing.");
             }
         } else {
-            info!("Creating file {file_path}.");
+            self.ui.log(&format!("Creating file {file_path}."));
         }
 
         sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
@@ -870,7 +873,13 @@ pub struct DocumentActorHandle {
 }
 
 impl DocumentActorHandle {
-    pub fn new(app_config: &AppConfig, init: bool, is_host: bool, persist: bool) -> Self {
+    pub fn new(
+        app_config: &AppConfig,
+        ui: &UserInterface,
+        init: bool,
+        is_host: bool,
+        persist: bool,
+    ) -> Self {
         // The document task will receive messages on this channel.
         let (doc_message_tx, doc_message_rx) = mpsc::channel(1);
 
@@ -887,6 +896,7 @@ impl DocumentActorHandle {
             doc_changed_ping_tx.clone(),
             ephemeral_message_tx.clone(),
             app_config.clone(),
+            ui,
             init,
             is_host,
             persist,
@@ -963,7 +973,7 @@ impl Daemon {
     ) -> Result<Self> {
         let is_host = app_config.is_host();
 
-        let document_handle = DocumentActorHandle::new(&app_config, init, is_host, persist);
+        let document_handle = DocumentActorHandle::new(&app_config, ui, init, is_host, persist);
 
         let base_dir = &app_config.base_dir;
 
@@ -1111,7 +1121,7 @@ mod tests {
 
         impl DocumentActor {
             // TODO: Refactor, to reuse stuff from DocumentActorHandle constructor.
-            fn setup_for_testing(directory: &TempDir) -> Self {
+            fn setup_for_testing(directory: &TempDir, ui: &UserInterface) -> Self {
                 // The document task will receive messages on this channel.
                 let (_doc_message_tx, doc_message_rx) = mpsc::channel(1);
 
@@ -1131,6 +1141,7 @@ mod tests {
                         base_dir: directory.path().to_path_buf(),
                         ..Default::default()
                     },
+                    ui,
                     true,
                     true,
                     false,
@@ -1162,7 +1173,7 @@ mod tests {
         #[test]
         fn read_contents_from_dir() {
             let dir = setup_filesystem_for_testing();
-            let mut actor = DocumentActor::setup_for_testing(&dir);
+            let mut actor = DocumentActor::setup_for_testing(&dir, ui);
 
             actor.read_current_content_from_dir(true);
 
