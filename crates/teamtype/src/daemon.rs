@@ -411,6 +411,12 @@ impl DocumentActor {
     }
 
     async fn handle_message_from_editor(&mut self, editor_id: EditorId, message: IncomingMessage) {
+        // A failed send removes the editor while its later messages may still be queued; a live
+        // trial crashed the daemon this way when a client disconnected right after its requests.
+        if !self.editor_connections.contains_key(&editor_id) {
+            debug!("Ignoring message from removed editor #{editor_id}.");
+            return;
+        }
         match message {
             IncomingMessage::Request { id, payload } => {
                 let result = self.react_to_message_from_editor(editor_id, &payload).await;
@@ -549,10 +555,9 @@ impl DocumentActor {
     }
 
     async fn send_to_editor_client(&mut self, editor_id: &EditorId, message: OutgoingMessage) {
-        let connection = self
-            .editor_connections
-            .get_mut(editor_id)
-            .expect("Could not get editor handle");
+        let Some(connection) = self.editor_connections.get_mut(editor_id) else {
+            return;
+        };
 
         connection.1.send(message).await.unwrap_or_else(|err| {
             error!("Failed to send message to editor: {err} Removing editor.");
@@ -778,11 +783,10 @@ impl DocumentActor {
         messages: Vec<ComponentMessage>,
     ) -> Vec<EditorProtocolMessageToEditor> {
         let mut all_responses = vec![];
-        let connection = &mut self
-            .editor_connections
-            .get_mut(&editor_id)
-            .expect("Could not get editor connection")
-            .0;
+        // A failed send while handling this editor's message may have removed it.
+        let Some((connection, _)) = self.editor_connections.get_mut(&editor_id) else {
+            return all_responses;
+        };
 
         for message in messages {
             let mut responses = connection.message_from_inside(&message);
