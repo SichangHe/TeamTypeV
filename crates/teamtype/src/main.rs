@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     // will go away but the remote networking connections would stay up! This is a fundamental issue
     // with the daemon module and merits refactoring so the long running socket and network
     // listeners properly listen to the mpsc channel or receive and process a cancellation token.
-    let _handle = match cli.command {
+    let daemon = match cli.command {
         Commands::Client => return run_client(directory.clone()).await,
         Commands::AgentEdit {
             file,
@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
     }?;
 
     trap_shutdown().await;
+    daemon.document_handle.persist_and_stop().await;
 
     Ok(())
 }
