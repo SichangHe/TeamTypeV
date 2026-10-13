@@ -7,6 +7,7 @@
 # with the real plugin per daemon. Everyone types into one file at once; agent command line edits
 # follow; then a joiner and the sharer each drop out and return while the others keep typing,
 # once by a clean stop and once with the daemon killed by SIGKILL under its running editor.
+# `SEPARATE_NETWORKS=1` (needs `docker`) puts each daemon on a network of its own.
 # Needs `nvim`, `python3`, and a built `teamtype` (`cargo build -p teamtype`); `N_ROUNDS` sets
 # the lines each person types per phase.
 # Prints only failures; exit status 0 means every check passed.
@@ -17,12 +18,22 @@ n_rounds=${N_ROUNDS:-20}
 all_people=(a b c d e f g h)
 people=("${all_people[@]:0:${N_PEOPLE:-4}}")
 sharer=a
+# With `SEPARATE_NETWORKS=1` each daemon runs in a docker container on a network of its own, so
+# daemons cannot reach each other directly; the editors stay on the host.
+separate_networks=${SEPARATE_NETWORKS:-}
+image=silex/emacs:29
 joiner=${people[-1]}
 work=$(mktemp -d "${TMPDIR:-/tmp}/teamtype-live.XXXXXX")
 declare -A daemon_pid nvim_pid
 n_failures=0
 cleanup() {
     kill "${daemon_pid[@]}" "${nvim_pid[@]}" 2>/dev/null
+    if [ -n "$separate_networks" ]; then
+        for person in "${people[@]}"; do
+            docker rm -f "$(container "$person")" >/dev/null 2>&1
+            docker network rm "$(container "$person")" >/dev/null 2>&1
+        done
+    fi
     wait 2>/dev/null
     [ "$n_failures" -eq 0 ] && rm -rf "$work" || echo "kept $work" >&2
 }
@@ -42,8 +53,28 @@ eventually() {
 start_daemon() {
     local command=(join)
     [ "$1" = "$sharer" ] && command=(share --no-join-code --show-secret-address)
-    (cd "$work/$1" && exec "$TEAMTYPE_BINARY" "${command[@]}" >>"$work/$1.log" 2>&1) &
+    if [ -n "$separate_networks" ]; then
+        docker network create "$(container "$1")" >/dev/null 2>&1
+        command=(docker run --rm --name "$(container "$1")" --network "$(container "$1")"
+            --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work" -w "$work/$1"
+            -v "$TEAMTYPE_BINARY:/usr/local/bin/teamtype:ro" "$image" teamtype "${command[@]}")
+    else
+        command=("$TEAMTYPE_BINARY" "${command[@]}")
+    fi
+    (cd "$work/$1" && exec "${command[@]}" >>"$work/$1.log" 2>&1) &
     daemon_pid[$1]=$!
+}
+container() {
+    echo "teamtype-live-$$-$1"
+}
+# Send SIGNAL to PERSON's daemon and wait for it to end.
+stop_daemon() {
+    if [ -n "$separate_networks" ]; then
+        docker kill -s "$2" "$(container "$1")" >/dev/null
+    else
+        kill "-$2" "${daemon_pid[$1]}"
+    fi
+    wait "${daemon_pid[$1]}" 2>/dev/null
 }
 start_nvim() {
     (cd "$work/$1" && exec nvim --headless --clean -n --listen "$work/$1.nvim" \
@@ -55,11 +86,11 @@ start_nvim() {
 # daemon with SIGKILL under the running editor, which must then tell its user and refuse edits.
 drop() {
     if [ "$2" = killed ]; then
-        kill -9 "${daemon_pid[$1]}" && wait "${daemon_pid[$1]}" 2>/dev/null
+        stop_daemon "$1" KILL
         eventually nvim_says_disconnected "$1" || fail "Neovim $1 did not report its daemon's death"
     fi
     kill "${nvim_pid[$1]}" && wait "${nvim_pid[$1]}"
-    [ "$2" = clean ] && kill "${daemon_pid[$1]}" && wait "${daemon_pid[$1]}"
+    [ "$2" = clean ] && stop_daemon "$1" TERM
     rm -f "$work/$1.nvim" "$work/$1/.teamtype/socket"
 }
 nvim_says_disconnected() {
