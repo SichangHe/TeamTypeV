@@ -77,4 +77,17 @@ pub enum Commands {
     },
     /// Open a JSON-RPC connection to the Teamtype daemon on stdin/stdout. Used by text editor plugins.
     Client,
+    /// Edit a file through the running daemon, only if the file still has the content the caller
+    /// last read. For command line tools such as coding agents.
+    AgentEdit {
+        /// File path relative to the shared directory.
+        #[arg(long)]
+        file: PathBuf,
+        /// Exact content the caller last read.
+        #[arg(long)]
+        expected: String,
+        /// Content to write if the file still equals `expected`.
+        #[arg(long)]
+        replacement: String,
+    },
 }

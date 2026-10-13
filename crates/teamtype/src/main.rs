@@ -28,6 +28,7 @@ use tracing::{debug, info, warn};
 
 use self::cli::{Cli, Commands, ShareJoinFlags};
 
+mod agent_edit;
 mod cli;
 
 fn has_ethersync_directory(dir: &Path) -> bool {
@@ -73,6 +74,11 @@ async fn main() -> Result<()> {
     // listeners properly listen to the mpsc channel or receive and process a cancellation token.
     let _handle = match cli.command {
         Commands::Client => return run_client(directory.clone()).await,
+        Commands::AgentEdit {
+            file,
+            expected,
+            replacement,
+        } => return agent_edit::run(&directory, &file, expected, &replacement).await,
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
             run_daemon(join_config, false).await
@@ -263,7 +269,7 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
                 Ok(None)
             }
         }
-        Commands::Client => Ok(None),
+        Commands::Client | Commands::AgentEdit { .. } => Ok(None),
     }
 }
 
