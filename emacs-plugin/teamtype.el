@@ -86,8 +86,8 @@ Returns a cons (LINE . CHARACTER)."
          (connection (make-instance 'jsonrpc-process-connection
                                     :process process
                                     :notification-dispatcher #'teamtype--handle-notification
-                                    :on-shutdown (lambda (_conn)
-                                                   (message "Teamtype connection closed"))))
+                                    :on-shutdown `(lambda (_conn)
+                                                    (teamtype--daemon-lost ,root-dir))))
          (client (list :root-dir root-dir
                        :process process
                        :connection connection
@@ -95,6 +95,17 @@ Returns a cons (LINE . CHARACTER)."
     (push client teamtype--clients)
     (message "Connected to Teamtype daemon in %s" root-dir)
     client))
+
+(defun teamtype--daemon-lost (root-dir)
+  "Tell the user the daemon for ROOT-DIR is gone and stop edits that would not be shared."
+  (setq teamtype--clients
+        (cl-remove-if (lambda (c) (string= (plist-get c :root-dir) root-dir)) teamtype--clients))
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and teamtype--client (string= (plist-get teamtype--client :root-dir) root-dir))
+        (setq-local teamtype--client nil)
+        (setq buffer-read-only t))))
+  (message "Connection to Teamtype daemon in %s lost. Restart the daemon, then reopen the files." root-dir))
 
 ;;; File Operations
 

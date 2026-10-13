@@ -5,7 +5,8 @@
 #
 # Live trial: a real Emacs (docker image `silex/emacs:29`) on a joining daemon and a headless
 # Neovim on the sharing daemon type into one file at once; both buffers must end up equal and
-# hold every typed line. Usage: emacs-plugin/test.sh [path/to/teamtype]
+# hold every typed line; then Emacs must report its daemon being killed.
+# Usage: emacs-plugin/test.sh [path/to/teamtype]
 # Prints only failures; exit status 0 means every check passed.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -78,6 +79,8 @@ cat >"$work/driver.el" <<'EOF'
     (message "DRIVER: %d of %d typed lines arrived" (n-typed-lines) (* 2 n-rounds))
     (kill-emacs 3)))
 (write-region (buffer-string) nil (work-file "emacs.buffer"))
+(unless (wait-for (lambda () buffer-read-only) 60)
+  (message "DRIVER: the daemon's death did not make the buffer read-only") (kill-emacs 4))
 (kill-emacs 0)
 EOF
 # Emacs runs as the invoking user; the work directory keeps its path because the daemon
@@ -93,7 +96,11 @@ touch "$work/go"
 for round in $(seq "$n_rounds"); do
     nvim_expr "nvim_buf_set_lines(0, 1, 1, 0, ['a-$round'])" >/dev/null
 done
-wait "$emacs_pid" || fail "Emacs did not receive every typed line"
+eventually test -e "$work/emacs.buffer" || fail "Emacs did not receive every typed line"
 eventually buffers_agree || fail "Emacs and Neovim buffers differ"
+# Emacs must notice its daemon dying under it and refuse further edits.
+kill -9 "${pids[1]}"
+wait "$emacs_pid" || fail "Emacs did not react to its daemon's death"
+grep -q 'Connection to Teamtype daemon .* lost' "$work/emacs.log" || fail "Emacs did not report the lost daemon"
 [ "$(grep -c '^[ae]-[0-9]*$' "$work/emacs.buffer")" -eq $((2 * n_rounds)) ] ||
     fail "typed lines are missing"
