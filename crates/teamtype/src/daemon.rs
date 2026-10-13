@@ -361,23 +361,23 @@ impl DocumentActor {
     /// restarts with a document at least as new as its files. With files newer than the document,
     /// the daemon shared their text again and a live trial showed duplicated lines for everyone.
     fn persist(&mut self) {
-    let persistence_file = self.app_config.base_dir.join(".teamtype/doc");
-    if self.save_fully {
-        debug!("Persisting CRDT document fully.");
-        let bytes = self.crdt_doc.save();
-        sandbox::write_file(&self.app_config.base_dir, &persistence_file, &bytes)
-            .unwrap_or_else(|_| {
-                panic!("Failed to persist to '{}'", persistence_file.display())
-            });
-        self.save_fully = false;
-    } else {
-        debug!("Persisting CRDT document incrementally.");
-        let bytes = self.crdt_doc.save_incremental();
-        sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes)
-            .unwrap_or_else(|_| {
-                panic!("Failed to persist to '{}'", persistence_file.display())
-            });
-    }
+        let persistence_file = self.app_config.base_dir.join(".teamtype/doc");
+        if self.save_fully {
+            debug!("Persisting CRDT document fully.");
+            let bytes = self.crdt_doc.save();
+            sandbox::write_file(&self.app_config.base_dir, &persistence_file, &bytes)
+                .unwrap_or_else(|_| {
+                    panic!("Failed to persist to '{}'", persistence_file.display())
+                });
+            self.save_fully = false;
+        } else {
+            debug!("Persisting CRDT document incrementally.");
+            let bytes = self.crdt_doc.save_incremental();
+            sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes)
+                .unwrap_or_else(|_| {
+                    panic!("Failed to persist to '{}'", persistence_file.display())
+                });
+        }
     }
 
     fn absolute_path_for_file_path(&self, file_path: &RelativePath) -> AbsolutePath {

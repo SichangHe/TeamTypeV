@@ -84,10 +84,16 @@ pub enum Commands {
         #[arg(long)]
         file: PathBuf,
         /// Exact content the caller last read.
-        #[arg(long)]
-        expected: String,
-        /// Content to write if the file still equals `expected`.
-        #[arg(long)]
-        replacement: String,
+        #[arg(long, required_unless_present = "expected_file")]
+        expected: Option<String>,
+        /// File holding the content the caller last read, for content too large for an argument.
+        #[arg(long, conflicts_with = "expected")]
+        expected_file: Option<PathBuf>,
+        /// Content to write if the file still equals the expected content.
+        #[arg(long, required_unless_present = "replacement_file")]
+        replacement: Option<String>,
+        /// File holding the content to write.
+        #[arg(long, conflicts_with = "replacement")]
+        replacement_file: Option<PathBuf>,
     },
 }

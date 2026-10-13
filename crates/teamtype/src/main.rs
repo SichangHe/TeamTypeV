@@ -77,8 +77,21 @@ async fn main() -> Result<()> {
         Commands::AgentEdit {
             file,
             expected,
+            expected_file,
             replacement,
-        } => return agent_edit::run(&directory, &file, expected, &replacement).await,
+            replacement_file,
+        } => {
+            let [expected, replacement] =
+                [(expected, expected_file), (replacement, replacement_file)].map(|(text, path)| {
+                    match (text, path) {
+                        (Some(text), _) => Ok(text),
+                        (None, Some(path)) => std::fs::read_to_string(&path)
+                            .with_context(|| format!("Could not read {}", path.display())),
+                        (None, None) => bail!("Missing content for the agent edit"),
+                    }
+                });
+            return agent_edit::run(&directory, &file, expected?, &replacement?).await;
+        }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
             run_daemon(join_config, false).await

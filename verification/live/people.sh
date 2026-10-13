@@ -178,7 +178,10 @@ eventually buffers_agree_with '^[a-h]-[0-9]*$' "$n_lines" || {
 # a stale snapshot changes nothing.
 agent_edit b agent.txt $'v1\n' $'v2\n' || fail "agent edit in a joining directory was rejected"
 eventually files_agree agent.txt v2 || fail "agent edit from a joiner did not reach the others"
-agent_edit "$sharer" agent.txt $'v2\n' $'v3\n' || fail "agent edit in the sharing directory was rejected"
+printf 'v2\n' >"$work/expected" && printf 'v3\n' >"$work/replacement"
+"$TEAMTYPE_BINARY" agent-edit --directory "$work/$sharer" --file agent.txt \
+    --expected-file "$work/expected" --replacement-file "$work/replacement" 2>>"$work/agent.log" ||
+    fail "agent edit in the sharing directory, with content from files, was rejected"
 eventually files_agree agent.txt v3 || fail "agent edit from the sharer did not reach the others"
 agent_edit c agent.txt $'v1\n' $'lost\n' && fail "agent edit with a stale snapshot was accepted"
 agent_edit c missing.txt old new && fail "agent edit to a missing file was accepted"
