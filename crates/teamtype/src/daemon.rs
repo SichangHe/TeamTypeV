@@ -13,7 +13,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use automerge::ChangeHash;
 use automerge::{
     Patch,
@@ -48,6 +48,11 @@ use crate::types::{
 use crate::watcher::WatcherEvent;
 use crate::watcher::{Watcher, WatcherEventType};
 use crate::wormhole::put_secret_address_into_wormhole;
+
+// 🧑 "make it work for three or more people reliably"
+/// One failed address lookup must not end a join: a live three-daemon trial lost a joiner that way.
+const INITIAL_CONNECT_ATTEMPTS: usize = 5;
+const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub const TEST_FILE_PATH: &str = "text";
 
@@ -998,10 +1003,15 @@ impl Daemon {
                 .await;
         }
         if let Some(config::Peer::SecretAddress(ref secret_address)) = app_config.peer {
-            connection_manager
-                .connect(secret_address.clone())
-                .await
-                .context("Failed to connect to specified peer")?;
+            let mut n_attempts_left = INITIAL_CONNECT_ATTEMPTS;
+            while let Err(err) = connection_manager.connect(secret_address.clone()).await {
+                n_attempts_left -= 1;
+                if n_attempts_left == 0 {
+                    return Err(err.context("Failed to connect to specified peer"));
+                }
+                warn!("Could not connect to specified peer, retrying: {err:#}");
+                sleep(INITIAL_CONNECT_RETRY_DELAY).await;
+            }
         }
 
         Ok(Self {
