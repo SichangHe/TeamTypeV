@@ -120,7 +120,14 @@ impl Document {
                         .insert(file_text_delta.file_path, Content::String(new_text));
                 }
                 PatchEffect::FileRemoval(path) => {
-                    self.files.remove(&path);
+                    // A removal is also reported when a peer's file of the same name replaced
+                    // ours. That file starts empty and later patches fill it; without an entry
+                    // here an empty one would be missing from the cache but present in the doc.
+                    if self.text_obj(&path).is_ok() {
+                        self.files.insert(path, Content::String(String::new()));
+                    } else {
+                        self.files.remove(&path);
+                    }
                 }
                 PatchEffect::FileBytes(path, bytes) => {
                     self.files.insert(path, Content::Bytes(bytes));

@@ -252,7 +252,11 @@ impl DocumentActor {
                             file_deltas.push(file_text_delta);
                         }
                         PatchEffect::FileRemoval(file_path) => {
-                            if self.owns(&file_path) {
+                            if self.owns(&file_path) && self.crdt_doc.file_exists(&file_path) {
+                                // A peer's file of the same name replaced ours; no further
+                                // patch arrives for it if it is empty.
+                                self.write_file(&file_path);
+                            } else if self.owns(&file_path) {
                                 info!("Removing file {file_path}.");
 
                                 sandbox::remove_file(
