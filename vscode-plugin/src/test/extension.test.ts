@@ -90,4 +90,54 @@ suite("Extension Test Suite", () => {
         fs.writeFileSync(fileB, readB() + "written-in-b\n")
         await waitFor("daemon B's change appears in VS Code", () => doc.getText().includes("written-in-b"))
     })
+    test("VS Code and a Neovim on the second daemon type at once", async function () {
+        this.timeout(240000)
+        const nRounds = 20
+        const doc = await vscode.workspace.openTextDocument(path.join(dirA, "file.txt"))
+        const editor = await vscode.window.showTextDocument(doc)
+        const nvimSocket = path.join(root, "b.nvim")
+        const nvimPlugin = path.resolve(__dirname, "../../../nvim-plugin")
+        daemons.push(
+            cp.spawn(
+                "nvim",
+                ["--headless", "--clean", "-n", "--listen", nvimSocket, "--cmd", `set runtimepath^=${nvimPlugin}`, "file.txt"],
+                {cwd: dirB, stdio: "ignore", env: {...process.env, TEAMTYPE_BINARY: bin}},
+            ),
+        )
+        await waitFor("Neovim starts", () => fs.existsSync(nvimSocket))
+        const nvimExpr = (expr: string) =>
+            new Promise<string>((resolve, reject) =>
+                cp.execFile("nvim", ["--server", nvimSocket, "--remote-expr", expr], (error, stdout) =>
+                    error ? reject(error) : resolve(stdout),
+                ),
+            )
+        await sleep(2000)
+
+        const typeInNvim = async () => {
+            for (let round = 0; round < nRounds; round++) {
+                await nvimExpr(`nvim_buf_set_lines(0, 1, 1, 0, ['n-${round}'])`)
+            }
+        }
+        const typeInVscode = async () => {
+            for (let round = 0; round < nRounds; round++) {
+                while (!(await editor.edit((e) => e.insert(new vscode.Position(1, 0), `v-${round}\n`)))) {
+                    await sleep(10)
+                }
+                await sleep(20)
+            }
+        }
+        await Promise.all([typeInNvim(), typeInVscode()])
+
+        const count = (pattern: RegExp) => (doc.getText().match(pattern) ?? []).length
+        await waitFor("VS Code holds every line typed in both editors", () => {
+            return count(/^n-\d+$/gm) === nRounds && count(/^v-\d+$/gm) === nRounds
+        })
+        let nvimText = ""
+        const deadline = Date.now() + 60000
+        while (nvimText !== doc.getText()) {
+            assert.ok(Date.now() < deadline, "Neovim buffer and VS Code document differ")
+            await sleep(200)
+            nvimText = await nvimExpr('join(getline(1, "$"), "\\n") .. "\\n"')
+        }
+    })
 })
