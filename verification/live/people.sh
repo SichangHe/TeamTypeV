@@ -5,7 +5,8 @@
 #
 # Live trial: `N_PEOPLE` (default 4, at least 3) `teamtype` daemon processes, one headless Neovim
 # with the real plugin per daemon. Everyone types into one file at once; agent command line edits
-# follow; then a joiner and the sharer each drop out and return while the others keep typing.
+# follow; then a joiner and the sharer each drop out and return while the others keep typing,
+# once by a clean stop and once with the daemon killed by SIGKILL under its running editor.
 # Needs `nvim`, `python3`, and a built `teamtype` (`cargo build -p teamtype`); `N_ROUNDS` sets
 # the lines each person types per phase.
 # Prints only failures; exit status 0 means every check passed.
@@ -50,11 +51,20 @@ start_nvim() {
     nvim_pid[$1]=$!
     eventually test -S "$work/$1.nvim" || fail "Neovim $1 did not start"
 }
-# The editor leaves first so that its daemon writes the file to disk.
+# `drop PERSON clean` closes the editor and then stops the daemon. `drop PERSON killed` kills the
+# daemon with SIGKILL under the running editor, which must then tell its user and refuse edits.
 drop() {
+    if [ "$2" = killed ]; then
+        kill -9 "${daemon_pid[$1]}" && wait "${daemon_pid[$1]}" 2>/dev/null
+        eventually nvim_says_disconnected "$1" || fail "Neovim $1 did not report its daemon's death"
+    fi
     kill "${nvim_pid[$1]}" && wait "${nvim_pid[$1]}"
-    kill "${daemon_pid[$1]}" && wait "${daemon_pid[$1]}"
-    rm -f "$work/$1.nvim"
+    [ "$2" = clean ] && kill "${daemon_pid[$1]}" && wait "${daemon_pid[$1]}"
+    rm -f "$work/$1.nvim" "$work/$1/.teamtype/socket"
+}
+nvim_says_disconnected() {
+    [ "$(nvim_expr "$1" '&modifiable')" = 0 ] &&
+        grep -q 'Connection to Teamtype daemon lost' "$work/$1.nvim.log"
 }
 rejoin() {
     start_daemon "$1"
@@ -162,26 +172,32 @@ buffers_agree_with '^agent-line$' 1 || fail "stale agent edit changed the editor
 [ "$(grep -c 'file changed since the supplied snapshot' "$work/agent.log")" -ge 2 ] ||
     fail "stale agent edits were not rejected for being stale"
 
-# One person drops out mid-edit and returns: first a joiner, then the sharer, through whom the
-# others reach each other. The rest type before, during, and after the absence.
+# One person drops out mid-edit and returns: a joiner, then the sharer, through whom the others
+# reach each other; each once cleanly and once with the daemon killed. The rest type before,
+# during, and after the absence. Every line must end up in every buffer exactly once.
 for dropped in "$joiner" "$sharer"; do
-    for person in "${people[@]}"; do
-        [ "$person" = "$dropped" ] || type_lines "$person" "while-$dropped-away-$person"
+    for how in clean killed; do
+        for person in "${people[@]}"; do
+            [ "$person" = "$dropped" ] || type_lines "$person" "while-$dropped-$how-$person"
+        done
+        sleep 0.3
+        drop "$dropped" "$how"
+        finish_typing
+        rejoin "$dropped"
+        type_lines "$dropped" "$dropped-back-$how"
+        finish_typing
+        n_lines=$(((${#people[@]} - 1) * n_rounds))
+        eventually buffers_agree_with "^while-$dropped-$how-[a-h]-[0-9]*\$" "$n_lines" || {
+            fail "lines typed while $dropped was away ($how) did not reach everyone exactly once"
+            dump_buffers
+        }
+        eventually buffers_agree_with "^$dropped-back-$how-[0-9]*\$" "$n_rounds" ||
+            fail "lines typed by $dropped after returning ($how) did not reach everyone"
     done
-    sleep 0.3
-    drop "$dropped"
-    finish_typing
-    rejoin "$dropped"
-    type_lines "$dropped" "$dropped-back"
-    finish_typing
-    n_lines=$(((${#people[@]} - 1) * n_rounds))
-    eventually buffers_agree_with "^while-$dropped-away-[a-h]-[0-9]*\$" "$n_lines" || {
-        fail "lines typed while $dropped was away did not reach everyone"
-        dump_buffers
-    }
-    eventually buffers_agree_with "^$dropped-back-[0-9]*\$" "$n_rounds" ||
-        fail "lines typed by $dropped after returning did not reach everyone"
 done
+n_lines=$((1 + ${#people[@]} * n_rounds + n_rounds + 1 + 4 * ${#people[@]} * n_rounds))
+[ "$(buffer "$sharer" | grep -c '')" -eq "$n_lines" ] ||
+    fail "the file holds $(buffer "$sharer" | grep -c '') lines, not the $n_lines typed"
 
 # An editor that vanishes with requests still queued must not take its daemon down.
 python3 - "$work/c" <<'PYTHON'

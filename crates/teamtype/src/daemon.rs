@@ -67,10 +67,6 @@ pub enum DocMessage {
     FromWatcher(WatcherEvent),
     RescanFiles,
     Persist,
-    /// Saves the document, answers, and handles no further message.
-    PersistAndStop {
-        response_tx: oneshot::Sender<()>,
-    },
     RandomEdit,
     ReceiveSyncMessage {
         message: AutomergeSyncMessage,
@@ -95,7 +91,6 @@ impl fmt::Debug for DocMessage {
             Self::FromWatcher(e) => format!("FromWatcher({e:?}"),
             Self::RescanFiles => "RescanFiles".to_string(),
             Self::Persist => "Persist".to_string(),
-            Self::PersistAndStop { .. } => "PersistAndStop".to_string(),
             Self::RandomEdit => "RandomEdit".to_string(),
             Self::ReceiveSyncMessage { .. } => "ReceiveSyncMessage".to_string(),
             Self::GenerateSyncMessage { .. } => "GenerateSyncMessage".to_string(),
@@ -127,6 +122,7 @@ pub struct DocumentActor {
     crdt_doc: Document,
     app_config: AppConfig,
     save_fully: bool,
+    persist: bool,
 }
 
 impl DocumentActor {
@@ -168,6 +164,7 @@ impl DocumentActor {
             app_config,
             crdt_doc,
             save_fully: true,
+            persist,
         };
 
         if persistence_file_exists && persist {
@@ -220,12 +217,6 @@ impl DocumentActor {
                 self.read_current_content_from_dir(false);
             }
             DocMessage::Persist => self.persist(),
-            DocMessage::PersistAndStop { response_tx } => {
-                self.persist();
-                let _ = response_tx.send(());
-                // Handling anything after the save would write files the saved document lacks.
-                std::future::pending::<()>().await;
-            }
             DocMessage::ReceiveSyncMessage {
                 message,
                 state: mut peer_state,
@@ -365,24 +356,28 @@ impl DocumentActor {
         }
     }
 
+    // 🧑 "make it work for three or more people reliably"
+    /// Saves the document. Runs before every file write, so that a daemon killed at any moment
+    /// restarts with a document at least as new as its files. With files newer than the document,
+    /// the daemon shared their text again and a live trial showed duplicated lines for everyone.
     fn persist(&mut self) {
-        let persistence_file = self.app_config.base_dir.join(".teamtype/doc");
-        if self.save_fully {
-            debug!("Persisting CRDT document fully.");
-            let bytes = self.crdt_doc.save();
-            sandbox::write_file(&self.app_config.base_dir, &persistence_file, &bytes)
-                .unwrap_or_else(|_| {
-                    panic!("Failed to persist to '{}'", persistence_file.display())
-                });
-            self.save_fully = false;
-        } else {
-            debug!("Persisting CRDT document incrementally.");
-            let bytes = self.crdt_doc.save_incremental();
-            sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes)
-                .unwrap_or_else(|_| {
-                    panic!("Failed to persist to '{}'", persistence_file.display())
-                });
-        }
+    let persistence_file = self.app_config.base_dir.join(".teamtype/doc");
+    if self.save_fully {
+        debug!("Persisting CRDT document fully.");
+        let bytes = self.crdt_doc.save();
+        sandbox::write_file(&self.app_config.base_dir, &persistence_file, &bytes)
+            .unwrap_or_else(|_| {
+                panic!("Failed to persist to '{}'", persistence_file.display())
+            });
+        self.save_fully = false;
+    } else {
+        debug!("Persisting CRDT document incrementally.");
+        let bytes = self.crdt_doc.save_incremental();
+        sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes)
+            .unwrap_or_else(|_| {
+                panic!("Failed to persist to '{}'", persistence_file.display())
+            });
+    }
     }
 
     fn absolute_path_for_file_path(&self, file_path: &RelativePath) -> AbsolutePath {
@@ -582,7 +577,7 @@ impl DocumentActor {
         });
     }
 
-    fn write_files_changed_in_file_deltas(&self, file_deltas: &[FileTextDelta]) {
+    fn write_files_changed_in_file_deltas(&mut self, file_deltas: &[FileTextDelta]) {
         // Collect file paths into a set, so we don't write files multiple times on complex
         // patches.
         let mut file_paths = HashSet::new();
@@ -595,10 +590,10 @@ impl DocumentActor {
         }
     }
 
-    fn write_file(&self, file_path: &RelativePath) {
+    fn write_file(&mut self, file_path: &RelativePath) {
         if let Some(document::Content::String(text)) = self.current_file_content(file_path) {
-            let bytes = text.as_bytes();
-            self.ensure_file_has_bytes(file_path, bytes);
+            let bytes = text.clone().into_bytes();
+            self.ensure_file_has_bytes(file_path, &bytes);
         } else {
             warn!(
                 "Failed to get content of file '{file_path}' when writing to disk. Key should have existed?"
@@ -606,7 +601,7 @@ impl DocumentActor {
         }
     }
 
-    fn ensure_file_has_bytes(&self, file_path: &RelativePath, bytes: &[u8]) {
+    fn ensure_file_has_bytes(&mut self, file_path: &RelativePath, bytes: &[u8]) {
         let abs_path = self.absolute_path_for_file_path(file_path);
         if sandbox::exists(&self.app_config.base_dir, &abs_path)
             .expect("Failed to check for file existence before writing to it")
@@ -632,6 +627,9 @@ impl DocumentActor {
             info!("Creating file {file_path}.");
         }
 
+        if self.persist {
+            self.persist();
+        }
         sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
             .unwrap_or_else(|err| panic!("Failed to write to file {abs_path}: {err}"));
     }
@@ -951,19 +949,6 @@ impl DocumentActorHandle {
         // Ignore send errors, because recv.await will fail anyway.
         let _ = self.doc_message_tx.send(message).await;
         recv.await.expect("DocumentActor task has been killed")
-    }
-
-    // 🧑 "make it work for three or more people reliably"
-    /// Saves the document, stops handling messages, and returns once the document is on disk.
-    ///
-    /// Call before exit: files are written at once but the document is saved up to a second
-    /// later. A daemon that restarts with files newer than its document shares their text again,
-    /// which a live trial showed as duplicated lines for everyone.
-    pub async fn persist_and_stop(&self) {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.send_message(DocMessage::PersistAndStop { response_tx })
-            .await;
-        let _ = response_rx.await;
     }
 
     pub async fn apply_random_delta(&self) {
