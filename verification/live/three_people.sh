@@ -5,7 +5,7 @@
 #
 # Live trial: three `teamtype` daemon processes, one headless Neovim with the real plugin per
 # daemon, all typing into one file at once, then agent command line edits.
-# Needs `nvim` and a built `teamtype` (`cargo build -p teamtype`); set `N_ROUNDS` to type more.
+# Needs `nvim`, `python3`, and a built `teamtype` (`cargo build -p teamtype`); set `N_ROUNDS` to type more.
 # Prints only failures; exit status 0 means every check passed.
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -129,5 +129,26 @@ sleep 1
 buffers_agree_with '^agent-line$' 1 || fail "stale agent edit changed the editor-open file"
 [ "$(grep -c 'file changed since the supplied snapshot' "$work/agent.log")" -ge 2 ] ||
     fail "stale agent edits were not rejected for being stale"
+
+# An editor that vanishes with requests still queued must not take its daemon down.
+python3 - "$work/c" <<'PYTHON'
+import json, socket, sys
+directory = sys.argv[1]
+uri = f"file://{directory}/shared.txt"
+requests = [{"jsonrpc": "2.0", "id": 1, "method": "open", "params": {"uri": uri, "content": ""}}]
+requests += [
+    {"jsonrpc": "2.0", "id": i, "method": "cursor", "params": {"uri": uri, "ranges": []}}
+    for i in range(2, 200)
+]
+client = socket.socket(socket.AF_UNIX)
+client.connect(f"{directory}/.teamtype/socket")
+client.sendall("".join(json.dumps(request) + "\n" for request in requests).encode())
+client.close()
+PYTHON
+nvim_expr a "nvim_buf_set_lines(0, 1, 1, 0, ['after-vanish'])" >/dev/null
+eventually buffers_agree_with '^after-vanish$' 1 || fail "editing stopped after an editor vanished"
+for index in 0 1 2; do
+    kill -0 "${pids[$index]}" 2>/dev/null || fail "daemon ${people[$index]} died"
+done
 
 exit "$((n_failures > 0))"
