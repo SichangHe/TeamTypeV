@@ -86,6 +86,26 @@ suite("Extension Test Suite", () => {
         await waitFor("Emacs tracks the file", async () => (await emacsEval("(and teamtype--client t)")) === "t")
     }
     const stopEmacs = () => run("docker", ["rm", "-f", emacsContainer()])
+    const stopChild = (child: cp.ChildProcess) => {
+        if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+        return new Promise<void>((resolve) => {
+            let settled = false
+            const finish = () => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                resolve()
+            }
+            const timer = setTimeout(() => {
+                child.kill("SIGKILL")
+                finish()
+            }, 5000)
+            child.once("close", finish)
+            child.once("exit", finish)
+            child.once("error", finish)
+            child.kill()
+        })
+    }
     /** Evaluates `expr` in the Emacs buffer of the shared file and returns its printed value. */
     const emacsEval = async (expr: string) => {
         const n = nEmacsCommands++
@@ -158,7 +178,7 @@ suite("Extension Test Suite", () => {
     suiteTeardown(async function () {
         this.timeout(30000)
         await stopEmacs().catch(() => undefined)
-        children.forEach((child) => child.kill())
+        await Promise.all(children.map(stopChild))
         fs.rmSync(root, {recursive: true, force: true})
     })
 

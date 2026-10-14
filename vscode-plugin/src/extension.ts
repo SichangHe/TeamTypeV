@@ -529,7 +529,13 @@ export function activate(context: vscode.ExtensionContext) {
     debug("End of activation")
 }
 
-export function deactivate() {}
+export function deactivate() {
+    clients.forEach((client) => {
+        client.connection.dispose()
+        client.process.kill()
+    })
+    clients = []
+}
 
 function debug(text: string) {
     // Disabled because we don't need it right now.

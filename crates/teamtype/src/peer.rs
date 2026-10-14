@@ -114,6 +114,7 @@ impl ConnectionManager {
                 secret_address: SecretAddress::from_str(&secret_address)?,
                 response_tx: Some(response_tx),
                 previous_attempts: 0,
+                generation: None,
             })
             .await
             .expect("EndpointActor task has been killed");
@@ -231,6 +232,8 @@ enum EndpointMessage {
         response_tx: Option<oneshot::Sender<Result<()>>>,
         // How many times have we already attempted to connect?
         previous_attempts: usize,
+        // Reconnects from an older connection must not replace a newer one.
+        generation: Option<u64>,
     },
 }
 
@@ -243,6 +246,8 @@ struct EndpointActor {
     document_handle: DocumentActorHandle,
     my_passphrase: SecretKey,
     peer_tasks: HashMap<PublicKey, JoinHandle<()>>,
+    peer_generations: HashMap<PublicKey, u64>,
+    next_generation: u64,
 }
 
 impl EndpointActor {
@@ -260,6 +265,8 @@ impl EndpointActor {
             document_handle,
             my_passphrase,
             peer_tasks: HashMap::new(),
+            peer_generations: HashMap::new(),
+            next_generation: 0,
         }
     }
 
@@ -269,7 +276,16 @@ impl EndpointActor {
                 secret_address,
                 response_tx,
                 previous_attempts,
+                generation,
             } => {
+                let peer_id = secret_address.endpoint_addr.id;
+                if let Some(generation) = generation
+                    && self.peer_generations.get(&peer_id) != Some(&generation)
+                {
+                    debug!("Ignoring stale reconnect attempt for peer {peer_id}.");
+                    return Ok(());
+                }
+                let generation = self.start_peer_generation(peer_id);
                 let endpoint_addr = secret_address.endpoint_addr.clone();
                 let connect_result = self.endpoint.connect(endpoint_addr, ALPN).await;
                 let conn = match connect_result {
@@ -280,13 +296,22 @@ impl EndpointActor {
                                 .send(Err(err.into()))
                                 .expect("Connect receiver dropped");
                         }
-                        Self::reconnect(self.message_tx.clone(), secret_address, previous_attempts)
-                            .await
-                            .expect("Failed to initiate reconnection");
+                        Self::reconnect(
+                            self.message_tx.clone(),
+                            secret_address,
+                            previous_attempts,
+                            generation,
+                        )
+                        .await
+                        .expect("Failed to initiate reconnection");
                         // Not really Ok, but Ok enough.
                         return Ok(());
                     }
                 };
+                if self.peer_generations.get(&peer_id) != Some(&generation) {
+                    debug!("Dropping superseded connection to peer {peer_id}.");
+                    return Ok(());
+                }
 
                 info!("Connected to peer: {}", conn.remote_id());
 
@@ -308,7 +333,7 @@ impl EndpointActor {
                     {
                         debug!("Error while handling a peer: {:?}", err);
                     }
-                    Self::reconnect(message_tx, secret_address, 0)
+                    Self::reconnect(message_tx, secret_address, 0, generation)
                         .await
                         .expect("Failed to initiate reconnection");
                 });
@@ -319,16 +344,24 @@ impl EndpointActor {
     }
 
     fn replace_peer_task(&mut self, peer_id: PublicKey, task: JoinHandle<()>) {
-        if let Some(previous_task) = self.peer_tasks.insert(peer_id, task) {
+        self.peer_tasks.insert(peer_id, task);
+    }
+
+    fn start_peer_generation(&mut self, peer_id: PublicKey) -> u64 {
+        self.next_generation += 1;
+        if let Some(previous_task) = self.peer_tasks.remove(&peer_id) {
             previous_task.abort();
             debug!("Replaced an existing connection to peer {peer_id}.");
         }
+        self.peer_generations.insert(peer_id, self.next_generation);
+        self.next_generation
     }
 
     async fn reconnect(
         message_tx: mpsc::Sender<EndpointMessage>,
         secret_address: SecretAddress,
         previous_attempts: usize,
+        generation: u64,
     ) -> Result<()> {
         // Only log at "info" level if this is the first reconnection attempt.
         if previous_attempts == 0 {
@@ -349,6 +382,7 @@ impl EndpointActor {
                 secret_address,
                 response_tx: None,
                 previous_attempts: previous_attempts + 1,
+                generation: Some(generation),
             })
             .await?;
         Ok(())
@@ -394,6 +428,7 @@ impl EndpointActor {
         let endpoint_id = conn.remote_id();
 
         info!("Peer connected: {}", &endpoint_id);
+        self.start_peer_generation(endpoint_id);
 
         let my_passphrase = self.my_passphrase.clone();
         let document_handle = self.document_handle.clone();
