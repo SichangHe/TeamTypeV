@@ -155,7 +155,8 @@ suite("Extension Test Suite", () => {
         editor = await vscode.window.showTextDocument(doc)
     })
 
-    suiteTeardown(async () => {
+    suiteTeardown(async function () {
+        this.timeout(30000)
         await stopEmacs().catch(() => undefined)
         children.forEach((child) => child.kill())
         fs.rmSync(root, {recursive: true, force: true})

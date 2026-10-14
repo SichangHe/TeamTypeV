@@ -6,6 +6,7 @@
 
 //! This module provides a [`ConnectionManager`], which can be used to connect to other daemons.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -24,6 +25,7 @@ use iroh::endpoint::{
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey};
 use postcard::{from_bytes, to_allocvec};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -240,6 +242,7 @@ struct EndpointActor {
     message_tx: mpsc::Sender<EndpointMessage>,
     document_handle: DocumentActorHandle,
     my_passphrase: SecretKey,
+    peer_tasks: HashMap<PublicKey, JoinHandle<()>>,
 }
 
 impl EndpointActor {
@@ -256,10 +259,11 @@ impl EndpointActor {
             message_tx,
             document_handle,
             my_passphrase,
+            peer_tasks: HashMap::new(),
         }
     }
 
-    async fn handle_message(&self, message: EndpointMessage) -> Result<()> {
+    async fn handle_message(&mut self, message: EndpointMessage) -> Result<()> {
         match message {
             EndpointMessage::Connect {
                 secret_address,
@@ -290,25 +294,35 @@ impl EndpointActor {
                     response_tx.send(Ok(())).expect("Connect receiver dropped");
                 }
 
-                let document_handle_clone = self.document_handle.clone();
-                let message_tx_clone = self.message_tx.clone();
-                tokio::spawn(async move {
+                let peer_id = conn.remote_id();
+                let document_handle = self.document_handle.clone();
+                let message_tx = self.message_tx.clone();
+                let passphrase = secret_address.passphrase.clone();
+                let task = tokio::spawn(async move {
                     if let Err(err) = Self::handle_peer(
-                        document_handle_clone,
+                        document_handle,
                         conn,
-                        PeerAuth::YourPassphrase(secret_address.passphrase.clone()),
+                        PeerAuth::YourPassphrase(passphrase),
                     )
                     .await
                     {
                         debug!("Error while handling a peer: {:?}", err);
                     }
-                    Self::reconnect(message_tx_clone, secret_address, 0)
+                    Self::reconnect(message_tx, secret_address, 0)
                         .await
                         .expect("Failed to initiate reconnection");
                 });
+                self.replace_peer_task(peer_id, task);
             }
         }
         Ok(())
+    }
+
+    fn replace_peer_task(&mut self, peer_id: PublicKey, task: JoinHandle<()>) {
+        if let Some(previous_task) = self.peer_tasks.insert(peer_id, task) {
+            previous_task.abort();
+            debug!("Replaced an existing connection to peer {peer_id}.");
+        }
     }
 
     async fn reconnect(
@@ -376,26 +390,24 @@ impl EndpointActor {
         }
     }
 
-    fn handle_incoming_connection(&self, conn: IrohEndpointConnection) {
+    fn handle_incoming_connection(&mut self, conn: IrohEndpointConnection) {
         let endpoint_id = conn.remote_id();
 
         info!("Peer connected: {}", &endpoint_id);
 
-        let my_passphrase_clone = self.my_passphrase.clone();
-        let document_handle_clone = self.document_handle.clone();
-        tokio::spawn(async move {
-            if let Err(err) = Self::handle_peer(
-                document_handle_clone,
-                conn,
-                PeerAuth::MyPassphrase(my_passphrase_clone),
-            )
-            .await
+        let my_passphrase = self.my_passphrase.clone();
+        let document_handle = self.document_handle.clone();
+        let task = tokio::spawn(async move {
+            if let Err(err) =
+                Self::handle_peer(document_handle, conn, PeerAuth::MyPassphrase(my_passphrase))
+                    .await
             {
                 warn!("Incoming connection failed: {err}");
             }
 
             info!("Peer disconnected: {endpoint_id}",);
         });
+        self.replace_peer_task(endpoint_id, task);
     }
 
     async fn handle_peer(
