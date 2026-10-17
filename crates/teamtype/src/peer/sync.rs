@@ -103,9 +103,12 @@ impl SyncActor {
             return;
         }
         error!(
-            "The sharer has a different history than this directory, so merging could overwrite files. Dropped this directory's history; run `teamtype join` again to take the sharer's files."
+            "The sharer started a new history, so your changes here cannot be merged with theirs. Nothing was overwritten. Save any changes you made since you were last connected elsewhere, then run `teamtype join` again; it asks before replacing this directory's files with the sharer's."
         );
-        let _ = std::fs::remove_file(self.document_handle.base_dir().join(".teamtype/doc"));
+        let teamtype_dir = self.document_handle.base_dir().join(".teamtype");
+        let _ = std::fs::remove_file(teamtype_dir.join("doc"));
+        // So that the next join asks before overwriting.
+        let _ = std::fs::remove_file(teamtype_dir.join("joined"));
         std::process::exit(1);
     }
 

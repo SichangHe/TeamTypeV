@@ -73,9 +73,13 @@ echo three >"$work/a/f.txt"
 start b join
 joiner=$last_pid
 eventually test ! -e "/proc/$joiner" || fail "the joiner with another history kept running"
-grep -aq 'different history' "$work/b.log" || fail "the joiner did not say why it stopped"
+grep -aq 'started a new history' "$work/b.log" || fail "the joiner did not say why it stopped"
 [ "$(cat "$work/a/f.txt")" = three ] || fail "the joiner's stale file reached the sharer"
+b_has stale || fail "the refusing joiner overwrote its own file"
 start b join
+eventually grep -aq 'Overwrite them?' "$work/b.log" || fail "joining again did not ask before overwriting"
+(cd "$work/b" && echo y | exec "$TEAMTYPE_BINARY" join >>"$work/b.log" 2>&1) &
+pids+=($!)
 eventually b_has three || fail "joining again did not take the sharer's file"
 
 exit "$((n_failures > 0))"
