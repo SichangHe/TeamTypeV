@@ -61,7 +61,9 @@ impl Decoder for IncomingProtocolCodec {
     }
 }
 
-fn is_user_readable_only(socket_path: &Path) -> Result<()> {
+/// Restricts the socket's parent directory to the current user, removing group and other
+/// permissions if necessary.
+fn make_user_accessible_only(socket_path: &Path) -> Result<()> {
     let parent_dir = socket_path
         .parent()
         .context("The socket path should not be the root directory")?;
@@ -75,10 +77,17 @@ fn is_user_readable_only(socket_path: &Path) -> Result<()> {
         .permissions()
         .mode();
     // Group and others should not have any permissions.
-    let allowed_permissions = 0o77700u32;
-    if current_permissions | allowed_permissions != allowed_permissions {
-        bail!(
-            "For security reasons, the parent directory of the socket must only be accessible by the current user. Please run `chmod go-rwx {}`",
+    if current_permissions & 0o077 != 0 {
+        let new_permissions = current_permissions & !0o077;
+        fs::set_permissions(parent_dir, fs::Permissions::from_mode(new_permissions))
+            .with_context(|| {
+                format!(
+                    "For security reasons, the parent directory of the socket must only be accessible by the current user, but failed to run `chmod go-rwx {}`",
+                    parent_dir.display()
+                )
+            })?;
+        warn!(
+            "For security reasons, made the socket's parent directory only accessible by the current user (`chmod go-rwx {}`).",
             parent_dir.display()
         );
     }
@@ -101,9 +110,7 @@ pub fn spawn_socket_listener(
     document_handle: DocumentActorHandle,
 ) -> Result<()> {
     // Make sure the parent directory of the socket is only accessible by the current user.
-    if let Err(description) = is_user_readable_only(socket_path) {
-        bail!("{description}");
-    }
+    make_user_accessible_only(socket_path)?;
 
     // Using the sandbox method here is technically unnecessary,
     // but we want to really run all path operations through the sandbox module.
@@ -207,4 +214,18 @@ async fn handle_editor_connection(
         .send_message(DocMessage::CloseEditorConnection(editor_id))
         .await;
     info!("Editor #{editor_id} disconnected.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_dir_permissions_are_restricted_automatically() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        make_user_accessible_only(&dir.path().join("socket")).unwrap();
+        let mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 }
