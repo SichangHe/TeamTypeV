@@ -23,6 +23,9 @@ Teamtype installs a `reference-transaction` Git hook, which asks for the lock be
 When someone else holds the lock, the Git command fails with a message naming them, so you can ask them.
 If your repository already has that hook, or sets `core.hooksPath`, Git commands are not stopped; Teamtype then only keeps your changes to `.git` out of the shared state while someone else holds the lock.
 
+Version-control files are not part of Teamtype's history: the lock holder's changes go to the sharer, which passes them on, and a joining peer first receives all of the sharer's version-control files.
+Peers running an older Teamtype cannot receive them and disconnect.
+
 ## Joining overwrites the directory
 
 Joining makes your directory identical to the sharer's, including `.git`.

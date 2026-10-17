@@ -142,6 +142,16 @@ impl GitLock {
         }
     }
 
+    #[must_use]
+    pub fn peer(&self) -> &str {
+        &self.peer
+    }
+
+    #[must_use]
+    pub const fn is_sharer(&self) -> bool {
+        self.is_sharer
+    }
+
     /// Records activity, which keeps the lock or asks for it. Announcements are throttled unless
     /// `now`. Returns the announced value if the document changed.
     pub fn note_activity(&mut self, doc: &mut Document, now: bool) -> Option<u64> {

@@ -46,6 +46,7 @@ use crate::types::{
     ComponentMessage, CursorId, CursorState, EphemeralMessage, FileTextDelta, PatchEffect,
     TextDelta,
 };
+use crate::vcs_files::{self, VcsMessage};
 use crate::vcs_lock::{self, GitLock, Holder};
 use crate::watcher::WatcherEvent;
 use crate::watcher::{Watcher, WatcherEventType};
@@ -69,6 +70,10 @@ pub enum DocMessage {
     FromWatcher(WatcherEvent),
     RescanFiles,
     CheckVcsLock,
+    ReceiveVcs(VcsMessage),
+    VcsSnapshot {
+        response_tx: oneshot::Sender<Vec<VcsMessage>>,
+    },
     Persist,
     RandomEdit,
     ReceiveSyncMessage {
@@ -94,6 +99,8 @@ impl fmt::Debug for DocMessage {
             Self::FromWatcher(e) => format!("FromWatcher({e:?}"),
             Self::RescanFiles => "RescanFiles".to_string(),
             Self::CheckVcsLock => "CheckVcsLock".to_string(),
+            Self::ReceiveVcs(_) => "ReceiveVcs".to_string(),
+            Self::VcsSnapshot { .. } => "VcsSnapshot".to_string(),
             Self::Persist => "Persist".to_string(),
             Self::RandomEdit => "RandomEdit".to_string(),
             Self::ReceiveSyncMessage { .. } => "ReceiveSyncMessage".to_string(),
@@ -133,6 +140,14 @@ pub struct DocumentActor {
     git_lock: GitLock,
     /// The last `teamtype git-lock` request we handled, and our announcement for it.
     git_lock_request: Option<(std::time::SystemTime, u64)>,
+    /// Version-control file changes for the peers; see `vcs_files`.
+    vcs_tx: broadcast::Sender<VcsMessage>,
+    /// Hashes of the version-control files as last shared, to tell local changes apart.
+    vcs_known: HashMap<RelativePath, u64>,
+    /// Paths of the snapshot being received.
+    vcs_snapshot_paths: HashSet<RelativePath>,
+    /// Whether we have the sharer's version-control files, so that ours may be sent.
+    vcs_ready: bool,
 }
 
 impl DocumentActor {
@@ -178,6 +193,10 @@ impl DocumentActor {
             files_open_in_editors: HashSet::default(),
             git_lock: GitLock::new(String::new(), String::new(), is_host, vcs_lock::timeout()),
             git_lock_request: None,
+            vcs_tx: broadcast::channel(100).0,
+            vcs_known: HashMap::default(),
+            vcs_snapshot_paths: HashSet::default(),
+            vcs_ready: is_host,
         };
         s.git_lock = GitLock::new(
             s.load_peer_id(),
@@ -247,6 +266,10 @@ impl DocumentActor {
                 self.read_current_content_from_dir(false);
             }
             DocMessage::CheckVcsLock => self.tick_git_lock(),
+            DocMessage::ReceiveVcs(message) => self.receive_vcs(message),
+            DocMessage::VcsSnapshot { response_tx } => {
+                let _ = response_tx.send(vcs_files::snapshot_messages(self.local_vcs_files()));
+            }
             DocMessage::Persist => self.persist(),
             DocMessage::ReceiveSyncMessage {
                 message,
@@ -267,6 +290,9 @@ impl DocumentActor {
                             file_deltas.push(file_text_delta);
                         }
                         PatchEffect::FileRemoval(file_path) => {
+                            if vcs_lock::is_internal(&file_path) {
+                                continue;
+                            }
                             if self.owns(&file_path) && self.crdt_doc.file_exists(&file_path) {
                                 // A peer's file of the same name replaced ours; no further
                                 // patch arrives for it if it is empty.
@@ -570,9 +596,8 @@ impl DocumentActor {
                 Err(_) if watcher_event.file_path.exists() => return,
                 Err(_) => None,
             };
-            if !self.admit_local_change(&relative_file_path, disk.as_deref()) {
-                return;
-            }
+            self.local_vcs_change(&relative_file_path, disk);
+            return;
         }
         if self.owns(&relative_file_path) {
             match watcher_event.event_type {
@@ -753,15 +778,24 @@ impl DocumentActor {
 
     fn read_current_content_from_dir(&mut self, init: bool) {
         debug!("Reading current contents from disk (init: {init}).");
+        let mut on_disk: HashSet<RelativePath> = HashSet::default();
         for file_path in sandbox::enumerate_non_ignored_files(&self.app_config) {
             match sandbox::read_file(&self.app_config.base_dir, &file_path) {
                 Ok(bytes) => {
                     let relative_file_path =
                         RelativePath::try_from_path(&self.app_config.base_dir, &file_path)
                             .expect("Walked file path should be within base directory");
-                    if vcs_lock::is_internal(&relative_file_path)
-                        || (!init && !self.admit_local_change(&relative_file_path, Some(&bytes)))
-                    {
+                    if vcs_lock::is_internal(&relative_file_path) {
+                        continue;
+                    }
+                    if vcs_lock::vcs_dir_of(&relative_file_path).is_some() {
+                        on_disk.insert(relative_file_path.clone());
+                        if init {
+                            self.vcs_known
+                                .insert(relative_file_path, vcs_files::hash(&bytes));
+                        } else {
+                            self.local_vcs_change(&relative_file_path, Some(bytes));
+                        }
                         continue;
                     }
                     if self.owns(&relative_file_path) {
@@ -794,7 +828,6 @@ impl DocumentActor {
                 )
                 && self.owns(&relative_file_path)
                 && !vcs_lock::is_internal(&relative_file_path)
-                && self.admit_local_change(&relative_file_path, None)
             {
                 warn!(
                         "File {relative_file_path} exists in the CRDT, but not on disk. Deleting from CRDT."
@@ -802,33 +835,133 @@ impl DocumentActor {
                 self.remove_file(&relative_file_path);
             }
         }
+        if !init {
+            let removed: Vec<RelativePath> = self
+                .vcs_known
+                .keys()
+                .filter(|path| !on_disk.contains(*path))
+                .cloned()
+                .collect();
+            for path in removed {
+                self.local_vcs_change(&path, None);
+            }
+        }
         let _ = self.doc_changed_ping_tx.send(());
     }
 
-    /// Whether a local change to `file_path`, whose content on disk is now `disk`, may enter the
-    /// document. A change to a version-control file needs the Git lock.
-    fn admit_local_change(&mut self, file_path: &RelativePath, disk: Option<&[u8]>) -> bool {
-        if vcs_lock::vcs_dir_of(file_path).is_none() {
-            return true;
+    /// Handles a local change to a version-control file, whose content on disk is now `disk`:
+    /// sends it to the peers if we may change version control.
+    fn local_vcs_change(&mut self, file_path: &RelativePath, disk: Option<Vec<u8>>) {
+        if !self.app_config.sync_vcs || !self.vcs_ready || vcs_lock::is_internal(file_path) {
+            return;
         }
-        if !self.app_config.sync_vcs || vcs_lock::is_internal(file_path) {
-            return false;
-        }
-        let doc = self.doc_bytes(file_path);
-        if doc.as_deref() == disk {
+        let hash = disk.as_deref().map(vcs_files::hash);
+        if self.vcs_known.get(file_path).copied() == hash {
             // Nothing changed, or this is our own write of a peer's change.
-            return false;
+            return;
         }
         if let Holder::Other(name) = self.git_lock.holder(&self.crdt_doc) {
-            // Kept on disk but out of the document: Git may be waiting in its hook for the lock,
-            // and the rescan when we get it lets the change in.
+            // Kept back: Git may be waiting in its hook for the lock, and the rescan when we get
+            // it sends the change.
             debug!("Not sharing your change to {file_path} yet: {name} holds the Git lock.");
-            return false;
+            return;
         }
-        // Without the hook, for example with `core.hooksPath` set, Git changes nobody holds the
-        // lock for are let in, and ask for the lock.
+        // Without the hook, for example with `core.hooksPath` set, Git changes are sent while
+        // nobody else holds the lock, and ask for it.
         self.note_git_activity();
-        true
+        match hash {
+            Some(hash) => self.vcs_known.insert(file_path.clone(), hash),
+            None => self.vcs_known.remove(file_path),
+        };
+        let _ = self.vcs_tx.send(VcsMessage::Changes {
+            origin: self.git_lock.peer().to_owned(),
+            files: vec![(file_path.display().to_string(), disk)],
+        });
+    }
+
+    /// Our version-control files on disk.
+    fn local_vcs_files(&self) -> Vec<vcs_files::VcsFile> {
+        sandbox::enumerate_non_ignored_files(&self.app_config)
+            .into_iter()
+            .filter_map(|path| {
+                let relative =
+                    RelativePath::try_from_path(&self.app_config.base_dir, &path).ok()?;
+                if vcs_lock::vcs_dir_of(&relative).is_none() || vcs_lock::is_internal(&relative) {
+                    return None;
+                }
+                let bytes = sandbox::read_file(&self.app_config.base_dir, &path).ok()?;
+                Some((relative.display().to_string(), Some(bytes)))
+            })
+            .collect()
+    }
+
+    fn receive_vcs(&mut self, message: VcsMessage) {
+        match &message {
+            VcsMessage::Changes { origin, files } => {
+                if origin == self.git_lock.peer() {
+                    return;
+                }
+                for file in files {
+                    self.write_vcs_file(file);
+                }
+                if self.git_lock.is_sharer() {
+                    // Relay to the other peers.
+                    let _ = self.vcs_tx.send(message);
+                }
+            }
+            VcsMessage::Snapshot { files, last } => {
+                if self.git_lock.is_sharer() {
+                    return;
+                }
+                for file in files {
+                    self.write_vcs_file(file);
+                    self.vcs_snapshot_paths.insert(RelativePath::new(&file.0));
+                }
+                if *last {
+                    // Joining makes our version-control files the sharer's.
+                    let snapshot = std::mem::take(&mut self.vcs_snapshot_paths);
+                    for (path, _) in self.local_vcs_files() {
+                        if !snapshot.contains(&RelativePath::new(&path)) {
+                            self.write_vcs_file(&(path, None));
+                        }
+                    }
+                    self.vcs_ready = true;
+                    info!("Received the sharer's version-control files.");
+                }
+            }
+        }
+    }
+
+    fn write_vcs_file(&mut self, (path, content): &vcs_files::VcsFile) {
+        let relative = RelativePath::new(path);
+        if vcs_lock::vcs_dir_of(&relative).is_none() || vcs_lock::is_internal(&relative) {
+            warn!("Ignoring a peer's file outside version-control directories: {path}");
+            return;
+        }
+        let abs_path = self.absolute_path_for_file_path(&relative);
+        let base_dir = &self.app_config.base_dir;
+        let result = match content {
+            Some(bytes) => {
+                if std::fs::read(&*abs_path).is_ok_and(|current| current == *bytes) {
+                    Ok(())
+                } else {
+                    // Git makes some files read-only, so replace rather than overwrite.
+                    if abs_path.exists() {
+                        let _ = sandbox::remove_file(base_dir, &abs_path);
+                    }
+                    sandbox::write_file(base_dir, &abs_path, bytes)
+                }
+            }
+            None if abs_path.exists() => sandbox::remove_file(base_dir, &abs_path),
+            None => Ok(()),
+        };
+        if let Err(err) = result {
+            warn!("Failed to write the peer's {path}: {err}");
+        }
+        match content {
+            Some(bytes) => self.vcs_known.insert(relative, vcs_files::hash(bytes)),
+            None => self.vcs_known.remove(&relative),
+        };
     }
 
     fn doc_bytes(&self, file_path: &RelativePath) -> Option<Vec<u8>> {
@@ -1155,6 +1288,8 @@ pub struct DocumentActorHandle {
     doc_message_tx: DocMessageSender,
     doc_changed_ping_tx: DocChangedSender,
     ephemeral_message_tx: EphemeralMessageSender,
+    vcs_tx: broadcast::Sender<VcsMessage>,
+    is_host: bool,
     next_id: Arc<AtomicUsize>,
 }
 
@@ -1181,12 +1316,15 @@ impl DocumentActorHandle {
             persist,
         );
 
+        let vcs_tx = actor.vcs_tx.clone();
         tokio::spawn(async move { actor.run().await });
 
         Self {
             doc_message_tx,
             doc_changed_ping_tx,
             ephemeral_message_tx,
+            vcs_tx,
+            is_host,
             next_id: Arc::default(),
         }
     }
@@ -1207,6 +1345,21 @@ impl DocumentActorHandle {
     #[must_use]
     pub fn subscribe_ephemeral_messages(&self) -> EphemeralMessageReceiver {
         self.ephemeral_message_tx.subscribe()
+    }
+
+    pub fn subscribe_vcs_messages(&self) -> broadcast::Receiver<VcsMessage> {
+        self.vcs_tx.subscribe()
+    }
+
+    /// The sharer's version-control files for a peer that just connected, or none elsewhere.
+    pub async fn vcs_snapshot(&self) -> Vec<VcsMessage> {
+        if !self.is_host {
+            return vec![];
+        }
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_message(DocMessage::VcsSnapshot { response_tx })
+            .await;
+        response_rx.await.unwrap_or_default()
     }
 
     pub async fn content(&self) -> Option<document::Content> {

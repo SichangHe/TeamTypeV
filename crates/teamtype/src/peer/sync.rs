@@ -6,15 +6,16 @@
 
 use std::mem;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use automerge::sync::{Message as AutomergeSyncMessage, State as AutomergeSyncState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast::error::RecvError, oneshot};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::daemon::{DocMessage, DocumentActorHandle};
 use crate::types::EphemeralMessage;
+use crate::vcs_files::VcsMessage;
 
 #[derive(Deserialize, Serialize)]
 /// The `PeerMessage` is used for peer to peer data exchange.
@@ -24,6 +25,8 @@ pub enum PeerMessage {
     /// The Ephemeral message currently is used for cursor messages, but can later be used for
     /// other things that should not be persisted.
     Ephemeral(EphemeralMessage),
+    /// Version-control files, which are not in the CRDT; see `vcs_files`.
+    Vcs(VcsMessage),
 }
 
 #[async_trait]
@@ -74,6 +77,11 @@ impl SyncActor {
                     .send_message(DocMessage::ReceiveEphemeral(cursor))
                     .await;
             }
+            PeerMessage::Vcs(message) => {
+                self.document_handle
+                    .send_message(DocMessage::ReceiveVcs(message))
+                    .await;
+            }
         }
         Ok(())
     }
@@ -103,9 +111,14 @@ impl SyncActor {
     pub async fn run(mut self) -> Result<()> {
         let mut doc_changed_ping_rx = self.document_handle.subscribe_document_changes();
         let mut ephemeral_messages_rx = self.document_handle.subscribe_ephemeral_messages();
+        // Subscribed before taking the snapshot, so that no change is missed.
+        let mut vcs_messages_rx = self.document_handle.subscribe_vcs_messages();
 
         // Kick off initial synchronization with peer.
         self.generate_sync_message().await?;
+        for message in self.document_handle.vcs_snapshot().await {
+            self.connection.send(PeerMessage::Vcs(message)).await?;
+        }
 
         loop {
             tokio::select! {
@@ -137,6 +150,16 @@ impl SyncActor {
                             // We missed some cursor states, because of the limited
                             // capacity of the channel.
                             debug!("Ephemeral message channel lagged (this is unfortunate, but okay).");
+                        }
+                    }
+                }
+                vcs_message = vcs_messages_rx.recv() => {
+                    match vcs_message {
+                        Ok(message) => self.connection.send(PeerMessage::Vcs(message)).await?,
+                        Err(RecvError::Closed) => panic!("Version-control channel has been closed"),
+                        Err(RecvError::Lagged(n)) => {
+                            warn!("Missed {n} version-control changes for a peer; it reconnects to resync.");
+                            bail!("Version-control channel lagged");
                         }
                     }
                 }
