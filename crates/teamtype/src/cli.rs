@@ -77,23 +77,46 @@ pub enum Commands {
     },
     /// Open a JSON-RPC connection to the Teamtype daemon on stdin/stdout. Used by text editor plugins.
     Client,
-    /// Edit a file through the running daemon, only if the file still has the content the caller
-    /// last read. For command line tools such as coding agents.
+    /// Replace one exact piece of text in a file through the running daemon. For command line
+    /// tools such as coding agents.
+    ///
+    /// Use this instead of writing a shared file directly: the daemon ignores disk writes to files
+    /// open in an editor, and a direct write can undo other people's edits.
+    ///
+    /// How it works: teamtype reads the file's current content itself, requires `--old` to occur
+    /// in it exactly once, and replaces only that occurrence with `--new`. Text outside `--old` is
+    /// never touched, so the edit cannot revert changes others made elsewhere, even if the caller's
+    /// own copy of the file is stale. If someone changed the text inside `--old`, the edit is
+    /// rejected and nothing changes.
+    ///
+    /// Recipe:
+    ///   1. Read the file.
+    ///   2. Pick the smallest piece of text you want to change, plus enough surrounding text to
+    ///      make it unique; pass it as `--old`, and its new version as `--new`.
+    ///   3. If rejected, read the file again and redo step 2. Never reuse `--old`/`--new` files
+    ///      left over from an earlier attempt.
+    ///
+    /// Make one call per change rather than replacing the whole file: a whole-file `--old` is
+    /// rejected as soon as anyone edits anything.
+    ///
+    /// Example:
+    ///   teamtype agent-edit --file notes.md --old 'teh cat' --new 'the cat'
+    #[command(verbatim_doc_comment)]
     AgentEdit {
         /// File path relative to the shared directory.
         #[arg(long)]
         file: PathBuf,
-        /// Exact content the caller last read.
-        #[arg(long, required_unless_present = "expected_file")]
-        expected: Option<String>,
-        /// File holding the content the caller last read, for content too large for an argument.
-        #[arg(long, conflicts_with = "expected")]
-        expected_file: Option<PathBuf>,
-        /// Content to write if the file still equals the expected content.
-        #[arg(long, required_unless_present = "replacement_file")]
-        replacement: Option<String>,
-        /// File holding the content to write.
-        #[arg(long, conflicts_with = "replacement")]
-        replacement_file: Option<PathBuf>,
+        /// Exact text to replace; it must occur exactly once in the file.
+        #[arg(long, required_unless_present = "old_file")]
+        old: Option<String>,
+        /// File holding the text to replace, for text too large for an argument.
+        #[arg(long, conflicts_with = "old")]
+        old_file: Option<PathBuf>,
+        /// Text to put in its place.
+        #[arg(long, required_unless_present = "new_file")]
+        new: Option<String>,
+        /// File holding the text to put in its place.
+        #[arg(long, conflicts_with = "new")]
+        new_file: Option<PathBuf>,
     },
 }

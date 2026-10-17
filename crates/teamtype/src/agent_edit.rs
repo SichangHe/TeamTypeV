@@ -55,23 +55,44 @@ fn single_op(expected: &str, replacement: &str) -> Result<Option<EditorTextOp>> 
     Ok(Some(op))
 }
 
+/// `current` with its only occurrence of `old` replaced by `new`.
+fn replace_once(current: &str, old: &str, new: &str) -> Result<String> {
+    if old.is_empty() {
+        bail!("Agent edit rejected: the text to replace is empty");
+    }
+    match current.matches(old).count() {
+        1 => Ok(current.replacen(old, new, 1)),
+        0 => bail!(
+            "Agent edit rejected: the text to replace is not in the file; it may have changed, so read it again"
+        ),
+        n => bail!(
+            "Agent edit rejected: the text to replace occurs {n} times; include more context to make it unique"
+        ),
+    }
+}
+
 // 🧑 "support an agent command line tool whose edits cannot be silently overwritten by editor edits"
-/// Replaces `expected` with `replacement` in `file`, or fails without changing anything if the
-/// daemon's content differs from `expected` when the daemon opens the file for this edit.
+// 🧑 "make sure this actually works and that agents cannot overwrite editor changes"
+/// Replaces the only occurrence of `old` in `file` with `new`, or fails without changing anything.
 ///
-/// Opens the file with `expected` as its content; the daemon answers with an edit only if its
-/// content differs. A cursor request without ranges follows as a barrier: its response arrives
-/// after any such edit. Edits by others that arrive after the barrier are merged by the daemon
-/// like concurrent edits between editors.
-pub async fn run(directory: &Path, file: &Path, expected: String, replacement: &str) -> Result<()> {
-    let Some(op) = single_op(&expected, replacement)? else {
-        return Ok(());
-    };
+/// The edit is computed from the file's current content on disk, which the daemon writes, so a
+/// stale snapshot held by the caller cannot revert other people's changes. The daemon then opens
+/// the file with that content and answers with an edit only if its own content differs; a cursor
+/// request without ranges follows as a barrier: its response arrives after any such edit. Edits
+/// by others that arrive after the barrier are merged by the daemon like concurrent edits between
+/// editors.
+pub async fn run(directory: &Path, file: &Path, old: &str, new: &str) -> Result<()> {
     let path = directory.join(file);
     // The daemon would create a missing file with `expected` as its content.
     if !path.is_file() {
         bail!("Agent edit rejected: {} is not a file", path.display());
     }
+    let expected = std::fs::read_to_string(&path)
+        .with_context(|| format!("Could not read {}", path.display()))?;
+    let replacement = replace_once(&expected, old, new)?;
+    let Some(op) = single_op(&expected, &replacement)? else {
+        return Ok(());
+    };
     let uri = AbsolutePath::try_from(path)?.to_file_uri().to_string();
     tokio::time::timeout(TIMEOUT, exchange(directory, uri, expected, op))
         .await
@@ -122,7 +143,7 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
         }
         if message["method"] == "edit" && message["params"]["uri"] == uri.as_str() && edit.is_some()
         {
-            bail!("Agent edit rejected: file changed since the supplied snapshot");
+            bail!("Agent edit rejected: the file changed while editing, or an editor has unsaved changes; try again");
         }
         if message["id"] == BARRIER_ID
             && let Some(edit) = edit.take()
@@ -171,5 +192,13 @@ mod tests {
         assert_eq!(op("a\nxyz\n", "a\nxQz\n"), (1, 1, 1, 2, "Q".into()));
         assert_eq!(op("a\nb\nc\n", "a\nc\n"), (1, 0, 2, 0, String::new()));
         assert_eq!(op("aa", "a"), (0, 1, 0, 2, String::new()));
+    }
+
+    #[test]
+    fn replace_once_needs_exactly_one_occurrence() {
+        assert_eq!(replace_once("a b c", "b", "B").unwrap(), "a B c");
+        assert!(replace_once("a b c", "x", "B").is_err());
+        assert!(replace_once("a b b", "b", "B").is_err());
+        assert!(replace_once("a b c", "", "B").is_err());
     }
 }

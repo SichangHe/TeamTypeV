@@ -76,13 +76,12 @@ async fn main() -> Result<()> {
         Commands::Client => return run_client(directory.clone()).await,
         Commands::AgentEdit {
             file,
-            expected,
-            expected_file,
-            replacement,
-            replacement_file,
+            old,
+            old_file,
+            new,
+            new_file,
         } => {
-            let [expected, replacement] =
-                [(expected, expected_file), (replacement, replacement_file)].map(|(text, path)| {
+            let [old, new] = [(old, old_file), (new, new_file)].map(|(text, path)| {
                     match (text, path) {
                         (Some(text), _) => Ok(text),
                         (None, Some(path)) => std::fs::read_to_string(&path)
@@ -90,7 +89,7 @@ async fn main() -> Result<()> {
                         (None, None) => bail!("Missing content for the agent edit"),
                     }
                 });
-            return agent_edit::run(&directory, &file, expected?, &replacement?).await;
+            return agent_edit::run(&directory, &file, &old?, &new?).await;
         }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;

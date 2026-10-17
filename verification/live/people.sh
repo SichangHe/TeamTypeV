@@ -140,7 +140,7 @@ files_agree() {
 }
 agent_edit() {
     "$TEAMTYPE_BINARY" agent-edit --directory "$work/$1" --file "$2" \
-        --expected "$3" --replacement "$4" 2>>"$work/agent.log"
+        --old "$3" --new "$4" 2>>"$work/agent.log"
 }
 dump_buffers() {
     local person
@@ -177,15 +177,15 @@ eventually buffers_agree_with '^[a-h]-[0-9]*$' "$n_lines" || {
 }
 
 # Agent edits to a file no editor has open, from a joiner and from the sharer, reach everyone;
-# a stale snapshot changes nothing.
+# text that is no longer in the file changes nothing.
 agent_edit b agent.txt $'v1\n' $'v2\n' || fail "agent edit in a joining directory was rejected"
 eventually files_agree agent.txt v2 || fail "agent edit from a joiner did not reach the others"
 printf 'v2\n' >"$work/expected" && printf 'v3\n' >"$work/replacement"
 "$TEAMTYPE_BINARY" agent-edit --directory "$work/$sharer" --file agent.txt \
-    --expected-file "$work/expected" --replacement-file "$work/replacement" 2>>"$work/agent.log" ||
+    --old-file "$work/expected" --new-file "$work/replacement" 2>>"$work/agent.log" ||
     fail "agent edit in the sharing directory, with content from files, was rejected"
 eventually files_agree agent.txt v3 || fail "agent edit from the sharer did not reach the others"
-agent_edit c agent.txt $'v1\n' $'lost\n' && fail "agent edit with a stale snapshot was accepted"
+agent_edit c agent.txt $'v1\n' $'lost\n' && fail "agent edit replacing text no longer in the file was accepted"
 agent_edit c missing.txt old new && fail "agent edit to a missing file was accepted"
 [ -e "$work/c/missing.txt" ] && fail "agent edit created a missing file"
 sleep 1
@@ -203,10 +203,11 @@ eventually agent_append || fail "agent edit to an editor-open file was rejected"
 finish_typing
 eventually buffers_agree_with '^agent-line$' 1 || fail "agent edit did not reach every Neovim buffer"
 buffers_agree_with '^late-[0-9]*$' "$n_rounds" || fail "agent edit lost lines typed at the same time"
-agent_edit b shared.txt "$snapshot" "gone" && fail "stale agent edit to an editor-open file was accepted"
+# Text the agent read before typing changed it is no longer in the file.
+agent_edit b shared.txt "${snapshot}stale" "gone" && fail "stale agent edit to an editor-open file was accepted"
 sleep 1
 buffers_agree_with '^agent-line$' 1 || fail "stale agent edit changed the editor-open file"
-[ "$(grep -c 'file changed since the supplied snapshot' "$work/agent.log")" -ge 2 ] ||
+[ "$(grep -cE 'not in the file|changed while editing' "$work/agent.log")" -ge 2 ] ||
     fail "stale agent edits were not rejected for being stale"
 
 # One person drops out mid-edit and returns: a joiner, then the sharer, through whom the others

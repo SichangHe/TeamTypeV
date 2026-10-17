@@ -247,7 +247,7 @@ suite("Extension Test Suite", () => {
         await waitFor("the agent edit is accepted", async () => {
             const snapshot = fs.readFileSync(fileC, "utf8")
             const args = ["agent-edit", "--directory", dirC, "--file", "file.txt"]
-            args.push("--expected", snapshot, "--replacement", snapshot + "agent-line\n")
+            args.push("--old", snapshot, "--new", snapshot + "agent-line\n")
             return run(bin, args).then(
                 () => true,
                 () => false,
