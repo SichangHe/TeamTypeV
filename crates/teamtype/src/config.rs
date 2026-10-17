@@ -289,6 +289,23 @@ fn global_git_username() -> Result<String> {
         .to_string())
 }
 
+/// Files that the Git repository at `base_dir` tracks, even if they are ignored.
+#[must_use]
+pub fn git_tracked_files(base_dir: &Path) -> Vec<PathBuf> {
+    let Ok(index) = Repository::open(base_dir).and_then(|repo| repo.index()) else {
+        return vec![];
+    };
+    index
+        .iter()
+        .filter_map(|entry| {
+            std::str::from_utf8(&entry.path)
+                .ok()
+                .map(|p| base_dir.join(p))
+        })
+        .filter(|path| path.is_file())
+        .collect()
+}
+
 fn find_git_repo(path: &Path) -> Result<Repository, GitError> {
     Repository::discover(path)
 }
@@ -313,8 +330,12 @@ fn add_teamtype_to_local_gitignore(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_teamtype_is_ignored(directory: &Path) -> Result<()> {
-    if teamtype_directory_should_be_ignored_but_isnt(directory) {
+/// With `sync_vcs`, a joining peer may receive its Git repository only after starting.
+pub fn ensure_teamtype_is_ignored(directory: &Path, sync_vcs: bool) -> Result<()> {
+    let ignore_file = directory.join(CONFIG_DIR).join(".gitignore");
+    if teamtype_directory_should_be_ignored_but_isnt(directory)
+        || (sync_vcs && !ignore_file.exists())
+    {
         add_teamtype_to_local_gitignore(directory)?;
     }
     Ok(())

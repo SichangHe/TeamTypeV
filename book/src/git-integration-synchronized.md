@@ -7,13 +7,23 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 
 # Synchronized method
 
-It is possible to tightly integrate Teamtype and Git by setting the `--sync-vcs` flag.
+By default, Teamtype tightly integrates with Git; `--no-sync-vcs` turns this off.
 
 Setting it causes Teamtype to *not* [ignore](ignored-files.md) version-control directories when synchronizing files.
 This might seem like an unusual approach to working with Git, but in our tests, when pairing, it seems to work more or less smoothly.
 
-Beware that this is quite **EXPERIMENTAL** and be prepared to potentially loose your data (especially when learning to "think" in this potentially unfamiliar scheme).
-Note that all peers should use the `--sync-vcs` flag.
+All peers should use the same setting.
+
+## One peer at a time changes Git
+
+Only one peer at a time may change version-control directories.
+Whoever changes them first, for example by committing, holds a lock until they stop changing them for 3 minutes.
+Meanwhile, the other peers' version-control directories are read-only, so their Git commands that write fail with "Permission denied", and Teamtype says who holds the lock.
+
+## Joining overwrites the directory
+
+Joining makes your directory identical to the sharer's, including `.git`.
+When you join into a directory that has files and was not joined before, Teamtype asks before overwriting them; to keep your files, join from an empty directory.
 
 We'll describe this method from the perspective of Git, but it might/should work for other version-control systems as well.
 

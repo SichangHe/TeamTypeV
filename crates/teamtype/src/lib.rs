@@ -19,5 +19,6 @@ pub mod path;
 pub mod peer;
 pub mod sandbox;
 pub mod types;
+pub mod vcs_lock;
 pub mod watcher;
 pub mod wormhole;

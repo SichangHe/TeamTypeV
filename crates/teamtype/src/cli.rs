@@ -22,10 +22,15 @@ pub struct Cli {
 
 #[derive(Args)]
 pub struct ShareJoinFlags {
-    /// EXPERIMENTAL: Also synchronize version-control directories like .git/ or .jj/, which are normally
-    /// ignored. For Git, this will synchronize all branches, commits, etc. as well as your .git/config.
-    /// This means that new commits will immediately appear at all peers, you can change branches together, etc.
+    /// Do not synchronize version-control directories like .git/ or .jj/. By default they are
+    /// synchronized: all branches, commits, etc. as well as your .git/config, so new commits
+    /// immediately appear at all peers. Only one peer at a time may change them: whoever changes
+    /// them first holds a lock until they stop for 3 minutes, and meanwhile the others'
+    /// version-control directories are read-only.
     #[arg(long)]
+    pub no_sync_vcs: bool,
+    /// Synchronizing version-control directories is now the default; this flag does nothing.
+    #[arg(long, hide = true)]
     pub sync_vcs: bool,
     /// Use an alternative Magic Wormhole mailbox server relay url
     #[arg(long)]

@@ -9,7 +9,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 
 There are two ways to collaborate on a Git repository with Teamtype.
 
-- The first is a manual method, where `.git` is ignored.
-- The second one a more integrated (and more adventurous) method (which is activated with `--sync-vcs`), where you can commit and change branches together.
+- The default, synchronized method, where `.git` is shared and you can commit and change branches together.
+- A manual method (activated with `--no-sync-vcs`), where `.git` is ignored.
 
 We will describe these in the following sections.

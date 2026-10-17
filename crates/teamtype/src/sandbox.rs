@@ -168,6 +168,16 @@ pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
 
         // TODO: Remove duplicates, in the case that jj is used non-colocatedly.
         files.extend(jj_files);
+
+        // 🧑 "fix the ignore issue": a file that Git tracks must reach the peers, or their Git
+        // sees it as deleted.
+        let known: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+        let config_dir = app_config.base_dir.join(".teamtype");
+        files.extend(
+            crate::config::git_tracked_files(&app_config.base_dir)
+                .into_iter()
+                .filter(|path| !known.contains(path) && !path.starts_with(&config_dir)),
+        );
     }
 
     files

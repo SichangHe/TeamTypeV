@@ -143,7 +143,9 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
         }
         if message["method"] == "edit" && message["params"]["uri"] == uri.as_str() && edit.is_some()
         {
-            bail!("Agent edit rejected: the file changed while editing, or an editor has unsaved changes; try again");
+            bail!(
+                "Agent edit rejected: the file changed while editing, or an editor has unsaved changes; try again"
+            );
         }
         if message["id"] == BARRIER_ID
             && let Some(edit) = edit.take()

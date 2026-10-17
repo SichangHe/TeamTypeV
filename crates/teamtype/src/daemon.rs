@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter::repeat_with;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -45,6 +46,7 @@ use crate::types::{
     ComponentMessage, CursorId, CursorState, EphemeralMessage, FileTextDelta, PatchEffect,
     TextDelta,
 };
+use crate::vcs_lock::{self, Lock, VCS_DIRS};
 use crate::watcher::WatcherEvent;
 use crate::watcher::{Watcher, WatcherEventType};
 use crate::wormhole::put_secret_address_into_wormhole;
@@ -66,6 +68,7 @@ pub enum DocMessage {
     ToEditor(EditorId, OutgoingMessage),
     FromWatcher(WatcherEvent),
     RescanFiles,
+    CheckVcsLock,
     Persist,
     RandomEdit,
     ReceiveSyncMessage {
@@ -90,6 +93,7 @@ impl fmt::Debug for DocMessage {
             Self::ToEditor(id, m) => format!("ToEditor({id}, {m:?})"),
             Self::FromWatcher(e) => format!("FromWatcher({e:?}"),
             Self::RescanFiles => "RescanFiles".to_string(),
+            Self::CheckVcsLock => "CheckVcsLock".to_string(),
             Self::Persist => "Persist".to_string(),
             Self::RandomEdit => "RandomEdit".to_string(),
             Self::ReceiveSyncMessage { .. } => "ReceiveSyncMessage".to_string(),
@@ -126,6 +130,14 @@ pub struct DocumentActor {
     /// Files an editor has open. Kept on disk too: after a crash, files an editor saved itself may
     /// be ahead of the saved document on disk.
     files_open_in_editors: HashSet<RelativePath>,
+    /// Whether another peer holds the version-control lock, so our VCS directories are read-only.
+    vcs_locked_out: bool,
+    /// This peer's ID in version-control locks. Unlike the document's actor ID, it survives
+    /// restarts, so a restarted peer still recognizes its own lock.
+    vcs_peer_id: String,
+    /// Each lock file's content and when we first saw it. Expiry is measured by our own clock
+    /// from there, so clocks of different peers need not agree.
+    vcs_locks_seen: HashMap<RelativePath, (Vec<u8>, Instant)>,
 }
 
 impl DocumentActor {
@@ -169,7 +181,15 @@ impl DocumentActor {
             save_fully: true,
             persist,
             files_open_in_editors: HashSet::default(),
+            vcs_locked_out: false,
+            vcs_peer_id: String::new(),
+            vcs_locks_seen: HashMap::default(),
         };
+        s.vcs_peer_id = s.load_vcs_peer_id();
+        // A previous run may have exited while locked out.
+        for dir in VCS_DIRS {
+            vcs_lock::set_dirs_writable(&s.app_config.base_dir.join(dir), true);
+        }
 
         if persistence_file_exists && persist {
             if !init {
@@ -230,6 +250,7 @@ impl DocumentActor {
             DocMessage::RescanFiles => {
                 self.read_current_content_from_dir(false);
             }
+            DocMessage::CheckVcsLock => self.update_vcs_lock_state(),
             DocMessage::Persist => self.persist(),
             DocMessage::ReceiveSyncMessage {
                 message,
@@ -257,10 +278,10 @@ impl DocumentActor {
                             } else if self.owns(&file_path) {
                                 info!("Removing file {file_path}.");
 
-                                sandbox::remove_file(
-                                    &self.app_config.base_dir,
-                                    &self.absolute_path_for_file_path(&file_path),
-                                )
+                                let abs_path = self.absolute_path_for_file_path(&file_path);
+                                self.with_parent_dirs_writable(&file_path, || {
+                                    sandbox::remove_file(&self.app_config.base_dir, &abs_path)
+                                })
                                 .unwrap_or_else(|err| {
                                     warn!("Failed to remove file {file_path}: {err}");
                                 });
@@ -313,6 +334,7 @@ impl DocumentActor {
                 }
 
                 self.write_files_changed_in_file_deltas(&file_deltas);
+                self.update_vcs_lock_state();
 
                 for file_text_delta in &file_deltas {
                     let message = ComponentMessage::Edit {
@@ -541,6 +563,18 @@ impl DocumentActor {
             RelativePath::try_from_path(&self.app_config.base_dir, &watcher_event.file_path)
                 .expect("Watcher event should have a path within the base directory");
 
+        if vcs_lock::vcs_dir_of(&relative_file_path).is_some() {
+            let disk = match sandbox::read_file(&self.app_config.base_dir, &watcher_event.file_path)
+            {
+                Ok(bytes) => Some(bytes),
+                // Being replaced right now; the rescan that follows the event sees the result.
+                Err(_) if watcher_event.file_path.exists() => return,
+                Err(_) => None,
+            };
+            if !self.admit_local_change(&relative_file_path, disk.as_deref()) {
+                return;
+            }
+        }
         if self.owns(&relative_file_path) {
             match watcher_event.event_type {
                 WatcherEventType::Created | WatcherEventType::Changed => {
@@ -705,8 +739,10 @@ impl DocumentActor {
         if self.persist {
             self.persist();
         }
-        sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
-            .unwrap_or_else(|err| panic!("Failed to write to file {abs_path}: {err}"));
+        self.with_parent_dirs_writable(file_path, || {
+            sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
+        })
+        .unwrap_or_else(|err| panic!("Failed to write to file {abs_path}: {err}"));
     }
 
     fn read_current_content_from_dir(&mut self, init: bool) {
@@ -717,6 +753,11 @@ impl DocumentActor {
                     let relative_file_path =
                         RelativePath::try_from_path(&self.app_config.base_dir, &file_path)
                             .expect("Walked file path should be within base directory");
+                    if vcs_lock::is_lock_file(&relative_file_path)
+                        || (!init && !self.admit_local_change(&relative_file_path, Some(&bytes)))
+                    {
+                        continue;
+                    }
                     if self.owns(&relative_file_path) {
                         if let Ok(text) = String::from_utf8(bytes.clone()) {
                             if init {
@@ -746,6 +787,7 @@ impl DocumentActor {
                     "Should have been able to check for file existence while reading current directory content"
                 )
                 && self.owns(&relative_file_path)
+                && self.admit_local_change(&relative_file_path, None)
             {
                 warn!(
                         "File {relative_file_path} exists in the CRDT, but not on disk. Deleting from CRDT."
@@ -754,6 +796,171 @@ impl DocumentActor {
             }
         }
         let _ = self.doc_changed_ping_tx.send(());
+    }
+
+    /// Whether a local change to `file_path`, whose content on disk is now `disk`, may enter the
+    /// document. A change to a version-control file needs the version-control lock; without it,
+    /// the change is undone on disk.
+    fn admit_local_change(&mut self, file_path: &RelativePath, disk: Option<&[u8]>) -> bool {
+        let Some(vcs_dir) = vcs_lock::vcs_dir_of(file_path) else {
+            return true;
+        };
+        if !self.app_config.sync_vcs || vcs_lock::is_lock_file(file_path) {
+            return false;
+        }
+        let doc = match self.current_file_content(file_path) {
+            Some(document::Content::String(text)) => Some(text.as_bytes()),
+            Some(document::Content::Bytes(bytes)) => Some(bytes.as_slice()),
+            None => None,
+        }
+        .map(<[u8]>::to_vec);
+        if doc.as_deref() == disk {
+            // Nothing changed, or this is our own write of a peer's change.
+            return false;
+        }
+        self.update_vcs_lock_state();
+        if let Some(lock) = self.foreign_vcs_lock() {
+            warn!(
+                "Undoing your change to {file_path}: {} holds the version-control lock.",
+                lock.name
+            );
+            let abs_path = self.absolute_path_for_file_path(file_path);
+            let undone = self.with_parent_dirs_writable(file_path, || match &doc {
+                Some(bytes) => sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes),
+                None => sandbox::remove_file(&self.app_config.base_dir, &abs_path),
+            });
+            if let Err(err) = undone {
+                warn!("Failed to undo your change to {file_path}: {err}");
+            }
+            return false;
+        }
+        self.take_vcs_lock(vcs_dir);
+        true
+    }
+
+    fn load_vcs_peer_id(&self) -> String {
+        let path = self.app_config.base_dir.join(".teamtype/peer-id");
+        if let Ok(bytes) = sandbox::read_file(&self.app_config.base_dir, &path)
+            && let Ok(id) = String::from_utf8(bytes)
+            && !id.trim().is_empty()
+        {
+            return id.trim().to_owned();
+        }
+        let id: String = repeat_with(|| format!("{:02x}", rand::rng().random::<u8>()))
+            .take(16)
+            .collect();
+        if let Err(err) = sandbox::write_file(&self.app_config.base_dir, &path, id.as_bytes()) {
+            warn!("Failed to save this peer's ID to {}: {err}", path.display());
+        }
+        id
+    }
+
+    /// The lock in `lock_file`, and how long ago we first saw it.
+    fn vcs_lock_and_age(&mut self, lock_file: &RelativePath) -> Option<(Lock, Duration)> {
+        let Some(document::Content::Bytes(bytes)) = self.current_file_content(lock_file) else {
+            return None;
+        };
+        let lock = Lock::decode(bytes)?;
+        let bytes = bytes.clone();
+        let seen = self
+            .vcs_locks_seen
+            .entry(lock_file.clone())
+            .or_insert_with(|| (bytes.clone(), Instant::now()));
+        if seen.0 != bytes {
+            *seen = (bytes, Instant::now());
+        }
+        Some((lock, seen.1.elapsed()))
+    }
+
+    /// The version-control lock, if another peer holds it.
+    fn foreign_vcs_lock(&mut self) -> Option<Lock> {
+        if !self.app_config.sync_vcs {
+            return None;
+        }
+        let timeout = vcs_lock::timeout();
+        let me = self.vcs_peer_id.clone();
+        VCS_DIRS.iter().find_map(|dir| {
+            self.vcs_lock_and_age(&vcs_lock::lock_file(dir))
+                .filter(|(lock, age)| lock.holder != me && *age < timeout)
+                .map(|(lock, _)| lock)
+        })
+    }
+
+    /// Takes the version-control lock, or extends it if it is ours and half used up.
+    fn take_vcs_lock(&mut self, vcs_dir: &str) {
+        let lock_file = vcs_lock::lock_file(vcs_dir);
+        if let Some((lock, age)) = self.vcs_lock_and_age(&lock_file)
+            && lock.holder == self.vcs_peer_id
+            && age < vcs_lock::timeout() / 2
+        {
+            return;
+        }
+        let lock = Lock {
+            holder: self.vcs_peer_id.clone(),
+            name: self.app_config.username.clone().unwrap_or_default(),
+            // Makes every renewal a new value, which restarts the timeout at every peer.
+            taken_ms: vcs_lock::now_ms(),
+        };
+        let bytes = lock.encode();
+        self.crdt_doc
+            .set_file(document::Content::Bytes(bytes.clone()), &lock_file);
+        self.ensure_file_has_bytes(&lock_file, &bytes);
+        let _ = self.doc_changed_ping_tx.send(());
+    }
+
+    /// Makes our version-control directories read-only while another peer holds the lock.
+    fn update_vcs_lock_state(&mut self) {
+        let lock = self.foreign_vcs_lock();
+        if lock.is_some() == self.vcs_locked_out {
+            return;
+        }
+        self.vcs_locked_out = lock.is_some();
+        self.set_vcs_dirs_writable(lock.is_none());
+        if let Some(lock) = lock {
+            info!(
+                "{} is using version control; your {} directories are read-only until they make no version-control change for {} seconds.",
+                lock.name,
+                VCS_DIRS.join("/"),
+                vcs_lock::timeout().as_secs()
+            );
+        } else {
+            info!(
+                "Nobody holds the version-control lock anymore; your version-control directories are writable again."
+            );
+        }
+    }
+
+    fn set_vcs_dirs_writable(&self, writable: bool) {
+        if self.app_config.sync_vcs {
+            for dir in VCS_DIRS {
+                vcs_lock::set_dirs_writable(&self.app_config.base_dir.join(dir), writable);
+            }
+        }
+    }
+
+    /// Runs `f`, which changes `file_path` on disk, with the file's directories made writable
+    /// while our version-control directories are read-only.
+    fn with_parent_dirs_writable<T>(&self, file_path: &RelativePath, f: impl FnOnce() -> T) -> T {
+        if !self.vcs_locked_out || vcs_lock::vcs_dir_of(file_path).is_none() {
+            return f();
+        }
+        let dirs: Vec<PathBuf> = file_path
+            .ancestors()
+            .skip(1)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| self.app_config.base_dir.join(dir))
+            .collect();
+        let set_writable = |writable: bool| {
+            for dir in dirs.iter().rev() {
+                if let Ok(metadata) = std::fs::metadata(dir) {
+                    vcs_lock::set_dir_writable(dir, metadata.permissions().mode(), writable);
+                }
+            }
+        };
+        set_writable(true);
+        let result = f();
+        set_writable(false);
+        result
     }
 
     fn current_file_content(&self, file_path: &RelativePath) -> Option<&document::Content> {
@@ -1070,6 +1277,10 @@ impl Daemon {
         // Start file watcher.
         spawn_file_watcher(&app_config, document_handle.clone());
 
+        if app_config.sync_vcs {
+            spawn_vcs_lock_checker(document_handle.clone());
+        }
+
         if persist {
             // Start persister.
             spawn_persister(document_handle.clone());
@@ -1122,6 +1333,11 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         debug!("Daemon dropped, removing socket");
+        if self.app_config.sync_vcs {
+            for dir in VCS_DIRS {
+                vcs_lock::set_dirs_writable(&self.app_config.base_dir.join(dir), true);
+            }
+        }
         sandbox::remove_file(Path::new(&self.app_config.base_dir), &self.socket_path)
             .expect("Could not remove socket");
     }
@@ -1166,6 +1382,16 @@ fn spawn_file_watcher(app_config: &AppConfig, document_handle: DocumentActorHand
                     rescan_required = false;
                 }
             }
+        }
+    });
+}
+
+/// Notices when the version-control lock expires.
+fn spawn_vcs_lock_checker(document_handle: DocumentActorHandle) {
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(5)).await;
+            document_handle.send_message(DocMessage::CheckVcsLock).await;
         }
     });
 }

@@ -81,19 +81,23 @@ async fn main() -> Result<()> {
             new,
             new_file,
         } => {
-            let [old, new] = [(old, old_file), (new, new_file)].map(|(text, path)| {
-                    match (text, path) {
-                        (Some(text), _) => Ok(text),
-                        (None, Some(path)) => std::fs::read_to_string(&path)
-                            .with_context(|| format!("Could not read {}", path.display())),
-                        (None, None) => bail!("Missing content for the agent edit"),
-                    }
+            let [old, new] =
+                [(old, old_file), (new, new_file)].map(|(text, path)| match (text, path) {
+                    (Some(text), _) => Ok(text),
+                    (None, Some(path)) => std::fs::read_to_string(&path)
+                        .with_context(|| format!("Could not read {}", path.display())),
+                    (None, None) => bail!("Missing content for the agent edit"),
                 });
             return agent_edit::run(&directory, &file, &old?, &new?).await;
         }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
-            run_daemon(join_config, false).await
+            confirm_overwrite(&join_config.base_dir)?;
+            let marker = join_marker(&join_config.base_dir);
+            let daemon = run_daemon(join_config, false).await?;
+            // Only a join that connected counts, so that a failed one asks again.
+            sandbox::write_file(&directory, &marker, b"")?;
+            Ok(daemon)
         }
         Commands::Share { init, .. } => {
             let share_config = parse_share_config(cli.command, directory.clone());
@@ -115,7 +119,7 @@ async fn run_daemon(app_config: AppConfig, init_doc: bool) -> Result<Daemon> {
         );
     }
 
-    config::ensure_teamtype_is_ignored(&app_config.base_dir)?;
+    config::ensure_teamtype_is_ignored(&app_config.base_dir, app_config.sync_vcs)?;
 
     if app_config.sync_vcs && config::has_local_user_config(&app_config.base_dir).is_ok_and(|v| v) {
         warn!(docstr!(
@@ -145,7 +149,7 @@ async fn parse_join_config(command: Commands, directory: PathBuf) -> Result<AppC
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
-                sync_vcs,
+                no_sync_vcs,
                 username,
                 ..
             },
@@ -161,7 +165,7 @@ async fn parse_join_config(command: Commands, directory: PathBuf) -> Result<AppC
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            sync_vcs,
+            sync_vcs: !no_sync_vcs,
             username,
         };
         let mut app_config = AppConfig::from_config_file_and_cli(app_config_cli);
@@ -184,7 +188,7 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
-                sync_vcs,
+                no_sync_vcs,
                 username,
                 ..
             },
@@ -201,7 +205,7 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            sync_vcs,
+            sync_vcs: !no_sync_vcs,
             username,
         };
         let mut app_config = AppConfig::from_config_file_and_cli(app_config_cli);
@@ -367,6 +371,40 @@ fn setup_teamtype_directory(directory: &Path, temporary_directory: Option<&TempD
         }
     }
     Ok(())
+}
+
+// 🧑 "We should just upright refuse to connect if the user does not want the directory being
+// overwritten ... So maybe we explicitly say that we will overwrite everything."
+/// Joining replaces the directory's files with the sharer's versions. Asks before doing so to a
+/// directory that has files and was not joined before.
+fn confirm_overwrite(directory: &Path) -> Result<()> {
+    let marker = join_marker(directory);
+    let has_files = std::fs::read_dir(directory)?
+        .flatten()
+        .any(|entry| entry.file_name() != config::CONFIG_DIR);
+    let what = if directory.join(".git").exists() {
+        "files, including .git,"
+    } else {
+        "files"
+    };
+    if has_files && !marker.exists() {
+        warn!(
+            "Joining overwrites the {what} in '{}' with the sharer's versions.",
+            directory.display()
+        );
+        if !prompt_bool("Overwrite them?")? {
+            bail!("Aborting join. Join from an empty directory to keep your files");
+        }
+    } else {
+        info!(
+            "Joining keeps the {what} here identical to the sharer's, overwriting local changes."
+        );
+    }
+    Ok(())
+}
+
+fn join_marker(directory: &Path) -> PathBuf {
+    directory.join(config::CONFIG_DIR).join("joined")
 }
 
 fn get_current_directory() -> Result<PathBuf> {
