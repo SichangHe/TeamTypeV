@@ -337,14 +337,10 @@ impl EndpointActor {
                         .await
                         .expect("Failed to initiate reconnection");
                 });
-                self.replace_peer_task(peer_id, task);
+                self.peer_tasks.insert(peer_id, task);
             }
         }
         Ok(())
-    }
-
-    fn replace_peer_task(&mut self, peer_id: PublicKey, task: JoinHandle<()>) {
-        self.peer_tasks.insert(peer_id, task);
     }
 
     fn start_peer_generation(&mut self, peer_id: PublicKey) -> u64 {
@@ -442,7 +438,7 @@ impl EndpointActor {
 
             info!("Peer disconnected: {endpoint_id}",);
         });
-        self.replace_peer_task(endpoint_id, task);
+        self.peer_tasks.insert(endpoint_id, task);
     }
 
     async fn handle_peer(
