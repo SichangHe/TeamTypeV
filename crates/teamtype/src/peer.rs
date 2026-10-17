@@ -313,7 +313,10 @@ impl EndpointActor {
                     return Ok(());
                 }
 
-                info!("Connected to peer: {}", conn.remote_id());
+                info!(
+                    "Connected to peer: {}. Teamtype keeps syncing while it runs; press Ctrl+C to stop.",
+                    conn.remote_id()
+                );
 
                 if let Some(response_tx) = response_tx {
                     response_tx.send(Ok(())).expect("Connect receiver dropped");
