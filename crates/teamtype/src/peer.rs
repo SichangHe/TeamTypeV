@@ -39,7 +39,9 @@ mod tunnel;
 
 pub use tunnel::run as run_tunnel;
 
-const ALPN: &[u8] = b"/teamtype/0";
+/// Changes whenever peers of different versions cannot understand each other, so that they fail
+/// to connect with a clear message instead of disconnecting after every message.
+const ALPN: &[u8] = b"/teamtype-fork/1";
 
 struct SecretAddress {
     endpoint_addr: EndpointAddr,
@@ -132,6 +134,9 @@ impl ConnectionManager {
         app_config: &AppConfig,
         base_dir: &Path,
     ) -> Result<(Endpoint, SecretKey)> {
+        if !app_config.is_host() {
+            Self::forget_copied_key(base_dir);
+        }
         let (secret_key, my_passphrase) = Self::get_keypair(base_dir);
 
         let mut builder = Endpoint::builder(presets::N0)
@@ -169,6 +174,26 @@ impl ConnectionManager {
         let endpoint = builder.bind().await?;
 
         Ok((endpoint, my_passphrase))
+    }
+
+    /// A joiner whose `.teamtype` was copied from another directory would share that directory's
+    /// identity, and the two would keep replacing each other's connection. So a joiner's key is
+    /// tied to its directory, and a copied one is replaced.
+    fn forget_copied_key(base_dir: &Path) {
+        let teamtype_dir = base_dir.join(".teamtype");
+        let key_dir_file = teamtype_dir.join("key-dir");
+        let this_dir = fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+        let this_dir = this_dir.display().to_string();
+        let key_dir = fs::read_to_string(&key_dir_file).ok();
+        if key_dir.as_deref() != Some(this_dir.as_str()) {
+            if teamtype_dir.join("key").exists() {
+                info!("This directory's .teamtype/key was made elsewhere; making a new one.");
+                let _ = fs::remove_file(teamtype_dir.join("key"));
+            }
+            if let Err(err) = fs::write(&key_dir_file, &this_dir) {
+                warn!("Failed to write {}: {err}", key_dir_file.display());
+            }
+        }
     }
 
     fn get_keypair(base_dir: &Path) -> (SecretKey, SecretKey) {
@@ -253,6 +278,8 @@ struct EndpointActor {
     peer_generations: HashMap<PublicKey, u64>,
     next_generation: u64,
     forward_port: Option<u16>,
+    /// Recent connection times per peer, to notice two peers that share a key.
+    recent_connections: HashMap<PublicKey, Vec<std::time::Instant>>,
 }
 
 impl EndpointActor {
@@ -273,6 +300,7 @@ impl EndpointActor {
             peer_generations: HashMap::new(),
             next_generation: 0,
             forward_port: None,
+            recent_connections: HashMap::new(),
         }
     }
 
@@ -297,6 +325,11 @@ impl EndpointActor {
                 let conn = match connect_result {
                     Ok(conn) => conn,
                     Err(err) => {
+                        if format!("{err:#}").contains("known protocol") {
+                            warn!(
+                                "The peer runs a teamtype version that cannot sync with yours; install the same build on both sides."
+                            );
+                        }
                         if let Some(response_tx) = response_tx {
                             response_tx
                                 .send(Err(err.into()))
@@ -352,6 +385,20 @@ impl EndpointActor {
         Ok(())
     }
 
+    /// Two processes with the same `.teamtype/key`, for example in a copied `.teamtype`
+    /// directory, keep replacing each other's connection.
+    fn warn_if_flapping(&mut self, peer_id: PublicKey) {
+        let now = std::time::Instant::now();
+        let times = self.recent_connections.entry(peer_id).or_default();
+        times.retain(|at| now.duration_since(*at) < Duration::from_mins(1));
+        times.push(now);
+        if times.len() == 10 {
+            warn!(
+                "Peer {peer_id} connected 10 times in a minute. Two teamtype processes probably use the same .teamtype/key, for example in a copied .teamtype directory, and keep replacing each other; delete .teamtype/key in all but one."
+            );
+        }
+    }
+
     fn start_peer_generation(&mut self, peer_id: PublicKey) -> u64 {
         self.next_generation += 1;
         if let Some(previous_task) = self.peer_tasks.remove(&peer_id) {
@@ -368,12 +415,24 @@ impl EndpointActor {
         previous_attempts: usize,
         generation: u64,
     ) -> Result<()> {
+        static LOSSES: std::sync::Mutex<Vec<std::time::Instant>> =
+            std::sync::Mutex::new(Vec::new());
         // Only log at "info" level if this is the first reconnection attempt.
         if previous_attempts == 0 {
             info!(
                 "Connection to peer {} lost, will keep trying to reconnect...",
                 secret_address.endpoint_addr.id
             );
+            if let Ok(mut losses) = LOSSES.lock() {
+                let now = std::time::Instant::now();
+                losses.retain(|at| now.duration_since(*at) < Duration::from_mins(1));
+                losses.push(now);
+                if losses.len() == 10 {
+                    warn!(
+                        "The connection dropped 10 times in a minute. Another teamtype process probably uses this directory's .teamtype/key, for example in a copied .teamtype directory, and keeps replacing this connection; delete .teamtype/key in the copy."
+                    );
+                }
+            }
         } else {
             sleep(Duration::from_secs(10)).await;
             debug!(
@@ -440,6 +499,7 @@ impl EndpointActor {
         }
 
         info!("Peer connected: {}", &endpoint_id);
+        self.warn_if_flapping(endpoint_id);
         self.start_peer_generation(endpoint_id);
 
         let my_passphrase = self.my_passphrase.clone();
@@ -527,7 +587,7 @@ impl PeerMessageStream {
 
         let mut bytes = vec![0; byte_count as usize];
         receive.read_exact(&mut bytes).await?;
-        from_bytes(&bytes).context("Failed to convert bytes to PeerMessage")
+        from_bytes(&bytes).context("Could not read the peer's message; the peer probably runs a different teamtype version")
     }
 }
 

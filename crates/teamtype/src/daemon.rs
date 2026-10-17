@@ -1507,6 +1507,11 @@ impl Daemon {
                 if n_attempts_left == 0 {
                     return Err(err.context("Failed to connect to specified peer"));
                 }
+                if format!("{err:#}").contains("known protocol") {
+                    return Err(err.context(
+                        "The sharer runs a teamtype version that cannot sync with yours; install the same build on both sides",
+                    ));
+                }
                 warn!("Could not connect to specified peer, retrying: {err:#}");
                 sleep(INITIAL_CONNECT_RETRY_DELAY).await;
             }
