@@ -24,9 +24,9 @@ pub struct Cli {
 pub struct ShareJoinFlags {
     /// Do not synchronize version-control directories like .git/ or .jj/. By default they are
     /// synchronized: all branches, commits, etc. as well as your .git/config, so new commits
-    /// immediately appear at all peers. Only one peer at a time may change them: whoever changes
-    /// them first holds a lock until they stop for 3 minutes, and meanwhile the others'
-    /// version-control directories are read-only.
+    /// immediately appear at all peers. Only the peer holding the Git lock may change them. The
+    /// lock starts with the sharer and moves to another peer when they edit or run Git while the
+    /// holder has been idle for 3 minutes; Git commands of everyone else fail, naming the holder.
     #[arg(long)]
     pub no_sync_vcs: bool,
     /// Synchronizing version-control directories is now the default; this flag does nothing.
@@ -82,6 +82,9 @@ pub enum Commands {
     },
     /// Open a JSON-RPC connection to the Teamtype daemon on stdin/stdout. Used by text editor plugins.
     Client,
+    /// Ask the running daemon for the Git lock, and fail if another peer holds it. Run by the Git
+    /// hook that Teamtype installs, before Git changes a branch.
+    GitLock,
     /// Replace one exact piece of text in a file through the running daemon. For command line
     /// tools such as coding agents.
     ///

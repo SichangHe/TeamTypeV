@@ -46,7 +46,7 @@ use crate::types::{
     ComponentMessage, CursorId, CursorState, EphemeralMessage, FileTextDelta, PatchEffect,
     TextDelta,
 };
-use crate::vcs_lock::{self, Lock, VCS_DIRS};
+use crate::vcs_lock::{self, GitLock, Holder};
 use crate::watcher::WatcherEvent;
 use crate::watcher::{Watcher, WatcherEventType};
 use crate::wormhole::put_secret_address_into_wormhole;
@@ -130,14 +130,9 @@ pub struct DocumentActor {
     /// Files an editor has open. Kept on disk too: after a crash, files an editor saved itself may
     /// be ahead of the saved document on disk.
     files_open_in_editors: HashSet<RelativePath>,
-    /// Whether another peer holds the version-control lock, so our VCS directories are read-only.
-    vcs_locked_out: bool,
-    /// This peer's ID in version-control locks. Unlike the document's actor ID, it survives
-    /// restarts, so a restarted peer still recognizes its own lock.
-    vcs_peer_id: String,
-    /// Each lock file's content and when we first saw it. Expiry is measured by our own clock
-    /// from there, so clocks of different peers need not agree.
-    vcs_locks_seen: HashMap<RelativePath, (Vec<u8>, Instant)>,
+    git_lock: GitLock,
+    /// The last `teamtype git-lock` request we handled, and our announcement for it.
+    git_lock_request: Option<(std::time::SystemTime, u64)>,
 }
 
 impl DocumentActor {
@@ -181,15 +176,16 @@ impl DocumentActor {
             save_fully: true,
             persist,
             files_open_in_editors: HashSet::default(),
-            vcs_locked_out: false,
-            vcs_peer_id: String::new(),
-            vcs_locks_seen: HashMap::default(),
+            git_lock: GitLock::new(String::new(), String::new(), is_host, vcs_lock::timeout()),
+            git_lock_request: None,
         };
-        s.vcs_peer_id = s.load_vcs_peer_id();
-        // A previous run may have exited while locked out.
-        for dir in VCS_DIRS {
-            vcs_lock::set_dirs_writable(&s.app_config.base_dir.join(dir), true);
-        }
+        s.git_lock = GitLock::new(
+            s.load_peer_id(),
+            s.app_config.username.clone().unwrap_or_default(),
+            is_host,
+            vcs_lock::timeout(),
+        );
+        s.install_git_hook();
 
         if persistence_file_exists && persist {
             if !init {
@@ -250,7 +246,7 @@ impl DocumentActor {
             DocMessage::RescanFiles => {
                 self.read_current_content_from_dir(false);
             }
-            DocMessage::CheckVcsLock => self.update_vcs_lock_state(),
+            DocMessage::CheckVcsLock => self.tick_git_lock(),
             DocMessage::Persist => self.persist(),
             DocMessage::ReceiveSyncMessage {
                 message,
@@ -278,10 +274,10 @@ impl DocumentActor {
                             } else if self.owns(&file_path) {
                                 info!("Removing file {file_path}.");
 
-                                let abs_path = self.absolute_path_for_file_path(&file_path);
-                                self.with_parent_dirs_writable(&file_path, || {
-                                    sandbox::remove_file(&self.app_config.base_dir, &abs_path)
-                                })
+                                sandbox::remove_file(
+                                    &self.app_config.base_dir,
+                                    &self.absolute_path_for_file_path(&file_path),
+                                )
                                 .unwrap_or_else(|err| {
                                     warn!("Failed to remove file {file_path}: {err}");
                                 });
@@ -334,7 +330,7 @@ impl DocumentActor {
                 }
 
                 self.write_files_changed_in_file_deltas(&file_deltas);
-                self.update_vcs_lock_state();
+                self.tick_git_lock();
 
                 for file_text_delta in &file_deltas {
                     let message = ComponentMessage::Edit {
@@ -563,6 +559,9 @@ impl DocumentActor {
             RelativePath::try_from_path(&self.app_config.base_dir, &watcher_event.file_path)
                 .expect("Watcher event should have a path within the base directory");
 
+        if vcs_lock::is_internal(&relative_file_path) {
+            return;
+        }
         if vcs_lock::vcs_dir_of(&relative_file_path).is_some() {
             let disk = match sandbox::read_file(&self.app_config.base_dir, &watcher_event.file_path)
             {
@@ -588,6 +587,9 @@ impl DocumentActor {
     }
 
     fn file_removed(&mut self, relative_file_path: &RelativePath) {
+        if self.crdt_doc.file_exists(relative_file_path) {
+            self.note_git_activity();
+        }
         self.remove_file(relative_file_path);
         let _ = self.doc_changed_ping_tx.send(());
     }
@@ -607,6 +609,9 @@ impl DocumentActor {
                 return;
             }
         };
+        if self.doc_bytes(relative_file_path).as_deref() != Some(new_content.as_slice()) {
+            self.note_git_activity();
+        }
         if let Ok(new_content) = String::from_utf8(new_content.clone()) {
             self.crdt_doc.update_text(&new_content, relative_file_path);
             // TODO: Once we get back to processing file changes while editors have it
@@ -711,6 +716,9 @@ impl DocumentActor {
     }
 
     fn ensure_file_has_bytes(&mut self, file_path: &RelativePath, bytes: &[u8]) {
+        if vcs_lock::is_internal(file_path) {
+            return;
+        }
         let abs_path = self.absolute_path_for_file_path(file_path);
         if sandbox::exists(&self.app_config.base_dir, &abs_path)
             .expect("Failed to check for file existence before writing to it")
@@ -739,10 +747,8 @@ impl DocumentActor {
         if self.persist {
             self.persist();
         }
-        self.with_parent_dirs_writable(file_path, || {
-            sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
-        })
-        .unwrap_or_else(|err| panic!("Failed to write to file {abs_path}: {err}"));
+        sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
+            .unwrap_or_else(|err| panic!("Failed to write to file {abs_path}: {err}"));
     }
 
     fn read_current_content_from_dir(&mut self, init: bool) {
@@ -753,7 +759,7 @@ impl DocumentActor {
                     let relative_file_path =
                         RelativePath::try_from_path(&self.app_config.base_dir, &file_path)
                             .expect("Walked file path should be within base directory");
-                    if vcs_lock::is_lock_file(&relative_file_path)
+                    if vcs_lock::is_internal(&relative_file_path)
                         || (!init && !self.admit_local_change(&relative_file_path, Some(&bytes)))
                     {
                         continue;
@@ -787,6 +793,7 @@ impl DocumentActor {
                     "Should have been able to check for file existence while reading current directory content"
                 )
                 && self.owns(&relative_file_path)
+                && !vcs_lock::is_internal(&relative_file_path)
                 && self.admit_local_change(&relative_file_path, None)
             {
                 warn!(
@@ -799,46 +806,42 @@ impl DocumentActor {
     }
 
     /// Whether a local change to `file_path`, whose content on disk is now `disk`, may enter the
-    /// document. A change to a version-control file needs the version-control lock; without it,
-    /// the change is undone on disk.
+    /// document. A change to a version-control file needs the Git lock.
     fn admit_local_change(&mut self, file_path: &RelativePath, disk: Option<&[u8]>) -> bool {
-        let Some(vcs_dir) = vcs_lock::vcs_dir_of(file_path) else {
+        if vcs_lock::vcs_dir_of(file_path).is_none() {
             return true;
-        };
-        if !self.app_config.sync_vcs || vcs_lock::is_lock_file(file_path) {
+        }
+        if !self.app_config.sync_vcs || vcs_lock::is_internal(file_path) {
             return false;
         }
-        let doc = match self.current_file_content(file_path) {
-            Some(document::Content::String(text)) => Some(text.as_bytes()),
-            Some(document::Content::Bytes(bytes)) => Some(bytes.as_slice()),
-            None => None,
-        }
-        .map(<[u8]>::to_vec);
+        let doc = self.doc_bytes(file_path);
         if doc.as_deref() == disk {
             // Nothing changed, or this is our own write of a peer's change.
             return false;
         }
-        self.update_vcs_lock_state();
-        if let Some(lock) = self.foreign_vcs_lock() {
-            warn!(
-                "Undoing your change to {file_path}: {} holds the version-control lock.",
-                lock.name
-            );
-            let abs_path = self.absolute_path_for_file_path(file_path);
-            let undone = self.with_parent_dirs_writable(file_path, || match &doc {
-                Some(bytes) => sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes),
-                None => sandbox::remove_file(&self.app_config.base_dir, &abs_path),
-            });
-            if let Err(err) = undone {
-                warn!("Failed to undo your change to {file_path}: {err}");
-            }
+        if let Holder::Other(name) = self.git_lock.holder(&self.crdt_doc) {
+            // Kept on disk but out of the document: Git may be waiting in its hook for the lock,
+            // and the rescan when we get it lets the change in.
+            debug!("Not sharing your change to {file_path} yet: {name} holds the Git lock.");
             return false;
         }
-        self.take_vcs_lock(vcs_dir);
+        // Without the hook, for example with `core.hooksPath` set, Git changes nobody holds the
+        // lock for are let in, and ask for the lock.
+        self.note_git_activity();
         true
     }
 
-    fn load_vcs_peer_id(&self) -> String {
+    fn doc_bytes(&self, file_path: &RelativePath) -> Option<Vec<u8>> {
+        match self.current_file_content(file_path) {
+            Some(document::Content::String(text)) => Some(text.clone().into_bytes()),
+            Some(document::Content::Bytes(bytes)) => Some(bytes.clone()),
+            None => None,
+        }
+    }
+
+    /// A stable ID for this peer in the Git lock. Unlike the document's actor ID, it survives
+    /// restarts, so a restarted peer still holds its lock.
+    fn load_peer_id(&self) -> String {
         let path = self.app_config.base_dir.join(".teamtype/peer-id");
         if let Ok(bytes) = sandbox::read_file(&self.app_config.base_dir, &path)
             && let Ok(id) = String::from_utf8(bytes)
@@ -855,112 +858,89 @@ impl DocumentActor {
         id
     }
 
-    /// The lock in `lock_file`, and how long ago we first saw it.
-    fn vcs_lock_and_age(&mut self, lock_file: &RelativePath) -> Option<(Lock, Duration)> {
-        let Some(document::Content::Bytes(bytes)) = self.current_file_content(lock_file) else {
-            return None;
+    /// Installs the Git hook that asks for the lock, unless the repository has its own.
+    fn install_git_hook(&self) {
+        let hook = self.app_config.base_dir.join(vcs_lock::HOOK);
+        if !self.app_config.sync_vcs || !hook.parent().is_some_and(Path::is_dir) {
+            return;
+        }
+        let Ok(teamtype) = std::env::current_exe() else {
+            return;
         };
-        let lock = Lock::decode(bytes)?;
-        let bytes = bytes.clone();
-        let seen = self
-            .vcs_locks_seen
-            .entry(lock_file.clone())
-            .or_insert_with(|| (bytes.clone(), Instant::now()));
-        if seen.0 != bytes {
-            *seen = (bytes, Instant::now());
+        let script = vcs_lock::hook_script(&teamtype);
+        match std::fs::read_to_string(&hook) {
+            Ok(existing) if existing == script => return,
+            Ok(existing) if !existing.contains("Installed by teamtype") => {
+                warn!(
+                    "{} exists, so Git commands do not ask for the Git lock.",
+                    hook.display()
+                );
+                return;
+            }
+            _ => {}
         }
-        Some((lock, seen.1.elapsed()))
+        let installed = std::fs::write(&hook, script)
+            .and_then(|()| std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)));
+        if let Err(err) = installed {
+            warn!("Failed to install {}: {err}", hook.display());
+        }
     }
 
-    /// The version-control lock, if another peer holds it.
-    fn foreign_vcs_lock(&mut self) -> Option<Lock> {
-        if !self.app_config.sync_vcs {
-            return None;
-        }
-        let timeout = vcs_lock::timeout();
-        let me = self.vcs_peer_id.clone();
-        VCS_DIRS.iter().find_map(|dir| {
-            self.vcs_lock_and_age(&vcs_lock::lock_file(dir))
-                .filter(|(lock, age)| lock.holder != me && *age < timeout)
-                .map(|(lock, _)| lock)
-        })
-    }
-
-    /// Takes the version-control lock, or extends it if it is ours and half used up.
-    fn take_vcs_lock(&mut self, vcs_dir: &str) {
-        let lock_file = vcs_lock::lock_file(vcs_dir);
-        if let Some((lock, age)) = self.vcs_lock_and_age(&lock_file)
-            && lock.holder == self.vcs_peer_id
-            && age < vcs_lock::timeout() / 2
+    fn note_git_activity(&mut self) {
+        if self.app_config.sync_vcs
+            && self
+                .git_lock
+                .note_activity(&mut self.crdt_doc, false)
+                .is_some()
         {
+            let _ = self.doc_changed_ping_tx.send(());
+        }
+    }
+
+    /// Runs the Git lock's timers, answers `teamtype git-lock`, and installs the hook once the
+    /// repository arrived.
+    fn tick_git_lock(&mut self) {
+        if !self.app_config.sync_vcs {
             return;
         }
-        let lock = Lock {
-            holder: self.vcs_peer_id.clone(),
-            name: self.app_config.username.clone().unwrap_or_default(),
-            // Makes every renewal a new value, which restarts the timeout at every peer.
-            taken_ms: vcs_lock::now_ms(),
-        };
-        let bytes = lock.encode();
-        self.crdt_doc
-            .set_file(document::Content::Bytes(bytes.clone()), &lock_file);
-        self.ensure_file_has_bytes(&lock_file, &bytes);
-        let _ = self.doc_changed_ping_tx.send(());
-    }
-
-    /// Makes our version-control directories read-only while another peer holds the lock.
-    fn update_vcs_lock_state(&mut self) {
-        let lock = self.foreign_vcs_lock();
-        if lock.is_some() == self.vcs_locked_out {
-            return;
+        let request_file = self.app_config.base_dir.join(vcs_lock::REQUEST_FILE);
+        let request = std::fs::metadata(&request_file)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        if let Some(request) = request
+            && self
+                .git_lock_request
+                .is_none_or(|(handled, _)| handled != request)
+            && let Some(nonce) = self.git_lock.note_activity(&mut self.crdt_doc, true)
+        {
+            self.git_lock_request = Some((request, nonce));
+            let _ = self.doc_changed_ping_tx.send(());
         }
-        self.vcs_locked_out = lock.is_some();
-        self.set_vcs_dirs_writable(lock.is_none());
-        if let Some(lock) = lock {
-            info!(
-                "{} is using version control; your {} directories are read-only until they make no version-control change for {} seconds.",
-                lock.name,
-                VCS_DIRS.join("/"),
-                vcs_lock::timeout().as_secs()
-            );
-        } else {
-            info!(
-                "Nobody holds the version-control lock anymore; your version-control directories are writable again."
-            );
+        let held = self.git_lock.holder(&self.crdt_doc) == Holder::Me;
+        if self.git_lock.tick(&mut self.crdt_doc) {
+            let _ = self.doc_changed_ping_tx.send(());
         }
-    }
-
-    fn set_vcs_dirs_writable(&self, writable: bool) {
-        if self.app_config.sync_vcs {
-            for dir in VCS_DIRS {
-                vcs_lock::set_dirs_writable(&self.app_config.base_dir.join(dir), writable);
+        if !held && self.git_lock.holder(&self.crdt_doc) == Holder::Me {
+            // Let in the version-control changes we kept back.
+            self.read_current_content_from_dir(false);
+        }
+        // Answer a request only once the sharer confirmed it, which no other peer can get at the
+        // same time.
+        let holder = match (self.git_lock.holder(&self.crdt_doc), self.git_lock_request) {
+            (Holder::Me, Some((_, nonce))) if !self.git_lock.confirmed(&self.crdt_doc, nonce) => {
+                Holder::Nobody
             }
-        }
-    }
-
-    /// Runs `f`, which changes `file_path` on disk, with the file's directories made writable
-    /// while our version-control directories are read-only.
-    fn with_parent_dirs_writable<T>(&self, file_path: &RelativePath, f: impl FnOnce() -> T) -> T {
-        if !self.vcs_locked_out || vcs_lock::vcs_dir_of(file_path).is_none() {
-            return f();
-        }
-        let dirs: Vec<PathBuf> = file_path
-            .ancestors()
-            .skip(1)
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .map(|dir| self.app_config.base_dir.join(dir))
-            .collect();
-        let set_writable = |writable: bool| {
-            for dir in dirs.iter().rev() {
-                if let Ok(metadata) = std::fs::metadata(dir) {
-                    vcs_lock::set_dir_writable(dir, metadata.permissions().mode(), writable);
-                }
-            }
+            (holder, _) => holder,
         };
-        set_writable(true);
-        let result = f();
-        set_writable(false);
-        result
+        let status =
+            vcs_lock::status_line(&holder, self.git_lock_request.map(|(request, _)| request));
+        let status_file = self.app_config.base_dir.join(vcs_lock::STATUS_FILE);
+        if std::fs::read_to_string(&status_file).ok().as_deref() != Some(status.as_str())
+            && let Err(err) = std::fs::write(&status_file, &status)
+        {
+            warn!("Failed to write {}: {err}", status_file.display());
+        }
+        self.install_git_hook();
     }
 
     fn current_file_content(&self, file_path: &RelativePath) -> Option<&document::Content> {
@@ -1024,6 +1004,9 @@ impl DocumentActor {
             }
             ComponentMessage::Close { .. } => self.release_files(),
             ComponentMessage::Edit { file_path, delta } => {
+                if from_editor.is_some() {
+                    self.note_git_activity();
+                }
                 self.crdt_doc.apply_delta_to_doc(delta, file_path).expect("Failed to apply delta to document while handling edit ComponentMessage. Probably the delta doesn't fit the document content.");
                 let _ = self.doc_changed_ping_tx.send(());
                 self.write_file(file_path);
@@ -1333,11 +1316,7 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         debug!("Daemon dropped, removing socket");
-        if self.app_config.sync_vcs {
-            for dir in VCS_DIRS {
-                vcs_lock::set_dirs_writable(&self.app_config.base_dir.join(dir), true);
-            }
-        }
+
         sandbox::remove_file(Path::new(&self.app_config.base_dir), &self.socket_path)
             .expect("Could not remove socket");
     }
@@ -1386,11 +1365,11 @@ fn spawn_file_watcher(app_config: &AppConfig, document_handle: DocumentActorHand
     });
 }
 
-/// Notices when the version-control lock expires.
+/// Runs the Git lock's timers and answers `teamtype git-lock`.
 fn spawn_vcs_lock_checker(document_handle: DocumentActorHandle) {
     tokio::spawn(async move {
         loop {
-            sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_millis(200)).await;
             document_handle.send_message(DocMessage::CheckVcsLock).await;
         }
     });

@@ -16,9 +16,12 @@ All peers should use the same setting.
 
 ## One peer at a time changes Git
 
-Only one peer at a time may change version-control directories.
-Whoever changes them first, for example by committing, holds a lock until they stop changing them for 3 minutes.
-Meanwhile, the other peers' version-control directories are read-only, so their Git commands that write fail with "Permission denied", and Teamtype says who holds the lock.
+Only the peer holding the Git lock may change version-control directories.
+The lock starts with the sharer, and only the sharer hands it on, so two peers never hold it at once.
+It moves to another peer when they edit a shared file or run a Git command while the holder has been idle for 3 minutes; it never just expires.
+Teamtype installs a `reference-transaction` Git hook, which asks for the lock before Git changes a branch, for example on `git commit`, `git checkout`, or `git reset`.
+When someone else holds the lock, the Git command fails with a message naming them, so you can ask them.
+If your repository already has that hook, or sets `core.hooksPath`, Git commands are not stopped; Teamtype then only keeps your changes to `.git` out of the shared state while someone else holds the lock.
 
 ## Joining overwrites the directory
 

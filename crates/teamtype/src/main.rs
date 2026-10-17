@@ -9,6 +9,7 @@ use std::io::Write;
 use std::io::{stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::time::Duration;
 use std::{env, panic};
 
 use anyhow::bail;
@@ -20,7 +21,7 @@ use teamtype::jsonrpc_forwarder::{JSONRPCForwarder, UnixJSONRPCForwarder};
 use teamtype::{
     config::{self, AppConfig},
     daemon::Daemon,
-    logging, sandbox,
+    logging, sandbox, vcs_lock,
 };
 use tempfile::{TempDir, tempdir_in};
 use tokio::signal;
@@ -74,6 +75,7 @@ async fn main() -> Result<()> {
     // listeners properly listen to the mpsc channel or receive and process a cancellation token.
     let _handle = match cli.command {
         Commands::Client => return run_client(directory.clone()).await,
+        Commands::GitLock => return git_lock(&directory).await,
         Commands::AgentEdit {
             file,
             old,
@@ -285,7 +287,7 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
                 Ok(None)
             }
         }
-        Commands::Client | Commands::AgentEdit { .. } => Ok(None),
+        Commands::Client | Commands::GitLock | Commands::AgentEdit { .. } => Ok(None),
     }
 }
 
@@ -405,6 +407,42 @@ fn confirm_overwrite(directory: &Path) -> Result<()> {
 
 fn join_marker(directory: &Path) -> PathBuf {
     directory.join(config::CONFIG_DIR).join("joined")
+}
+
+/// Asks the daemon for the Git lock through files it polls; see `vcs_lock::REQUEST_FILE`.
+async fn git_lock(directory: &Path) -> Result<()> {
+    let request_file = directory.join(vcs_lock::REQUEST_FILE);
+    std::fs::write(&request_file, b"")?;
+    let request = std::fs::metadata(&request_file)?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let status_file = directory.join(vcs_lock::STATUS_FILE);
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(line) = std::fs::read_to_string(&status_file)
+            && let Some((holder, answered)) = vcs_lock::parse_status(&line)
+            && answered == request
+        {
+            match holder {
+                vcs_lock::Holder::Me => return Ok(()),
+                // The holder may be idle, in which case the lock moves to us shortly.
+                vcs_lock::Holder::Other(name) if start.elapsed() > Duration::from_secs(5) => {
+                    eprintln!(
+                        "teamtype: {name} holds the Git lock; ask them. It moves to you once they have been idle for {} seconds and you edit or retry.",
+                        vcs_lock::timeout().as_secs()
+                    );
+                    exit(1);
+                }
+                _ => {}
+            }
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            eprintln!("teamtype: the sharer did not confirm the Git lock; is it connected?");
+            exit(1);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn get_current_directory() -> Result<PathBuf> {
