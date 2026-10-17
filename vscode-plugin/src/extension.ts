@@ -125,7 +125,7 @@ let t0 = Date.now()
 const mutex = new Mutex()
 let expectedContentAfterRemoteEdit: string | null = null
 
-const openType = new rpc.RequestType<{uri: string; content: string}, string, void>("open")
+const openType = new rpc.RequestType<{uri: string; content: string; savesFile: boolean}, string, void>("open")
 const closeType = new rpc.RequestType<{uri: string}, string, void>("close")
 const editType = new rpc.RequestType<Edit, string, void>("edit")
 const cursorType = new rpc.NotificationType<Cursor>("cursor")
@@ -355,7 +355,8 @@ function activateConfigForTextDocument(name: string, document: vscode.TextDocume
     debug("OPEN " + decodeURI(uri))
     const content = document.getText()
     client.connection
-        .sendRequest(openType, {uri, content})
+        // This plugin saves the document after each change, so the daemon leaves the file to it.
+        .sendRequest(openType, {uri, content, savesFile: true})
         .then(() => {
             client.ot_states[uri] = {
                 revision: new Revision(),
