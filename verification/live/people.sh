@@ -120,13 +120,15 @@ finish_typing() {
     wait "${typists[@]}"
     typists=()
 }
-# Every Neovim buffer is identical and holds exactly COUNT lines matching PATTERN.
+# Every Neovim buffer, and every daemon's file on disk, is identical and holds exactly COUNT
+# lines matching PATTERN.
 buffers_agree_with() {
     local text person
     text=$(buffer "$sharer")
     [ "$(grep -c "$1" <<<"$text")" -eq "$2" ] || return 1
-    for person in "${people[@]:1}"; do
-        [ "$text" = "$(buffer "$person")" ] || return 1
+    for person in "${people[@]}"; do
+        [ "$text" = "$(buffer "$person")" ] && [ "$text" = "$(cat "$work/$person/shared.txt")" ] ||
+            return 1
     done
 }
 files_agree() {
@@ -190,9 +192,10 @@ sleep 1
 files_agree agent.txt v3 || fail "stale agent edit changed the file"
 
 # Agent edits to the file every Neovim has open, while the sharer's Neovim keeps typing.
-# The agent rereads and retries when the file changed under it, as a real agent would.
+# The agent reads the file from disk, and rereads and retries when it changed under it, as a real
+# agent would.
 agent_append() {
-    snapshot=$(buffer c)$'\n'
+    snapshot=$(cat "$work/c/shared.txt")$'\n'
     agent_edit c shared.txt "$snapshot" "${snapshot}agent-line"$'\n'
 }
 type_lines "$sharer" late

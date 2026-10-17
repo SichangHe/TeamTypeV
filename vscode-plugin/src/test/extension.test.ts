@@ -47,7 +47,7 @@ suite("Extension Test Suite", () => {
     const bin = process.env.TEAMTYPE_BINARY ?? path.join(repo, "target/debug/teamtype")
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "teamtype-vscode-"))
     const [dirA, dirB, dirC] = ["a", "b", "c"].map((name) => path.join(root, name))
-    const [fileB, fileC] = [dirB, dirC].map((dir) => path.join(dir, "file.txt"))
+    const [fileA, fileB, fileC] = [dirA, dirB, dirC].map((dir) => path.join(dir, "file.txt"))
     const children: cp.ChildProcess[] = []
     const nvimSocket = path.join(root, "b.nvim")
     let doc: vscode.TextDocument
@@ -136,17 +136,21 @@ suite("Extension Test Suite", () => {
             }
         },
     }
-    /** Passes once all three editors show the same text with `count` lines matching `pattern`. */
+    /**
+     * Passes once all three editors, and the file on each daemon's disk, show the same text with
+     * `count` lines matching `pattern`. VS Code saves its file itself; the daemons write the others.
+     */
     const editorsAgreeWith = async (what: string, pattern: RegExp, count: number) => {
         let texts: string[] = []
         try {
             await waitFor(what, async () => {
                 texts = [doc.getText(), await nvimExpr('join(getline(1, "$"), "\\n") .. "\\n"'), await emacsEval("(buffer-string)")]
+                texts.push(...[fileA, fileB, fileC].map((file) => fs.readFileSync(file, "utf8")))
                 return (texts[0].match(pattern) ?? []).length === count && texts.every((text) => text === texts[0])
             })
         } catch (error) {
             const counts = texts.map((text) => (text.match(pattern) ?? []).length)
-            throw new Error(`${error}; lines matching in VS Code, Neovim, Emacs: ${counts}`)
+            throw new Error(`${error}; lines matching in VS Code, Neovim, Emacs, disk a, b, c: ${counts}`)
         }
     }
 
@@ -238,9 +242,10 @@ suite("Extension Test Suite", () => {
     test("an agent edits while Neovim and Emacs type and VS Code watches", async function () {
         this.timeout(300000)
         const typing = Promise.all([typeLines.nvim("agent-n"), typeLines.emacs("agent-e")])
-        // The agent rereads and retries when the file changed under it, as a real agent would.
+        // The agent reads the file from disk, and rereads and retries when it changed under it, as
+        // a real agent would.
         await waitFor("the agent edit is accepted", async () => {
-            const snapshot = await emacsEval("(buffer-string)")
+            const snapshot = fs.readFileSync(fileC, "utf8")
             const args = ["agent-edit", "--directory", dirC, "--file", "file.txt"]
             args.push("--expected", snapshot, "--replacement", snapshot + "agent-line\n")
             return run(bin, args).then(
