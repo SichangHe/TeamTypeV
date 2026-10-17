@@ -63,6 +63,14 @@ async fn main() -> Result<()> {
 
     logging::initialize().context("Failed to initialize logging")?;
 
+    if let Commands::Tunnel {
+        secret_address,
+        port,
+    } = &cli.command
+    {
+        return teamtype::peer::run_tunnel(secret_address, *port).await;
+    }
+
     let temporary_directory = get_temporary_directory(&cli)?;
     let directory = get_directory(temporary_directory.as_ref(), &cli)?;
     setup_teamtype_directory(&directory, temporary_directory.as_ref())
@@ -76,6 +84,7 @@ async fn main() -> Result<()> {
     let _handle = match cli.command {
         Commands::Client => return run_client(directory.clone()).await,
         Commands::GitLock => return git_lock(&directory).await,
+        Commands::Tunnel { .. } => unreachable!("Handled before the directory setup"),
         Commands::AgentEdit {
             file,
             old,
@@ -160,6 +169,7 @@ async fn parse_join_config(command: Commands, directory: PathBuf) -> Result<AppC
             peer: join_code.map(config::Peer::JoinCode),
             emit_join_code: false,
             emit_secret_address: false,
+            forward_port: None,
             magic_wormhole_relay,
             iroh_relay,
             iroh_dns_domain,
@@ -192,6 +202,7 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
                 ..
             },
         show_secret_address,
+        forward_port,
         ..
     } = command
     {
@@ -200,6 +211,7 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
             peer: None,
             emit_join_code: !no_join_code,
             emit_secret_address: show_secret_address,
+            forward_port,
             magic_wormhole_relay,
             iroh_relay,
             iroh_dns_domain,
@@ -284,7 +296,10 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
                 Ok(None)
             }
         }
-        Commands::Client | Commands::GitLock | Commands::AgentEdit { .. } => Ok(None),
+        Commands::Client
+        | Commands::GitLock
+        | Commands::Tunnel { .. }
+        | Commands::AgentEdit { .. } => Ok(None),
     }
 }
 

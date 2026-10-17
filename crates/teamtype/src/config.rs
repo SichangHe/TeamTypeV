@@ -52,6 +52,8 @@ pub struct AppConfig {
     // Whether to sync version control directories like .git, .jj, ...
     pub sync_vcs: bool,
     pub username: Option<String>,
+    /// A local TCP port that guests can reach with `teamtype tunnel`.
+    pub forward_port: Option<u16>,
 }
 
 impl AppConfig {
@@ -122,6 +124,7 @@ impl AppConfig {
             }),
             sync_vcs: app_config_cli.sync_vcs,
             username: Some(username),
+            forward_port: app_config_cli.forward_port,
         }
     }
 

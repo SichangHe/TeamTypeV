@@ -35,6 +35,9 @@ use crate::config::AppConfig;
 use crate::daemon::DocumentActorHandle;
 
 mod sync;
+mod tunnel;
+
+pub use tunnel::run as run_tunnel;
 
 const ALPN: &[u8] = b"/teamtype/0";
 
@@ -92,6 +95,7 @@ impl ConnectionManager {
             document_handle,
             my_passphrase,
         );
+        actor.forward_port = app_config.forward_port;
 
         tokio::spawn(async move { actor.run().await });
 
@@ -132,7 +136,7 @@ impl ConnectionManager {
 
         let mut builder = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![ALPN.to_vec()]);
+            .alpns(vec![ALPN.to_vec(), tunnel::ALPN.to_vec()]);
 
         let relay_mode = match &app_config.iroh_relay {
             Some(iroh_relay) => {
@@ -248,6 +252,7 @@ struct EndpointActor {
     peer_tasks: HashMap<PublicKey, JoinHandle<()>>,
     peer_generations: HashMap<PublicKey, u64>,
     next_generation: u64,
+    forward_port: Option<u16>,
 }
 
 impl EndpointActor {
@@ -267,6 +272,7 @@ impl EndpointActor {
             peer_tasks: HashMap::new(),
             peer_generations: HashMap::new(),
             next_generation: 0,
+            forward_port: None,
         }
     }
 
@@ -425,6 +431,13 @@ impl EndpointActor {
 
     fn handle_incoming_connection(&mut self, conn: IrohEndpointConnection) {
         let endpoint_id = conn.remote_id();
+        if conn.alpn() == tunnel::ALPN {
+            if let Some(port) = self.forward_port {
+                debug!("Tunnel connected: {endpoint_id}");
+                tokio::spawn(tunnel::serve(conn, self.my_passphrase.clone(), port));
+            }
+            return;
+        }
 
         info!("Peer connected: {}", &endpoint_id);
         self.start_peer_generation(endpoint_id);

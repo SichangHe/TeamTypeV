@@ -70,6 +70,10 @@ pub enum Commands {
         /// Print the secret address. Useful for sharing with multiple people.
         #[arg(long)]
         show_secret_address: bool,
+        /// Let guests reach this local TCP port, for example a web editor, by running
+        /// `teamtype tunnel` with the secret address.
+        #[arg(long)]
+        forward_port: Option<u16>,
         #[command(flatten)]
         shared_flags: ShareJoinFlags,
     },
@@ -82,6 +86,15 @@ pub enum Commands {
     },
     /// Open a JSON-RPC connection to the Teamtype daemon on stdin/stdout. Used by text editor plugins.
     Client,
+    /// Reach the port a sharer forwards (`share --forward-port`) on localhost. Needs no shared
+    /// directory.
+    Tunnel {
+        /// The sharer's secret address.
+        secret_address: String,
+        /// The local port to listen on.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
     /// Ask the running daemon for the Git lock, and fail if another peer holds it. Run by the Git
     /// hook that Teamtype installs, before Git changes a branch.
     GitLock,
