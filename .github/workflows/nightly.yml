@@ -22,13 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Point the nightly release at this commit
+      # Built into a release of its own, so that the nightly release keeps its assets until the
+      # new ones are ready.
+      - name: Create a release for this build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly --prerelease --target "$GITHUB_SHA" \
-            --title "Nightly ($GITHUB_REF_NAME)" --notes "Built from $GITHUB_SHA."
+          gh release create "build-$GITHUB_RUN_ID" --prerelease --target "$GITHUB_SHA" \
+            --title "Nightly build $GITHUB_RUN_ID" --notes "Built from $GITHUB_SHA."
 
   upload-assets:
     needs: create-release
@@ -58,5 +59,26 @@ jobs:
           include: README.md,LICENSE.md
           archive: ${{ matrix.archive }}
           target: ${{ matrix.target }}
-          ref: refs/tags/nightly
+          ref: refs/tags/build-${{ github.run_id }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: upload-assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Move the assets to the nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          build="build-$GITHUB_RUN_ID"
+          mkdir assets
+          gh release download "$build" --dir assets
+          if ! gh release view nightly >/dev/null 2>&1; then
+            gh release create nightly --prerelease --target "$GITHUB_SHA" \
+              --title "Nightly ($GITHUB_REF_NAME)" --notes "Built from $GITHUB_SHA."
+          fi
+          gh release upload nightly assets/* --clobber
+          git push --force origin "$GITHUB_SHA:refs/tags/nightly"
+          gh release edit nightly --notes "Built from $GITHUB_SHA."
+          gh release delete "$build" --cleanup-tag --yes
