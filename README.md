@@ -53,6 +53,21 @@ We're often using it for pair programming ourselves, but there's still some [bug
 
 Teamtype works on Linux, macOS, Android, and on the Windows Subsystem for Linux.
 
+To install this fork's latest nightly build into `~/.local/bin` on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SichangHe/teamtype--teamtype/live-multi-editor/install.sh | sh
+```
+
+Add `-s -- --dir DIR` after `sh` to install elsewhere, or `-s -- --release TAG` for another release.
+Then join a shared directory with the secret address the sharer gives you:
+
+```bash
+mkdir my-project && cd my-project
+mkdir .teamtype && echo 'peer=<secret address>' > .teamtype/config
+teamtype join
+```
+
 <details>
 <summary>Binary releases</summary>
 
