@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: NONE
+#
+# SPDX-License-Identifier: CC0-1.0
+
+name: Nightly
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches:
+      - live-multi-editor
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Point the nightly release at this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly --prerelease --target "$GITHUB_SHA" \
+            --title "Nightly ($GITHUB_REF_NAME)" --notes "Built from $GITHUB_SHA."
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: $bin-x86_64-linux-static
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: $bin-aarch64-linux-static
+          - target: universal-apple-darwin
+            os: macos-latest
+            archive: $bin-universal-apple-darwin
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: $bin-x86_64-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/upload-rust-binary-action@v1
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        with:
+          bin: teamtype
+          include: README.md,LICENSE.md
+          archive: ${{ matrix.archive }}
+          target: ${{ matrix.target }}
+          ref: refs/tags/nightly
+          token: ${{ secrets.GITHUB_TOKEN }}
