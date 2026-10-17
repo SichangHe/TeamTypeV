@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use automerge::sync::{Message as AutomergeSyncMessage, State as AutomergeSyncState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast::error::RecvError, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::daemon::{DocMessage, DocumentActorHandle};
 use crate::types::EphemeralMessage;
@@ -27,6 +27,8 @@ pub enum PeerMessage {
     Ephemeral(EphemeralMessage),
     /// Version-control files, which are not in the CRDT; see `vcs_files`.
     Vcs(VcsMessage),
+    /// Sent first: the sender's history ID, or an empty string.
+    Hello(String),
 }
 
 #[async_trait]
@@ -77,6 +79,7 @@ impl SyncActor {
                     .send_message(DocMessage::ReceiveEphemeral(cursor))
                     .await;
             }
+            PeerMessage::Hello(theirs) => self.check_history(&theirs).await,
             PeerMessage::Vcs(message) => {
                 self.document_handle
                     .send_message(DocMessage::ReceiveVcs(message))
@@ -84,6 +87,26 @@ impl SyncActor {
             }
         }
         Ok(())
+    }
+
+    // 🧑 "Prevent this bug in the future. Should likely prioritize server history"
+    /// At a joiner: refuses to merge a history other than the sharer's. Merging two histories
+    /// replaces each file both have with one side's version wholesale, which once reverted the
+    /// sharer's files to a joiner's stale copies. The sharer's history wins: the joiner drops its
+    /// own and stops, and joining again takes the sharer's files.
+    async fn check_history(&self, theirs: &str) {
+        if self.document_handle.is_host() || theirs.is_empty() {
+            return;
+        }
+        let (mine, has_files) = self.document_handle.history_id().await;
+        if mine.as_deref() == Some(theirs) || (mine.is_none() && !has_files) {
+            return;
+        }
+        error!(
+            "The sharer has a different history than this directory, so merging could overwrite files. Dropped this directory's history; run `teamtype join` again to take the sharer's files."
+        );
+        let _ = std::fs::remove_file(self.document_handle.base_dir().join(".teamtype/doc"));
+        std::process::exit(1);
     }
 
     async fn generate_sync_message(&mut self) -> Result<()> {
@@ -113,6 +136,11 @@ impl SyncActor {
         let mut ephemeral_messages_rx = self.document_handle.subscribe_ephemeral_messages();
         // Subscribed before taking the snapshot, so that no change is missed.
         let mut vcs_messages_rx = self.document_handle.subscribe_vcs_messages();
+
+        let (history, _) = self.document_handle.history_id().await;
+        self.connection
+            .send(PeerMessage::Hello(history.unwrap_or_default()))
+            .await?;
 
         // Kick off initial synchronization with peer.
         self.generate_sync_message().await?;

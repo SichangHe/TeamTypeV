@@ -55,6 +55,8 @@ use crate::wormhole::put_secret_address_into_wormhole;
 // 🧑 "make it work for three or more people reliably"
 /// One failed address lookup must not end a join: a live three-daemon trial lost a joiner that way.
 const INITIAL_CONNECT_ATTEMPTS: usize = 5;
+/// Identifies the sharer's history; set when the sharer starts a new one.
+const HISTORY_ID: &str = ".teamtype/history";
 const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub const TEST_FILE_PATH: &str = "text";
@@ -70,6 +72,10 @@ pub enum DocMessage {
     FromWatcher(WatcherEvent),
     RescanFiles,
     CheckVcsLock,
+    /// This document's history ID, and whether it has any files.
+    HistoryId {
+        response_tx: oneshot::Sender<(Option<String>, bool)>,
+    },
     ReceiveVcs(VcsMessage),
     VcsSnapshot {
         response_tx: oneshot::Sender<Vec<VcsMessage>>,
@@ -99,6 +105,7 @@ impl fmt::Debug for DocMessage {
             Self::FromWatcher(e) => format!("FromWatcher({e:?}"),
             Self::RescanFiles => "RescanFiles".to_string(),
             Self::CheckVcsLock => "CheckVcsLock".to_string(),
+            Self::HistoryId { .. } => "HistoryId".to_string(),
             Self::ReceiveVcs(_) => "ReceiveVcs".to_string(),
             Self::VcsSnapshot { .. } => "VcsSnapshot".to_string(),
             Self::Persist => "Persist".to_string(),
@@ -205,6 +212,21 @@ impl DocumentActor {
             vcs_lock::timeout(),
         );
         s.install_git_hook();
+        if is_host
+            && s.current_file_content(&RelativePath::new(HISTORY_ID))
+                .is_none()
+        {
+            // Starts with a byte that is invalid UTF-8, so that it is stored as bytes.
+            let mut id = vec![0xFF];
+            id.extend(
+                repeat_with(|| format!("{:02x}", rand::rng().random::<u8>()))
+                    .take(16)
+                    .collect::<String>()
+                    .bytes(),
+            );
+            s.crdt_doc
+                .set_file(document::Content::Bytes(id), &RelativePath::new(HISTORY_ID));
+        }
 
         if persistence_file_exists && persist {
             if !init {
@@ -266,6 +288,20 @@ impl DocumentActor {
                 self.read_current_content_from_dir(false);
             }
             DocMessage::CheckVcsLock => self.tick_git_lock(),
+            DocMessage::HistoryId { response_tx } => {
+                let id = match self.current_file_content(&RelativePath::new(HISTORY_ID)) {
+                    Some(document::Content::Bytes(bytes)) => {
+                        Some(String::from_utf8_lossy(&bytes[1..]).into_owned())
+                    }
+                    _ => None,
+                };
+                let has_files = self
+                    .crdt_doc
+                    .files()
+                    .iter()
+                    .any(|path| !vcs_lock::is_internal(path));
+                let _ = response_tx.send((id, has_files));
+            }
             DocMessage::ReceiveVcs(message) => self.receive_vcs(message),
             DocMessage::VcsSnapshot { response_tx } => {
                 let _ = response_tx.send(vcs_files::snapshot_messages(self.local_vcs_files()));
@@ -1290,6 +1326,7 @@ pub struct DocumentActorHandle {
     ephemeral_message_tx: EphemeralMessageSender,
     vcs_tx: broadcast::Sender<VcsMessage>,
     is_host: bool,
+    base_dir: PathBuf,
     next_id: Arc<AtomicUsize>,
 }
 
@@ -1325,6 +1362,7 @@ impl DocumentActorHandle {
             ephemeral_message_tx,
             vcs_tx,
             is_host,
+            base_dir: app_config.base_dir.clone(),
             next_id: Arc::default(),
         }
     }
@@ -1349,6 +1387,24 @@ impl DocumentActorHandle {
 
     pub fn subscribe_vcs_messages(&self) -> broadcast::Receiver<VcsMessage> {
         self.vcs_tx.subscribe()
+    }
+
+    #[must_use]
+    pub const fn is_host(&self) -> bool {
+        self.is_host
+    }
+
+    #[must_use]
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    /// This document's history ID, and whether it has any files.
+    pub async fn history_id(&self) -> (Option<String>, bool) {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_message(DocMessage::HistoryId { response_tx })
+            .await;
+        response_rx.await.unwrap_or((None, false))
     }
 
     /// The sharer's version-control files for a peer that just connected, or none elsewhere.

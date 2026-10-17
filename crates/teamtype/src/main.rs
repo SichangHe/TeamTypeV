@@ -113,13 +113,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_daemon(app_config: AppConfig, init_doc: bool) -> Result<Daemon> {
-    let persist = !config::has_git_remote(&app_config.base_dir);
-    if !persist {
-        // TODO: drop .teamtype/doc here? Would that be rude?
-        info!(
-            "Detected a Git remote: Assuming a pair-programming use-case and starting a new history."
-        );
-    }
+    // 🧑 "Prevent this bug in the future. Should likely prioritize server history"
+    // Every peer keeps its history across restarts, so that the sharer's history continues and
+    // joiners can tell whether theirs belongs to it; see `peer::sync`.
+    let persist = true;
 
     config::ensure_teamtype_is_ignored(&app_config.base_dir, app_config.sync_vcs)?;
 
