@@ -235,4 +235,21 @@ suite("Extension Test Suite", () => {
         await editorsAgreeWith("lines typed during the absence reach everyone once", /^away-[vn]-\d+$/gm, 2 * N_ROUNDS)
         await editorsAgreeWith("lines typed after the return reach everyone", /^back-e-\d+$/gm, N_ROUNDS)
     })
+    test("an agent edits while Neovim and Emacs type and VS Code watches", async function () {
+        this.timeout(300000)
+        const typing = Promise.all([typeLines.nvim("agent-n"), typeLines.emacs("agent-e")])
+        // The agent rereads and retries when the file changed under it, as a real agent would.
+        await waitFor("the agent edit is accepted", async () => {
+            const snapshot = await emacsEval("(buffer-string)")
+            const args = ["agent-edit", "--directory", dirC, "--file", "file.txt"]
+            args.push("--expected", snapshot, "--replacement", snapshot + "agent-line\n")
+            return run(bin, args).then(
+                () => true,
+                () => false,
+            )
+        })
+        await typing
+        await editorsAgreeWith("the agent line reaches every editor", /^agent-line$/gm, 1)
+        await editorsAgreeWith("lines typed next to the agent reach everyone", /^agent-[ne]-\d+$/gm, 2 * N_ROUNDS)
+    })
 })
