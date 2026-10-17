@@ -89,6 +89,7 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
             EditorProtocolMessageFromEditor::Open {
                 uri: uri.clone(),
                 content: expected,
+                saves_file: false,
             },
         ),
         (

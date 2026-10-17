@@ -119,6 +119,9 @@ pub enum EditorProtocolMessageFromEditor {
     Open {
         uri: DocumentUri,
         content: String,
+        /// The editor saves the file after each change, so the daemon must not also write it.
+        #[serde(default, rename = "savesFile")]
+        saves_file: bool,
     },
     Close {
         uri: DocumentUri,
@@ -153,6 +156,7 @@ mod test_serde {
                 payload: EditorProtocolMessageFromEditor::Open {
                     uri: "file:///tmp/file".into(),
                     content: "initial content".to_string(),
+                    saves_file: false,
                 }
             }
         );
@@ -170,6 +174,7 @@ mod test_serde {
                 payload: EditorProtocolMessageFromEditor::Open {
                     uri: "file:///tmp/file".into(),
                     content: "initial content".to_string(),
+                    saves_file: false,
                 }
             }
         );

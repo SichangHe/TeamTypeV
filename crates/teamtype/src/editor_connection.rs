@@ -4,7 +4,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tracing::debug;
 
@@ -28,6 +28,8 @@ pub struct EditorConnection {
     app_config: AppConfig,
     /// There's one [`OTServer`] per open buffer.
     ot_servers: HashMap<RelativePath, OTServer>,
+    /// Open files this editor saves itself after each change.
+    files_it_saves: HashSet<RelativePath>,
     /// The name other people see.
     username: Option<String>,
 }
@@ -39,12 +41,18 @@ impl EditorConnection {
             username: app_config.username.clone(),
             app_config,
             ot_servers: HashMap::new(),
+            files_it_saves: HashSet::new(),
         }
     }
 
     #[must_use]
     pub fn owns(&self, file_path: &RelativePath) -> bool {
         self.ot_servers.contains_key(file_path)
+    }
+
+    #[must_use]
+    pub fn saves(&self, file_path: &RelativePath) -> bool {
+        self.files_it_saves.contains(file_path)
     }
 
     /// A message from inside is either an edit from another local editor or an edit that came
@@ -115,7 +123,11 @@ impl EditorConnection {
         }
 
         match message {
-            EditorProtocolMessageFromEditor::Open { uri, content } => {
+            EditorProtocolMessageFromEditor::Open {
+                uri,
+                content,
+                saves_file,
+            } => {
                 let uri = FileUri::try_from(uri.clone()).map_err(anyhow_err_to_protocol_err)?;
                 let absolute_path = uri.to_absolute_path();
                 let relative_path =
@@ -145,6 +157,11 @@ impl EditorConnection {
 
                 let ot_server = OTServer::new(content.clone());
                 self.ot_servers.insert(relative_path.clone(), ot_server);
+                if *saves_file {
+                    self.files_it_saves.insert(relative_path.clone());
+                } else {
+                    self.files_it_saves.remove(&relative_path);
+                }
 
                 Ok((
                     ComponentMessage::Open {
@@ -163,6 +180,7 @@ impl EditorConnection {
 
                 debug!("Got a 'close' message for {relative_path}");
                 self.ot_servers.remove(&relative_path);
+                self.files_it_saves.remove(&relative_path);
 
                 Ok((
                     ComponentMessage::Close {
@@ -288,6 +306,7 @@ mod tests {
             editor_connection.message_from_editor(&EditorProtocolMessageFromEditor::Open {
                 uri: "file:///foobar/file".to_string(),
                 content: String::new(),
+                saves_file: false,
             });
 
         assert!(result.is_err());
@@ -311,6 +330,7 @@ mod tests {
             editor_connection.message_from_editor(&EditorProtocolMessageFromEditor::Open {
                 uri: format!("file://{}", file.display()),
                 content: "initial content".to_string(),
+                saves_file: false,
             });
         assert_eq!(
             result,

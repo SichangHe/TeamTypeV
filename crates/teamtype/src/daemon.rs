@@ -123,6 +123,9 @@ pub struct DocumentActor {
     app_config: AppConfig,
     save_fully: bool,
     persist: bool,
+    /// Files an editor has open. Kept on disk too: after a crash, files an editor saved itself may
+    /// be ahead of the saved document on disk.
+    files_open_in_editors: HashSet<RelativePath>,
 }
 
 impl DocumentActor {
@@ -165,15 +168,26 @@ impl DocumentActor {
             crdt_doc,
             save_fully: true,
             persist,
+            files_open_in_editors: HashSet::default(),
         };
 
         if persistence_file_exists && persist {
+            if !init {
+                s.restore_files_left_open();
+            }
             s.read_current_content_from_dir(init);
         } else if is_host {
             s.read_current_content_from_dir(true);
         }
 
         s
+    }
+
+    #[must_use]
+    fn editor_saves(&self, file_path: &RelativePath) -> bool {
+        self.editor_connections
+            .values()
+            .any(|connection| connection.0.saves(file_path))
     }
 
     /// If any editor owns the file, it means that the daemon doesn't have ownership.
@@ -345,6 +359,7 @@ impl DocumentActor {
             }
             DocMessage::CloseEditorConnection(editor_id) => {
                 self.editor_connections.remove(&editor_id);
+                self.release_files();
 
                 let cursor_id = self.cursor_id(editor_id);
                 debug!("Deleting cursor {cursor_id}.");
@@ -378,6 +393,58 @@ impl DocumentActor {
                     panic!("Failed to persist to '{}'", persistence_file.display())
                 });
         }
+    }
+
+    fn open_files_list(&self) -> PathBuf {
+        self.app_config.base_dir.join(".teamtype/open-files")
+    }
+
+    fn save_files_open_in_editors(&self) {
+        let lines: Vec<String> = self
+            .files_open_in_editors
+            .iter()
+            .map(|file_path| format!("{}\n", file_path.display()))
+            .collect();
+        let lines = lines.concat();
+        sandbox::write_file(
+            &self.app_config.base_dir,
+            &self.open_files_list(),
+            lines.as_bytes(),
+        )
+        .unwrap_or_else(|err| panic!("Failed to save the list of open files: {err}"));
+    }
+
+    /// Writes files that no editor saves itself any more, and drops closed files from the list.
+    fn release_files(&mut self) {
+        let files: Vec<RelativePath> = self.files_open_in_editors.iter().cloned().collect();
+        let mut changed = false;
+        for file_path in &files {
+            self.write_file(file_path);
+            if self.owns(file_path) {
+                self.files_open_in_editors.remove(file_path);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_files_open_in_editors();
+        }
+    }
+
+    /// After a crash, files that were open in an editor may differ from the saved document on disk,
+    /// which holds what was shared. Reading them from disk instead shared their text again, which
+    /// a live trial showed as duplicated lines for everyone.
+    fn restore_files_left_open(&mut self) {
+        let Ok(bytes) = sandbox::read_file(&self.app_config.base_dir, &self.open_files_list())
+        else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let file_path = RelativePath::new(line);
+            if self.crdt_doc.file_exists(&file_path) {
+                self.write_file(&file_path);
+            }
+        }
+        self.save_files_open_in_editors();
     }
 
     fn absolute_path_for_file_path(&self, file_path: &RelativePath) -> AbsolutePath {
@@ -574,6 +641,7 @@ impl DocumentActor {
         connection.1.send(message).await.unwrap_or_else(|err| {
             error!("Failed to send message to editor: {err} Removing editor.");
             self.editor_connections.remove(editor_id);
+            self.release_files();
         });
     }
 
@@ -590,7 +658,14 @@ impl DocumentActor {
         }
     }
 
+    // 🧑 "make it work for three or more people reliably"
+    /// Writes the file to disk, unless an open editor saves it itself: a second writer made VS
+    /// Code's saves fail with "File Modified Since" in a live trial. Other open files are written,
+    /// so that tools reading the disk, such as agents, see the shared text.
     fn write_file(&mut self, file_path: &RelativePath) {
+        if self.editor_saves(file_path) {
+            return;
+        }
         if let Some(document::Content::String(text)) = self.current_file_content(file_path) {
             let bytes = text.clone().into_bytes();
             self.ensure_file_has_bytes(file_path, &bytes);
@@ -710,6 +785,9 @@ impl DocumentActor {
 
         match message {
             ComponentMessage::Open { file_path, content } => {
+                if self.files_open_in_editors.insert(file_path.clone()) {
+                    self.save_files_open_in_editors();
+                }
                 if let Some(document::Content::String(crdt_content)) =
                     self.current_file_content(file_path)
                 {
@@ -737,9 +815,7 @@ impl DocumentActor {
                     self.write_file(file_path);
                 }
             }
-            ComponentMessage::Close { file_path } => {
-                self.write_file(file_path);
-            }
+            ComponentMessage::Close { .. } => self.release_files(),
             ComponentMessage::Edit { file_path, delta } => {
                 self.crdt_doc.apply_delta_to_doc(delta, file_path).expect("Failed to apply delta to document while handling edit ComponentMessage. Probably the delta doesn't fit the document content.");
                 let _ = self.doc_changed_ping_tx.send(());
