@@ -33,6 +33,7 @@ jobs:
   upload-assets:
     needs: create-release
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
@@ -44,9 +45,6 @@ jobs:
           - target: universal-apple-darwin
             os: macos-latest
             archive: $bin-universal-apple-darwin
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: $bin-x86_64-windows
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
