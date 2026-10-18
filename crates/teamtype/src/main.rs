@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
             old_file,
             new,
             new_file,
+            agent,
         } => {
             let [old, new] =
                 [(old, old_file), (new, new_file)].map(|(text, path)| match (text, path) {
@@ -99,7 +100,14 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Could not read {}", path.display())),
                     (None, None) => bail!("Missing content for the agent edit"),
                 });
-            return agent_edit::run(&directory, &file, &old?, &new?).await;
+            agent_edit::run(&directory, &file, &old?, &new?).await?;
+            return agent_edit::save_snapshot(&directory, &agent, &file);
+        }
+        Commands::AgentRead { file, agent } => {
+            return agent_edit::read(&directory, &agent, &file);
+        }
+        Commands::AgentDiff { file, agent } => {
+            return agent_edit::diff(&directory, &agent, file.as_deref());
         }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
@@ -299,7 +307,9 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
         Commands::Client
         | Commands::GitLock
         | Commands::Tunnel { .. }
-        | Commands::AgentEdit { .. } => Ok(None),
+        | Commands::AgentEdit { .. }
+        | Commands::AgentRead { .. }
+        | Commands::AgentDiff { .. } => Ok(None),
     }
 }
 

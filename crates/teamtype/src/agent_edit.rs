@@ -7,7 +7,7 @@
 //! Going through the daemon instead of the file on disk matters because the daemon ignores disk
 //! changes to a file that an editor has open.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -171,6 +171,89 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
     bail!("Daemon closed the connection before confirming the agent edit")
 }
 
+// 🧑 "Does Teamtype give you a good way to see diffs from your last read/write? How should it be
+// best done if not already?"
+/// Where `agent`'s snapshot of `file` is kept: the content it last read or wrote.
+fn snapshot_path(directory: &Path, agent: &str, file: &Path) -> PathBuf {
+    directory
+        .join(".teamtype/agent-snapshots")
+        .join(agent)
+        .join(file)
+}
+
+/// Remembers `file`'s current content as `agent`'s snapshot.
+pub fn save_snapshot(directory: &Path, agent: &str, file: &Path) -> Result<()> {
+    let content = std::fs::read(directory.join(file))
+        .with_context(|| format!("Could not read {}", file.display()))?;
+    let snapshot = snapshot_path(directory, agent, file);
+    if let Some(parent) = snapshot.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&snapshot, content)?;
+    Ok(())
+}
+
+/// Prints `file` and remembers it as `agent`'s snapshot.
+pub fn read(directory: &Path, agent: &str, file: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(directory.join(file))
+        .with_context(|| format!("Could not read {}", file.display()))?;
+    print!("{content}");
+    save_snapshot(directory, agent, file)
+}
+
+/// Prints unified diffs from `agent`'s snapshots to the current content, of `file` or of every
+/// file the agent has a snapshot of.
+pub fn diff(directory: &Path, agent: &str, file: Option<&Path>) -> Result<()> {
+    let root = directory.join(".teamtype/agent-snapshots").join(agent);
+    let files: Vec<PathBuf> = match file {
+        Some(file) => vec![file.to_path_buf()],
+        None => walk(&root)
+            .into_iter()
+            .filter_map(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf))
+            .collect(),
+    };
+    for file in files {
+        let Ok(old) = std::fs::read_to_string(snapshot_path(directory, agent, &file)) else {
+            println!(
+                "No snapshot of {} for {agent}; use agent-read first.",
+                file.display()
+            );
+            continue;
+        };
+        let new = std::fs::read_to_string(directory.join(&file)).unwrap_or_default();
+        if old != new {
+            let name = file.display().to_string();
+            print!(
+                "{}",
+                similar::TextDiff::from_lines(&old, &new)
+                    .unified_diff()
+                    .header(
+                        &format!("{name} (last read or written)"),
+                        &format!("{name} (now)")
+                    )
+            );
+        }
+    }
+    Ok(())
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    entries
+        .flatten()
+        .flat_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path)
+            } else {
+                vec![path]
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +277,22 @@ mod tests {
         assert_eq!(op("a\nxyz\n", "a\nxQz\n"), (1, 1, 1, 2, "Q".into()));
         assert_eq!(op("a\nb\nc\n", "a\nc\n"), (1, 0, 2, 0, String::new()));
         assert_eq!(op("aa", "a"), (0, 1, 0, 2, String::new()));
+    }
+
+    #[test]
+    fn snapshots_follow_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = Path::new("sub/f.txt");
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join(file), "one\n").unwrap();
+        read(dir.path(), "ann", file).unwrap();
+        std::fs::write(dir.path().join(file), "two\n").unwrap();
+        let snapshot = std::fs::read_to_string(snapshot_path(dir.path(), "ann", file)).unwrap();
+        assert_eq!(snapshot, "one\n");
+        diff(dir.path(), "ann", None).unwrap();
+        save_snapshot(dir.path(), "ann", file).unwrap();
+        let snapshot = std::fs::read_to_string(snapshot_path(dir.path(), "ann", file)).unwrap();
+        assert_eq!(snapshot, "two\n");
     }
 
     #[test]

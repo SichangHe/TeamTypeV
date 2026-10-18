@@ -139,5 +139,28 @@ pub enum Commands {
         /// File holding the text to put in its place.
         #[arg(long, conflicts_with = "new")]
         new_file: Option<PathBuf>,
+        /// Whose snapshot to update to the edited content, for `agent-diff`.
+        #[arg(long, env = "TEAMTYPE_AGENT", default_value = "agent")]
+        agent: String,
+    },
+    /// Print a file and remember its content as the agent's snapshot, for `agent-diff`.
+    AgentRead {
+        /// File path relative to the shared directory.
+        #[arg(long)]
+        file: PathBuf,
+        /// Whose snapshot this is; agents sharing a directory should use distinct names.
+        #[arg(long, env = "TEAMTYPE_AGENT", default_value = "agent")]
+        agent: String,
+    },
+    /// Show what changed in files since the agent last read them with `agent-read` or wrote them
+    /// with `agent-edit`, as unified diffs. Does not tell who made the changes.
+    AgentDiff {
+        /// File path relative to the shared directory; all files the agent has snapshots of if
+        /// left out.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Whose snapshots to compare with.
+        #[arg(long, env = "TEAMTYPE_AGENT", default_value = "agent")]
+        agent: String,
     },
 }
