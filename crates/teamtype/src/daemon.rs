@@ -1036,6 +1036,14 @@ impl DocumentActor {
         let Ok(teamtype) = std::env::current_exe() else {
             return;
         };
+        // Linux names a running binary that was since replaced "<path> (deleted)"; the new
+        // binary at the path is the one to run.
+        let teamtype = PathBuf::from(
+            teamtype
+                .to_string_lossy()
+                .trim_end_matches(" (deleted)")
+                .to_owned(),
+        );
         let script = vcs_lock::hook_script(&teamtype);
         match std::fs::read_to_string(&hook) {
             Ok(existing) if existing == script => return,
