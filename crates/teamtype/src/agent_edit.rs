@@ -203,15 +203,17 @@ pub fn read(directory: &Path, agent: &str, file: &Path) -> Result<()> {
 
 /// Prints unified diffs from `agent`'s snapshots to the current content, of `file` or of every
 /// file the agent has a snapshot of.
-pub fn diff(directory: &Path, agent: &str, file: Option<&Path>) -> Result<()> {
+pub fn diff(directory: &Path, agent: &str, file: Option<&Path>) {
     let root = directory.join(".teamtype/agent-snapshots").join(agent);
-    let files: Vec<PathBuf> = match file {
-        Some(file) => vec![file.to_path_buf()],
-        None => walk(&root)
-            .into_iter()
-            .filter_map(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf))
-            .collect(),
-    };
+    let files: Vec<PathBuf> = file.map_or_else(
+        || {
+            walk(&root)
+                .into_iter()
+                .filter_map(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf))
+                .collect()
+        },
+        |file| vec![file.to_path_buf()],
+    );
     for file in files {
         let Ok(old) = std::fs::read_to_string(snapshot_path(directory, agent, &file)) else {
             println!(
@@ -234,7 +236,6 @@ pub fn diff(directory: &Path, agent: &str, file: Option<&Path>) -> Result<()> {
             );
         }
     }
-    Ok(())
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
@@ -289,7 +290,7 @@ mod tests {
         std::fs::write(dir.path().join(file), "two\n").unwrap();
         let snapshot = std::fs::read_to_string(snapshot_path(dir.path(), "ann", file)).unwrap();
         assert_eq!(snapshot, "one\n");
-        diff(dir.path(), "ann", None).unwrap();
+        diff(dir.path(), "ann", None);
         save_snapshot(dir.path(), "ann", file).unwrap();
         let snapshot = std::fs::read_to_string(snapshot_path(dir.path(), "ann", file)).unwrap();
         assert_eq!(snapshot, "two\n");

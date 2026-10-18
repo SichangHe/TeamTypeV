@@ -107,7 +107,8 @@ async fn main() -> Result<()> {
             return agent_edit::read(&directory, &agent, &file);
         }
         Commands::AgentDiff { file, agent } => {
-            return agent_edit::diff(&directory, &agent, file.as_deref());
+            agent_edit::diff(&directory, &agent, file.as_deref());
+            return Ok(());
         }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
