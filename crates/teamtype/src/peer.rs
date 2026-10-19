@@ -26,7 +26,7 @@ use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey};
 use postcard::{from_bytes, to_allocvec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -41,7 +41,9 @@ pub use tunnel::run as run_tunnel;
 
 /// Changes whenever peers of different versions cannot understand each other, so that they fail
 /// to connect with a clear message instead of disconnecting after every message.
-const ALPN: &[u8] = b"/teamtype-fork/1";
+const ALPN: &[u8] = b"/teamtype-fork/2";
+
+const PEER_TIMEOUT: Duration = Duration::from_secs(6);
 
 struct SecretAddress {
     endpoint_addr: EndpointAddr,
@@ -96,6 +98,7 @@ impl ConnectionManager {
             message_tx.clone(),
             document_handle,
             my_passphrase,
+            app_config.clone(),
         );
         actor.forward_port = app_config.forward_port;
 
@@ -138,7 +141,14 @@ impl ConnectionManager {
             Self::forget_copied_key(base_dir);
         }
         let (secret_key, my_passphrase) = Self::get_keypair(base_dir);
+        Ok((
+            Self::bind_endpoint(app_config, secret_key).await?,
+            my_passphrase,
+        ))
+    }
 
+    /// Binds an endpoint without reading or changing the daemon's identity on disk.
+    async fn bind_endpoint(app_config: &AppConfig, secret_key: SecretKey) -> Result<Endpoint> {
         let mut builder = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .alpns(vec![ALPN.to_vec(), tunnel::ALPN.to_vec()]);
@@ -171,9 +181,7 @@ impl ConnectionManager {
         };
         builder = builder.address_lookup(iroh_pkarr_lookup);
 
-        let endpoint = builder.bind().await?;
-
-        Ok((endpoint, my_passphrase))
+        Ok(builder.bind().await?)
     }
 
     /// A joiner whose `.teamtype` was copied from another directory would share that directory's
@@ -270,6 +278,7 @@ enum EndpointMessage {
 // another daemon.
 struct EndpointActor {
     endpoint: Endpoint,
+    app_config: AppConfig,
     message_rx: mpsc::Receiver<EndpointMessage>,
     message_tx: mpsc::Sender<EndpointMessage>,
     document_handle: DocumentActorHandle,
@@ -289,9 +298,11 @@ impl EndpointActor {
         message_tx: mpsc::Sender<EndpointMessage>,
         document_handle: DocumentActorHandle,
         my_passphrase: SecretKey,
+        app_config: AppConfig,
     ) -> Self {
         Self {
             endpoint,
+            app_config,
             message_rx,
             message_tx,
             document_handle,
@@ -320,8 +331,37 @@ impl EndpointActor {
                     return Ok(());
                 }
                 let generation = self.start_peer_generation(peer_id);
+                if previous_attempts > 1
+                    && !self.app_config.is_host()
+                    && self.peer_tasks.values().all(JoinHandle::is_finished)
+                {
+                    match ConnectionManager::bind_endpoint(
+                        &self.app_config,
+                        self.endpoint.secret_key().clone(),
+                    )
+                    .await
+                    {
+                        Ok(endpoint) => {
+                            let previous_endpoint = std::mem::replace(&mut self.endpoint, endpoint);
+                            tokio::spawn(async move { previous_endpoint.close().await });
+                        }
+                        Err(err) => warn!("Could not refresh the disconnected endpoint: {err:#}"),
+                    }
+                }
+                if response_tx.is_none() {
+                    self.endpoint.dns_resolver()?.reset();
+                    self.endpoint.network_change().await;
+                }
                 let endpoint_addr = secret_address.endpoint_addr.clone();
-                let connect_result = self.endpoint.connect(endpoint_addr, ALPN).await;
+                let connect = self.endpoint.connect(endpoint_addr, ALPN);
+                let connect_result = if response_tx.is_some() {
+                    connect.await.map_err(anyhow::Error::from)
+                } else {
+                    timeout(Duration::from_secs(8), connect)
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .and_then(|result| result.map_err(anyhow::Error::from))
+                };
                 let conn = match connect_result {
                     Ok(conn) => conn,
                     Err(err) => {
@@ -332,7 +372,7 @@ impl EndpointActor {
                         }
                         if let Some(response_tx) = response_tx {
                             response_tx
-                                .send(Err(err.into()))
+                                .send(Err(err))
                                 .expect("Connect receiver dropped");
                         }
                         Self::reconnect(
@@ -434,7 +474,7 @@ impl EndpointActor {
                 }
             }
         } else {
-            sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(1)).await;
             debug!(
                 "Making another attempt to connect to peer {}...",
                 secret_address.endpoint_addr.id
@@ -522,16 +562,31 @@ impl EndpointActor {
         conn: IrohEndpointConnection,
         auth: PeerAuth,
     ) -> Result<()> {
-        let stream = PeerMessageStream::new(conn, auth).await?;
-        let syncer = SyncActor::new(document_handle, Box::new(stream));
-        syncer.run().await
+        let result = async {
+            let stream =
+                timeout(PEER_TIMEOUT, PeerMessageStream::new(conn.clone(), auth)).await??;
+            let syncer = SyncActor::new(document_handle, Box::new(stream));
+            syncer.run().await
+        }
+        .await;
+        conn.close(0u32.into(), b"peer sync ended");
+        result
     }
 }
 
 // Sends/receives PeerMessages through an Iroh connection.
 struct PeerMessageStream {
-    send: SendStream,
+    message_tx: mpsc::Sender<PeerMessage>,
     message_rx: mpsc::Receiver<Result<PeerMessage>>,
+    read_task: JoinHandle<()>,
+    write_task: JoinHandle<()>,
+}
+
+impl Drop for PeerMessageStream {
+    fn drop(&mut self) {
+        self.read_task.abort();
+        self.write_task.abort();
+    }
 }
 
 impl PeerMessageStream {
@@ -561,48 +616,93 @@ impl PeerMessageStream {
         };
 
         let (message_tx, message_rx) = mpsc::channel(1);
-
-        tokio::spawn(async move {
-            let _ = Self::read_loop(receive, message_tx).await;
+        let read_conn = conn.clone();
+        let read_task = tokio::spawn(async move {
+            let _ = Self::read_loop(receive, message_tx, read_conn).await;
+        });
+        let (message_tx, write_rx) = mpsc::channel(1);
+        let write_task = tokio::spawn(async move {
+            if let Err(err) = Self::write_loop(send, write_rx).await {
+                debug!("Peer writer failed: {err}");
+                conn.close(0u32.into(), b"peer writer ended");
+            }
         });
 
-        Ok(Self { send, message_rx })
+        Ok(Self {
+            message_tx,
+            message_rx,
+            read_task,
+            write_task,
+        })
     }
 
     async fn read_loop(
         mut receive: RecvStream,
         message_tx: mpsc::Sender<Result<PeerMessage>>,
+        conn: IrohEndpointConnection,
     ) -> Result<()> {
         loop {
             let result = Self::read_next(&mut receive).await;
-
+            let failed = result.is_err();
+            if failed {
+                conn.close(0u32.into(), b"peer reader ended");
+            }
             message_tx.send(result).await?;
+            if failed {
+                return Ok(());
+            }
         }
     }
 
     async fn read_next(receive: &mut RecvStream) -> Result<PeerMessage> {
         let mut message_len_buf = [0; 4];
-        receive.read_exact(&mut message_len_buf).await?;
+        Self::read_exact(receive, &mut message_len_buf).await?;
         let byte_count = u32::from_be_bytes(message_len_buf);
 
         let mut bytes = vec![0; byte_count as usize];
-        receive.read_exact(&mut bytes).await?;
+        Self::read_exact(receive, &mut bytes).await?;
         from_bytes(&bytes).context("Could not read the peer's message; the peer probably runs a different teamtype version")
+    }
+
+    /// Times out only when bytes stop arriving, allowing large sync messages to make progress.
+    async fn read_exact(receive: &mut RecvStream, mut bytes: &mut [u8]) -> Result<()> {
+        while !bytes.is_empty() {
+            let count = timeout(PEER_TIMEOUT, receive.read(bytes))
+                .await??
+                .context("Peer stream ended")?;
+            bytes = &mut bytes[count..];
+        }
+        Ok(())
+    }
+
+    // 🧑 "Also not syncing after a while"
+    /// Writes independently of document processing. Flow control may pause a write indefinitely;
+    /// only the reader's time spent waiting for bytes determines peer inactivity.
+    async fn write_loop(
+        mut send: SendStream,
+        mut message_rx: mpsc::Receiver<PeerMessage>,
+    ) -> Result<()> {
+        loop {
+            let message = match timeout(Duration::from_secs(2), message_rx.recv()).await {
+                Ok(Some(message)) => message,
+                Ok(None) => return Ok(()),
+                Err(_) => PeerMessage::Heartbeat,
+            };
+            let bytes = to_allocvec(&message).context("Failed to convert PeerMessage to bytes")?;
+            let byte_count = u32::try_from(bytes.len())?;
+            send.write_all(&byte_count.to_be_bytes()).await?;
+            send.write_all(&bytes).await?;
+        }
     }
 }
 
 #[async_trait]
 impl Connection<PeerMessage> for PeerMessageStream {
     async fn send(&mut self, message: PeerMessage) -> Result<()> {
-        let bytes: Vec<u8> =
-            to_allocvec(&message).context("Failed to convert PeerMessage to bytes")?;
-        let byte_count =
-            u32::try_from(bytes.len()).expect("Converting a length to u32 should work");
-
-        self.send.write_all(&byte_count.to_be_bytes()).await?;
-        self.send.write_all(&bytes).await?;
-
-        Ok(())
+        self.message_tx
+            .send(message)
+            .await
+            .context("Peer writer ended")
     }
 
     async fn next(&mut self) -> Result<PeerMessage> {

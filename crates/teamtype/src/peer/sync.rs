@@ -29,6 +29,8 @@ pub enum PeerMessage {
     Vcs(VcsMessage),
     /// Sent first: the sender's history ID, or an empty string.
     Hello(String),
+    /// Keeps the ordered sync stream active so stalled reads cause a reconnect.
+    Heartbeat,
 }
 
 #[async_trait]
@@ -80,6 +82,7 @@ impl SyncActor {
                     .await;
             }
             PeerMessage::Hello(theirs) => self.check_history(&theirs).await,
+            PeerMessage::Heartbeat => {}
             PeerMessage::Vcs(message) => {
                 self.document_handle
                     .send_message(DocMessage::ReceiveVcs(message))
