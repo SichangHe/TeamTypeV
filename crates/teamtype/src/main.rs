@@ -9,19 +9,17 @@ use std::io::Write;
 use std::io::{stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::time::Duration;
 use std::{env, panic};
 
 use anyhow::bail;
 use anyhow::{Context, Result};
 use clap::{CommandFactory as _, FromArgMatches as _};
-use docstr::docstr;
 use microxdg::XdgApp;
 use teamtype::jsonrpc_forwarder::{JSONRPCForwarder, UnixJSONRPCForwarder};
 use teamtype::{
     config::{self, AppConfig},
     daemon::Daemon,
-    logging, sandbox, vcs_lock,
+    logging, sandbox,
 };
 use tempfile::{TempDir, tempdir_in};
 use tokio::signal;
@@ -71,6 +69,11 @@ async fn main() -> Result<()> {
         return teamtype::peer::run_tunnel(secret_address, *port).await;
     }
 
+    if let Commands::Git { args } = &cli.command {
+        let code = teamtype::git_forward::client(cli.directory.as_deref(), args.clone()).await?;
+        exit(code);
+    }
+
     let temporary_directory = get_temporary_directory(&cli)?;
     let directory = get_directory(temporary_directory.as_ref(), &cli)?;
     setup_teamtype_directory(&directory, temporary_directory.as_ref())
@@ -83,7 +86,7 @@ async fn main() -> Result<()> {
     // listeners properly listen to the mpsc channel or receive and process a cancellation token.
     let _handle = match cli.command {
         Commands::Client => return run_client(directory.clone()).await,
-        Commands::GitLock => return git_lock(&directory).await,
+        Commands::Git { .. } => unreachable!("Handled before directory setup"),
         Commands::Tunnel { .. } => unreachable!("Handled before the directory setup"),
         Commands::AgentEdit {
             file,
@@ -141,16 +144,7 @@ async fn run_daemon(app_config: AppConfig, init_doc: bool) -> Result<Daemon> {
     // joiners can tell whether theirs belongs to it; see `peer::sync`.
     let persist = true;
 
-    config::ensure_teamtype_is_ignored(&app_config.base_dir, app_config.sync_vcs)?;
-
-    if app_config.sync_vcs && config::has_local_user_config(&app_config.base_dir).is_ok_and(|v| v) {
-        warn!(docstr!(
-            /// You have a local user configuration in your .git/config.
-            /// In --sync-vcs mode, this file will also be synchronized between peers.
-            /// If your version "wins", all peers will have the same Git identity.
-            /// As a workaround, you could use `git commit --author`.
-        ));
-    }
+    config::ensure_teamtype_is_ignored(&app_config.base_dir)?;
 
     debug!("Starting Teamtype on {}.", app_config.base_dir.display());
 
@@ -172,12 +166,18 @@ async fn parse_join_config(command: Commands, directory: PathBuf) -> Result<AppC
                 iroh_dns_domain,
                 iroh_pkarr_relay,
                 no_sync_vcs,
+                sync_vcs,
                 username,
                 ..
             },
         ..
     } = command
     {
+        if no_sync_vcs || sync_vcs {
+            warn!(
+                "--sync-vcs and --no-sync-vcs are deprecated no-ops; Git commands run on the sharer"
+            );
+        }
         let app_config_cli = AppConfig {
             base_dir: directory,
             peer: join_code.map(config::Peer::JoinCode),
@@ -188,7 +188,6 @@ async fn parse_join_config(command: Commands, directory: PathBuf) -> Result<AppC
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            sync_vcs: !no_sync_vcs,
             username,
         };
         let mut app_config = AppConfig::from_config_file_and_cli(app_config_cli);
@@ -212,6 +211,7 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
                 iroh_dns_domain,
                 iroh_pkarr_relay,
                 no_sync_vcs,
+                sync_vcs,
                 username,
                 ..
             },
@@ -220,6 +220,11 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
         ..
     } = command
     {
+        if no_sync_vcs || sync_vcs {
+            warn!(
+                "--sync-vcs and --no-sync-vcs are deprecated no-ops; Git commands run on the sharer"
+            );
+        }
         let app_config_cli = AppConfig {
             base_dir: directory,
             peer: None,
@@ -230,7 +235,6 @@ fn parse_share_config(command: Commands, directory: PathBuf) -> AppConfig {
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            sync_vcs: !no_sync_vcs,
             username,
         };
         let mut app_config = AppConfig::from_config_file_and_cli(app_config_cli);
@@ -311,7 +315,7 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
             }
         }
         Commands::Client
-        | Commands::GitLock
+        | Commands::Git { .. }
         | Commands::Tunnel { .. }
         | Commands::AgentEdit { .. }
         | Commands::AgentRead { .. }
@@ -412,14 +416,9 @@ fn confirm_overwrite(directory: &Path) -> Result<()> {
     let has_files = std::fs::read_dir(directory)?
         .flatten()
         .any(|entry| entry.file_name() != config::CONFIG_DIR);
-    let what = if directory.join(".git").exists() {
-        "files, including .git,"
-    } else {
-        "files"
-    };
     if has_files && !marker.exists() {
         warn!(
-            "Joining overwrites the {what} in '{}' with the sharer's versions.",
+            "Joining overwrites the working files in '{}' with the sharer's versions.",
             directory.display()
         );
         if !prompt_bool("Overwrite them?")? {
@@ -427,7 +426,7 @@ fn confirm_overwrite(directory: &Path) -> Result<()> {
         }
     } else {
         info!(
-            "Joining keeps the {what} here identical to the sharer's, overwriting local changes."
+            "Joining keeps the working files here identical to the sharer's, overwriting local changes."
         );
     }
     Ok(())
@@ -435,42 +434,6 @@ fn confirm_overwrite(directory: &Path) -> Result<()> {
 
 fn join_marker(directory: &Path) -> PathBuf {
     directory.join(config::CONFIG_DIR).join("joined")
-}
-
-/// Asks the daemon for the Git lock through files it polls; see `vcs_lock::REQUEST_FILE`.
-async fn git_lock(directory: &Path) -> Result<()> {
-    let request_file = directory.join(vcs_lock::REQUEST_FILE);
-    std::fs::write(&request_file, b"")?;
-    let request = std::fs::metadata(&request_file)?
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    let status_file = directory.join(vcs_lock::STATUS_FILE);
-    let start = std::time::Instant::now();
-    loop {
-        if let Ok(line) = std::fs::read_to_string(&status_file)
-            && let Some((holder, answered)) = vcs_lock::parse_status(&line)
-            && answered == request
-        {
-            match holder {
-                vcs_lock::Holder::Me => return Ok(()),
-                // The holder may be idle, in which case the lock moves to us shortly.
-                vcs_lock::Holder::Other(name) if start.elapsed() > Duration::from_secs(5) => {
-                    eprintln!(
-                        "teamtype: {name} holds the Git lock; ask them. It moves to you once they have been idle for {} seconds and you edit or retry.",
-                        vcs_lock::timeout().as_secs()
-                    );
-                    exit(1);
-                }
-                _ => {}
-            }
-        }
-        if start.elapsed() > Duration::from_secs(20) {
-            eprintln!("teamtype: the sharer did not confirm the Git lock; is it connected?");
-            exit(1);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 fn get_current_directory() -> Result<PathBuf> {

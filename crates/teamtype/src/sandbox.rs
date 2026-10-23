@@ -17,7 +17,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::bail;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
-use ignore::overrides::OverrideBuilder;
 use path_clean::PathClean;
 
 use crate::config::AppConfig;
@@ -106,10 +105,7 @@ pub fn exists(absolute_base_dir: &Path, absolute_file_path: &Path) -> Result<boo
 }
 
 pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
-    let mut ignored_things = vec![".teamtype"];
-    if !app_config.sync_vcs {
-        ignored_things.extend([".teamtype", ".git", ".bzr", ".hg", ".jj", ".pijul", ".svn"]);
-    }
+    let ignored_things = [".teamtype", ".git", ".bzr", ".hg", ".jj", ".pijul", ".svn"];
 
     let walk = WalkBuilder::new(&app_config.base_dir)
         .add_custom_ignore_filename(".teamtypeignore")
@@ -139,46 +135,25 @@ pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
         .map(|dir_entry| dir_entry.path().to_path_buf())
         .collect();
 
-    // When jj is used colocatedly with Git, there will be a .jj/.gitignore that ignores .jj.
-    // With --sync-vcs, we want to un-ignore it, though! The ignore crate's override functionality
-    // doesn't seem to allow for that - as soon as we positive-list something, everything else gets
-    // ignored.
-    // So do a second walk, and merge the results.
-    if app_config.sync_vcs {
-        let overrides = OverrideBuilder::new(app_config.base_dir.clone())
-            .add(".jj/")
-            .expect("Failed to add pattern to OverrideBuilder")
-            .add(".jj/**")
-            .expect("Failed to add pattern to OverrideBuilder")
-            .build()
-            .expect("Failed to build Overrides");
-        let walk = WalkBuilder::new(&app_config.base_dir)
-            .overrides(overrides)
-            .build();
-        let jj_files: Vec<PathBuf> = walk
-            .filter_map(Result::ok)
-            .filter(|dir_entry| {
-                !dir_entry
-                    .file_type()
-                    .expect("Couldn't get file type of dir entry")
-                    .is_dir()
-            })
-            .map(|dir_entry| dir_entry.path().to_path_buf())
-            .collect();
-
-        // TODO: Remove duplicates, in the case that jj is used non-colocatedly.
-        files.extend(jj_files);
-
-        // 🧑 "fix the ignore issue": a file that Git tracks must reach the peers, or their Git
-        // sees it as deleted.
-        let known: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
-        let config_dir = app_config.base_dir.join(".teamtype");
-        files.extend(
+    // 🧑 "fix the ignore issue": a file that Git tracks must reach the peers, or their Git
+    // sees it as deleted.
+    let known: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+    let config_dir = app_config.base_dir.join(".teamtype");
+    files.extend(
+        (if app_config.is_host() {
             crate::config::git_tracked_files(&app_config.base_dir)
-                .into_iter()
-                .filter(|path| !known.contains(path) && !path.starts_with(&config_dir)),
-        );
-    }
+        } else {
+            vec![]
+        })
+        .into_iter()
+        .filter(|path| {
+            !known.contains(path)
+                && !path.starts_with(&config_dir)
+                && !crate::git_forward::excluded(
+                    path.strip_prefix(&app_config.base_dir).unwrap_or(path),
+                )
+        }),
+    );
 
     files
 }
@@ -250,6 +225,24 @@ fn absolute_and_canonicalized(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn joiner_does_not_enumerate_stale_tracked_ignored_files() -> Result<()> {
+        let root = tempdir()?;
+        let repo = git2::Repository::init(root.path())?;
+        fs::write(root.path().join(".gitignore"), "stale\n")?;
+        fs::write(root.path().join("stale"), "old index entry")?;
+        let mut index = repo.index()?;
+        index.add_path(Path::new("stale"))?;
+        index.write()?;
+        let mut config = AppConfig {
+            base_dir: root.path().to_path_buf(),
+            ..Default::default()
+        };
+        assert!(enumerate_non_ignored_files(&config).contains(&root.path().join("stale")));
+        config.peer = Some(crate::config::Peer::SecretAddress(String::new()));
+        assert!(!enumerate_non_ignored_files(&config).contains(&root.path().join("stale")));
+        Ok(())
+    }
     use std::os::unix::fs::symlink;
 
     use tempfile::{TempDir, tempdir};

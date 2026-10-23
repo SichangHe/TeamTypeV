@@ -37,14 +37,20 @@ use self::sync::{Connection, PeerMessage, SyncActor};
 use crate::config::AppConfig;
 use crate::daemon::DocumentActorHandle;
 
-mod sync;
+pub(crate) mod sync;
 mod tunnel;
 
 pub use tunnel::run as run_tunnel;
 
 /// Changes whenever peers of different versions cannot understand each other, so that they fail
 /// to connect with a clear message instead of disconnecting after every message.
-const ALPN: &[u8] = b"/teamtype-fork/2";
+const ALPN: &[u8] = b"/teamtype-fork/4";
+
+#[test]
+fn forwarding_protocol_rejects_legacy_alpn() {
+    assert_ne!(ALPN, b"/teamtype-fork/2".as_slice());
+    assert_ne!(ALPN, b"/teamtype-fork/3".as_slice());
+}
 
 const PEER_TIMEOUT: Duration = Duration::from_secs(6);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);

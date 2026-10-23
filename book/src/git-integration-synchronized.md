@@ -5,64 +5,41 @@ SPDX-FileCopyrightText: 2025 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# Synchronized method
+# Forwarded Git commands
+(authored by agents unless marked 🧑)
 
-By default, Teamtype tightly integrates with Git; `--no-sync-vcs` turns this off.
+Run `teamtype share` in the repository. Join from an empty directory, then use `teamtype git ARGS...` there. Commands run in the corresponding directory on the sharer, including when invoked from a subdirectory. Use `teamtype --directory /path/to/shared git ...` from elsewhere to run at the shared root.
 
-Setting it causes Teamtype to *not* [ignore](ignored-files.md) version-control directories when synchronizing files.
-This might seem like an unusual approach to working with Git, but in our tests, when pairing, it seems to work more or less smoothly.
+Teamtype installs a wrapper at `.teamtype/bin/git` on each joiner. To make ordinary `git` commands and editor Git integrations use forwarding, add its absolute directory to PATH before starting the editor:
 
-All peers should use the same setting.
+```sh
+export PATH="$PWD/.teamtype/bin:$PATH"
+git status
+git commit -am "Update shared files"
+```
 
-## One peer at a time changes Git
+The wrapper finds the shared root from the current directory. Outside the shared directory, remove this PATH entry to use your ordinary Git. A preexisting joiner's `.git` is left untouched; direct Git without the wrapper still uses that local repository.
 
-Only the peer holding the Git lock may change version-control directories.
-The lock starts with the sharer, and only the sharer hands it on, so two peers never hold it at once.
-It moves to another peer when they edit a shared file or run a Git command while the holder has been idle for 3 minutes; it never just expires.
-Teamtype installs a `reference-transaction` Git hook, which asks for the lock before Git changes a branch, for example on `git commit`, `git checkout`, or `git reset`.
-When someone else holds the lock, the Git command fails with a message naming them, so you can ask them.
-If your repository already has that hook, or sets `core.hooksPath`, Git commands are not stopped; Teamtype then only keeps your changes to `.git` out of the shared state while someone else holds the lock.
+The sharer runs forwarded commands one at a time. Each command waits until that joiner's earlier edits have reached the sharer's document and files. Changes must have been sent by the editor plugin; before Git runs, the sharer flushes open buffers to disk, including files normally saved by an editor. Close affected editor buffers before commands that change working files: handling outside changes to open buffers requires a separate editor fix. Changes made by other participants can also be included. Staging is shared: coordinate `add` and `commit` if several people are preparing commits.
 
-Version-control files are not part of Teamtype's history: the lock holder's changes go to the sharer, which passes them on, and a joining peer first receives all of the sharer's version-control files.
-Peers running an older Teamtype cannot receive them and disconnect.
+Git commands run directly on the sharer use Git's own locks and can conflict with forwarded commands. Use `teamtype git` there as well when you want commands queued together.
 
-## Joining overwrites the directory
+Forwarded commands require the shared root to own a non-bare Git repository. A repository in a parent directory is rejected.
 
-Joining makes your directory identical to the sharer's, including `.git`.
-When you join into a directory that has files and was not joined before, Teamtype asks before overwriting them; to keep your files, join from an empty directory.
+## Input and output
 
-We'll describe this method from the perspective of Git, but it might/should work for other version-control systems as well.
+Arguments and stdin are forwarded without shell expansion on the sharer. Stdout and stderr stream back as bytes, with Git's exit code (128 plus the signal number when Git is killed). Nonterminal stdin transfers in 16 KiB chunks until EOF and is stored in temporary files before execution. Terminal stdin is empty. Stdin has no total size limit; it needs enough temporary disk space on both peers. Acknowledgements bound input transfers so file synchronization continues during uploads. Output streams through bounded buffers without a total size limit; a slow consumer applies backpressure while file synchronization continues. Three minutes without output progress or consumption cancels the command, and waiting clients see the command ahead of them.
 
-## Why would you want this?
+Forwarding is not a sandbox: joiners must be trusted with the sharer's account. Subcommands can access paths outside the shared directory, credentials, configuration, hooks, and aliases. Repository discovery stops at the shared root, but this does not restrict what a Git subcommand can do.
 
-Using the synchronized method will synchronize all contents in `.git`:
-This includes all commits, branches, tags, objects, the current position of the HEAD.
-It will also synchronize `.git/config`, so remotes, and tracked branches will now be the same for all peers.
+Compared with plain Git, forwarded Git sees pipes rather than a terminal: automatic decorations, progress, columns, and colors may differ. The pager and automatic colors are disabled. Global configuration and repository override options are rejected with exit code 129. Inherited `GIT_*` variables are cleared, SSH uses `ssh -o BatchMode=yes` (overriding `core.sshCommand`), and editor and credential prompts are disabled. Commands use the sharer's identity and configuration, run serially, and wait for file synchronization; failed synchronization barriers return an error even if Git already ran.
 
-The effect is surprising:
+Interactive terminal sessions are unsupported. Use `commit -m` or `commit -F -` with piped input. Git editors are disabled, so commits that need an editor and `rebase -i` fail. `add -p` has no terminal interaction; supply its answers through stdin or use ordinary `add`. Hooks, aliases, signing tools, and credential helpers run on the sharer and may have their own interaction requirements.
 
-- When one peer creates a commit, it will immediately be visible for the other peers.
-- When one peer changes the branch, it will now also be checked out for the other peers.
-- Git's index will have the same state for all peers.
+Push and pull use the sharer's remotes and credentials. Git and SSH terminal credential prompts are disabled; configure credentials on the sharer first. See [Working with Git](git-integration.md) for the trust requirement and rejected global options. Git starts in a separate process group using the operating system's process API on Linux and macOS.
 
-This allows a very "smooth" collaboration, where you don't need to pull or push explicitly.
+## Disconnection and upgrades
 
-## Committing together
+A missing daemon or disconnected sharer returns an error. An unanswered request or sync barrier fails after ten seconds. Running commands have no execution deadline. Client disconnection sends SIGTERM to the command's process group, allowing two seconds for cleanup before SIGKILL. A command returns only after its file changes reach the requesting joiner's disk. If the connection drops after submission, a command may already have run; inspect `status` and `log` before retrying. Teamtype never automatically retries a Git command.
 
-When one of the participants initiates `git commit`, Git will, depending on your setup, open an editor where you can write the commit message.
-The temporary file for this is `.git/COMMIT_EDITMSG`, which is now synced, so any peer can open it as well and you can edit it together.
-The initiator of the commit has the "power" to finalize the commit by closing the file, their Git will create the commit.
-
-## Recommendation: Use a separate directory to try this
-
-You might not want to share all local branches with your peers.
-To have a safe environment to try this type of synchronization, we recommend to not use your regular project directory to collaborate.
-Instead, you might want to create a separate directory (`<projectname>-together`?) with a fresh clone.
-
-After the collaboration session, you can push your results to a remote, and pull them in your regular project directory.
-
-## Caveat: Shared local user configuration
-
-When `.git/config` contains settings like `user.name` or `user.email` (because one peer had configured a local Git identity), this might result in an unexpected result:
-All peers will have the same shared Git identity when creating commits.
-As a workaround, you can either use `git commit --author`, or conditional user configuration depending on the directory, using [`includeIf`](https://git-scm.com/docs/git-config#_includes).
+Use the same Teamtype build on all peers; the peer protocol changed. On startup and before forwarded commands, Teamtype removes old Git hooks containing `Installed by teamtype`, including hooks found through `core.hooksPath`. Startup also removes old synchronized metadata from its persisted document. Other hooks are preserved. Version-control directories such as `.git` and `.jj` are always excluded from synchronization. A joiner's leftover Git index is not used for file enumeration. The old Git lock is gone. Both VCS synchronization flags are deprecated no-ops.

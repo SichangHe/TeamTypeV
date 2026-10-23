@@ -4,18 +4,18 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use std::mem;
+use std::{collections::HashMap, mem};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use automerge::sync::{Message as AutomergeSyncMessage, State as AutomergeSyncState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast::error::RecvError, oneshot};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::daemon::{DocMessage, DocumentActorHandle};
+use crate::git_forward::{Request, Response};
 use crate::types::EphemeralMessage;
-use crate::vcs_files::VcsMessage;
 
 #[derive(Deserialize, Serialize)]
 /// The `PeerMessage` is used for peer to peer data exchange.
@@ -25,8 +25,12 @@ pub enum PeerMessage {
     /// The Ephemeral message currently is used for cursor messages, but can later be used for
     /// other things that should not be persisted.
     Ephemeral(EphemeralMessage),
-    /// Version-control files, which are not in the CRDT; see `vcs_files`.
-    Vcs(VcsMessage),
+    GitRequest(Request),
+    GitInput(u64, Vec<u8>),
+    GitInputAck(u64),
+    GitResponse(u64, Response),
+    GitCancel(u64),
+    GitAck(u64),
     /// Sent first: the sender's history ID, or an empty string.
     Hello(String),
     /// Keeps the ordered sync stream active so stalled reads cause a reconnect.
@@ -46,6 +50,19 @@ pub struct SyncActor {
     peer_state: AutomergeSyncState,
     document_handle: DocumentActorHandle,
     connection: Box<dyn Connection<PeerMessage>>,
+    pending_git: HashMap<u64, tokio::sync::mpsc::Sender<Response>>,
+    running_git: HashMap<u64, oneshot::Sender<()>>,
+    git_output: tokio::sync::mpsc::Sender<(u64, Response)>,
+    git_output_rx: tokio::sync::mpsc::Receiver<(u64, Response)>,
+    git_credits: HashMap<u64, std::sync::Arc<tokio::sync::Semaphore>>,
+    git_ack: tokio::sync::mpsc::Sender<u64>,
+    git_ack_rx: tokio::sync::mpsc::Receiver<u64>,
+    git_inputs: HashMap<u64, crate::git_forward::InputWriter>,
+    git_input_tx: tokio::sync::mpsc::Sender<PeerMessage>,
+    git_input_rx: tokio::sync::mpsc::Receiver<PeerMessage>,
+    git_input_acks: HashMap<u64, tokio::sync::mpsc::Sender<()>>,
+    git_uploads: HashMap<u64, tokio::task::AbortHandle>,
+    git_tasks: tokio::task::JoinSet<()>,
 }
 
 impl SyncActor {
@@ -53,7 +70,23 @@ impl SyncActor {
         document_handle: DocumentActorHandle,
         connection: Box<dyn Connection<PeerMessage>>,
     ) -> Self {
+        let (git_output, git_output_rx) = tokio::sync::mpsc::channel(8);
+        let (git_ack, git_ack_rx) = tokio::sync::mpsc::channel(8);
+        let (git_input_tx, git_input_rx) = tokio::sync::mpsc::channel(1);
         Self {
+            git_inputs: HashMap::new(),
+            git_input_tx,
+            git_input_rx,
+            git_input_acks: HashMap::new(),
+            git_uploads: HashMap::new(),
+            git_tasks: tokio::task::JoinSet::new(),
+            git_credits: HashMap::new(),
+            git_ack,
+            git_ack_rx,
+            pending_git: HashMap::new(),
+            running_git: HashMap::new(),
+            git_output,
+            git_output_rx,
             peer_state: AutomergeSyncState::new(),
             document_handle,
             connection,
@@ -83,10 +116,106 @@ impl SyncActor {
             }
             PeerMessage::Hello(theirs) => self.check_history(&theirs).await,
             PeerMessage::Heartbeat => {}
-            PeerMessage::Vcs(message) => {
-                self.document_handle
-                    .send_message(DocMessage::ReceiveVcs(message))
-                    .await;
+            PeerMessage::GitRequest(request) => {
+                if !self.document_handle.is_host() {
+                    bail!("Only the sharer accepts Git requests");
+                }
+                self.connection
+                    .send(PeerMessage::GitResponse(request.id, Response::Accepted))
+                    .await?;
+                let id = request.id;
+                let (input, writer) = crate::git_forward::Input::new()?;
+                self.git_inputs.insert(id, writer);
+                let (response, mut responses) = tokio::sync::mpsc::channel(8);
+                let git = self.document_handle.git.clone();
+                let output = self.git_output.clone();
+                let (cancel, mut cancelled) = oneshot::channel();
+                self.running_git.insert(id, cancel);
+                let credit = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+                self.git_credits.insert(id, credit.clone());
+                self.git_tasks.spawn(async move {
+                    let queued = tokio::select! {
+                        result = git.enqueue(crate::git_forward::Job { request, response, input }) => result.is_ok(),
+                        _ = &mut cancelled => return,
+                    };
+                    if !queued {
+                        let _ = output
+                            .send((id, Response::Error("Git worker stopped".into())))
+                            .await;
+                        return;
+                    }
+                    loop {
+                        tokio::select! {
+                            response = responses.recv() => {
+                                let Some(response) = response else { break; };
+                                let finished = response.finished();
+                                let sent = tokio::select! {
+                                    result = async {
+                                        let Ok(Ok(permit)) = tokio::time::timeout(crate::git_forward::OUTPUT_TIMEOUT, credit.acquire()).await else { return false; };
+                                        permit.forget();
+                                        output.send((id, response)).await.is_ok()
+                                    } => result,
+                                    _ = &mut cancelled => false,
+                                };
+                                if !sent || finished { break; }
+                            }
+                            () = output.closed() => break,
+                            _ = &mut cancelled => break,
+                        }
+                    }
+                });
+            }
+            PeerMessage::GitInput(id, bytes) => {
+                if let Some(input) = self.git_inputs.get_mut(&id) {
+                    input.write(&bytes)?;
+                    if bytes.is_empty() {
+                        self.git_inputs.remove(&id);
+                    } else {
+                        self.connection.send(PeerMessage::GitInputAck(id)).await?;
+                    }
+                }
+            }
+            PeerMessage::GitResponse(id, response) => {
+                if self.document_handle.is_host() {
+                    bail!("Unexpected Git response on the sharer");
+                }
+                let finished = response.finished();
+                let acknowledge = !matches!(response, Response::Accepted);
+                if let Some(sender) = self.pending_git.get(&id).cloned() {
+                    let ack = self.git_ack.clone();
+                    self.git_tasks.spawn(async move {
+                        if sender.send(response).await.is_ok() && acknowledge {
+                            let _ = ack.send(id).await;
+                        }
+                    });
+                } else {
+                    self.connection.send(PeerMessage::GitCancel(id)).await?;
+                }
+                if finished {
+                    self.pending_git.remove(&id);
+                    self.git_input_acks.remove(&id);
+                    if let Some(upload) = self.git_uploads.remove(&id) {
+                        upload.abort();
+                    }
+                }
+            }
+            PeerMessage::GitInputAck(id) => {
+                if let Some(ack) = self.git_input_acks.get(&id) {
+                    let _ = ack.try_send(());
+                }
+            }
+            PeerMessage::GitCancel(id) => {
+                self.git_inputs.remove(&id);
+                self.git_input_acks.remove(&id);
+                self.git_credits.remove(&id);
+                if let Some(cancel) = self.running_git.remove(&id) {
+                    let _ = cancel.send(());
+                }
+            }
+            PeerMessage::GitAck(id) => {
+                if let Some(credit) = self.git_credits.get(&id) {
+                    credit.add_permits(1);
+                }
             }
         }
         Ok(())
@@ -140,8 +269,7 @@ impl SyncActor {
     pub async fn run(mut self) -> Result<()> {
         let mut doc_changed_ping_rx = self.document_handle.subscribe_document_changes();
         let mut ephemeral_messages_rx = self.document_handle.subscribe_ephemeral_messages();
-        // Subscribed before taking the snapshot, so that no change is missed.
-        let mut vcs_messages_rx = self.document_handle.subscribe_vcs_messages();
+        let mut git_requests = self.document_handle.git.outgoing.subscribe();
 
         let (history, _) = self.document_handle.history_id().await;
         self.connection
@@ -150,12 +278,26 @@ impl SyncActor {
 
         // Kick off initial synchronization with peer.
         self.generate_sync_message().await?;
-        for message in self.document_handle.vcs_snapshot().await {
-            self.connection.send(PeerMessage::Vcs(message)).await?;
-        }
 
+        let mut git_cleanup = tokio::time::interval(std::time::Duration::from_millis(50));
         loop {
             tokio::select! {
+                _ = self.git_tasks.join_next(), if !self.git_tasks.is_empty() => {}
+                _ = git_cleanup.tick() => {
+                    let closed: Vec<_> = self.pending_git.iter().filter(|(_, sender)| sender.is_closed()).map(|(&id, _)| id).collect();
+                    for id in closed {
+                        self.pending_git.remove(&id);
+                        self.git_input_acks.remove(&id);
+                        if let Some(upload) = self.git_uploads.remove(&id) {
+                            upload.abort();
+                        }
+                        self.connection.send(PeerMessage::GitCancel(id)).await?;
+                    }
+                    self.running_git.retain(|_, cancel| !cancel.is_closed());
+                    self.git_inputs.retain(|id, _| self.running_git.contains_key(id));
+                    self.git_credits.retain(|id, _| self.running_git.contains_key(id));
+                    self.git_input_acks.retain(|_, ack| !ack.is_closed());
+                }
                 // As doc_changed_ping_rx is a broadcast channel our understanding is,
                 // that this breaks a potential cyclic deadlock between SyncerActor
                 // and TCPActor (e.g. when TCPWriteActor.send blocks).
@@ -187,15 +329,42 @@ impl SyncActor {
                         }
                     }
                 }
-                vcs_message = vcs_messages_rx.recv() => {
-                    match vcs_message {
-                        Ok(message) => self.connection.send(PeerMessage::Vcs(message)).await?,
-                        Err(RecvError::Closed) => panic!("Version-control channel has been closed"),
-                        Err(RecvError::Lagged(n)) => {
-                            warn!("Missed {n} version-control changes for a peer; it reconnects to resync.");
-                            bail!("Version-control channel lagged");
+                request = git_requests.recv(), if !self.document_handle.is_host() => {
+                    let job = request.context("Git request channel lagged; reconnect")?;
+                    self.pending_git.insert(job.request.id, job.response.clone());
+                    self.generate_sync_message().await?;
+                    let sender = self.git_input_tx.clone();
+                    let (ack, mut acknowledgements) = tokio::sync::mpsc::channel(1);
+                    self.git_input_acks.insert(job.request.id, ack);
+                    let id = job.request.id;
+                    let upload = self.git_tasks.spawn(async move {
+                        let id = job.request.id;
+                        let result: Result<()> = async {
+                            sender.send(PeerMessage::GitRequest(job.request)).await?;
+                            let mut input = job.input.reader().await?;
+                            let mut bytes = vec![0; crate::git_forward::INPUT_CHUNK];
+                            loop {
+                                let count = input.read(&mut bytes).await?;
+                                sender.send(PeerMessage::GitInput(id, bytes[..count].to_vec())).await?;
+                                if count == 0 { return Ok(()); }
+                                acknowledgements.recv().await.context("Git stdin upload cancelled")?;
+                            }
+                        }.await;
+                        if let Err(error) = result {
+                            let _ = job.response.send(Response::Error(format!("Could not forward Git stdin: {error:#}"))).await;
+                            let _ = sender.send(PeerMessage::GitCancel(id)).await;
                         }
-                    }
+                    });
+                    self.git_uploads.insert(id, upload);
+                }
+                Some(input) = self.git_input_rx.recv() => {
+                    self.connection.send(input).await?;
+                }
+                Some((id, response)) = self.git_output_rx.recv() => {
+                    self.connection.send(PeerMessage::GitResponse(id, response)).await?;
+                }
+                Some(id) = self.git_ack_rx.recv() => {
+                    self.connection.send(PeerMessage::GitAck(id)).await?;
                 }
                 message = self.connection.next() => {
                     self.receive_peer_message(message?).await?;

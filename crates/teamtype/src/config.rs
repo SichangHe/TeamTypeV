@@ -49,8 +49,6 @@ pub struct AppConfig {
     pub iroh_relay: Option<String>,
     pub iroh_dns_domain: Option<String>,
     pub iroh_pkarr_relay: Option<String>,
-    // Whether to sync version control directories like .git, .jj, ...
-    pub sync_vcs: bool,
     pub username: Option<String>,
     /// A local TCP port that guests can reach with `teamtype tunnel`.
     pub forward_port: Option<u16>,
@@ -122,7 +120,6 @@ impl AppConfig {
                     .get("iroh_pkarr_relay")
                     .map(ToString::to_string)
             }),
-            sync_vcs: app_config_cli.sync_vcs,
             username: Some(username),
             forward_port: app_config_cli.forward_port,
         }
@@ -333,12 +330,10 @@ fn add_teamtype_to_local_gitignore(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-/// With `sync_vcs`, a joining peer may receive its Git repository only after starting.
-pub fn ensure_teamtype_is_ignored(directory: &Path, sync_vcs: bool) -> Result<()> {
+/// Keeps local Teamtype state out of Git on both sharers and joiners.
+pub fn ensure_teamtype_is_ignored(directory: &Path) -> Result<()> {
     let ignore_file = directory.join(CONFIG_DIR).join(".gitignore");
-    if teamtype_directory_should_be_ignored_but_isnt(directory)
-        || (sync_vcs && !ignore_file.exists())
-    {
+    if !ignore_file.exists() || teamtype_directory_should_be_ignored_but_isnt(directory) {
         add_teamtype_to_local_gitignore(directory)?;
     }
     Ok(())

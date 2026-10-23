@@ -1,0 +1,61 @@
+# Git forwarding
+(authored by agents unless marked 🧑)
+
+- 🧑 "Maybe we just intercept all the git stuff and forward them to the server?"
+- `git_forward` owns the local Unix socket and one command queue per daemon
+  - only the sharer executes commands
+  - joiners install `.teamtype/bin/git`, forwarding to `teamtype git`
+  - arguments, relative working directory, and stdin travel over the authenticated peer connection
+  - stdout and stderr use bounded channels and 16 KiB chunks
+  - nonterminal stdin travels in 16 KiB chunks until EOF; terminal stdin is empty
+    - each daemon queues execution immediately and spools arriving input to a private temporary file
+    - readers wait for appended bytes until explicit EOF; Git chooses whether to read stdin
+    - the client reads stdin on a detached thread so an open pipe cannot hold runtime shutdown
+    - peer input acknowledgements allow one chunk in flight, keeping the sync actor available
+    - stdin has no total size limit; available temporary disk space bounds it
+  - a locked socket is published only after binding privately and setting mode 600
+- the document actor rescans disk before capturing the request's Automerge heads
+  - rescans include existing document paths, covering ignored tracked files without a joiner index
+  - editor operations already accepted by the actor precede the capture
+  - the sharer waits for those changes before running Git
+  - file writes from Git rescan into the ordinary synchronization path
+  - the exit response includes the sharer's heads; the requesting daemon waits up to ten seconds for those changes to be written and open buffers flushed
+    - a delayed synchronization produces a warning and preserves Git's exit code
+  - before execution, open buffers are flushed to disk, including files normally saved by an editor
+  - checkout tests keep files closed in editors; outside changes to open buffers depend on the separate editor update fix
+- Git uses the sharer's identity, repository configuration, credentials, and hooks
+  - inherited `GIT_*` environment variables are cleared
+  - global options are allowlisted; configuration, execution, and directory overrides are rejected
+  - pager, automatic colors, terminal credential prompts, and Git editors are disabled
+  - `process_group(0)` creates a separate Unix process group without an external utility
+    - works on Linux and macOS while retaining the workspace prohibition on unsafe code
+    - all standard streams are pipes; SSH uses batch mode and askpass is disabled
+  - interactive terminal sessions are unsupported
+  - joiners must be trusted; forwarding is not a sandbox
+  - the shared root must own the repository; discovery cannot reach a parent repository
+- commands have no execution deadline
+  - waiting clients see the active command they are queued behind
+  - an output send blocked for three minutes cancels the process group
+    - silent execution and waiting for child exit have no deadline
+  - a process-group guard sends SIGTERM and allows two seconds before SIGKILL
+  - Git exit terminates background descendants, then drains both pipes through EOF
+  - peer cancellation closes the worker's response receiver; queued jobs skip closed receivers
+    - the worker waits for process-group cleanup, at most two seconds, before advancing the queue
+  - acknowledgements permit one output frame at a time per request
+    - acknowledgement follows admission to the bounded local queue
+    - a full queue pauses Git without blocking document synchronization
+  - periodic cleanup forwards local disconnections without waiting for more Git output
+  - the sync actor owns per-command tasks and aborts them when its connection ends
+    - command completion or local disconnection also aborts its stdin upload and releases the spool file
+- connection loss never retries a command
+  - a command may have executed before its response was lost
+  - inspect status before retrying
+- version-control directories never enter synchronization
+  - old persisted metadata is removed from the document on startup
+  - legacy hooks containing `Installed by teamtype` are removed at startup and before execution
+    - libgit2 resolves hook paths without spawning Git or inheriting `GIT_*` overrides
+  - existing joiner repositories are left on disk, unused by forwarding or file enumeration
+- `verification/live/git_forward.sh` exercises real daemons and replaces `git_lock.sh`
+  - `git_forward_regressions.sh` covers open, delayed and large stdin, silent execution, ignored tracked edits, and stalled output
+    - `CASE=portable` shadows `setsid` with a failing executable
+  - `slow_stdin_upload_keeps_document_sync_responsive` runs real actors, Git, and Unix streams with a throttled connection

@@ -5,7 +5,10 @@ SPDX-FileCopyrightText: 2025 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# Manual method
+# Independent local repositories
+(authored by agents unless marked 🧑)
+
+Joiners normally use [forwarded Git commands](git-integration-synchronized.md), with the repository on the sharer. The manual workflow below applies only if you deliberately keep separate repositories and invoke ordinary local Git without Teamtype's wrapper. Version-control metadata is always excluded from synchronization; `--no-sync-vcs` is a deprecated no-op.
 
 For the workflows below, we assume that you already have an established Git repository among the collaborating peers.
 

@@ -415,6 +415,12 @@ impl Document {
     }
 
     #[must_use]
+    pub fn has_changes(&self, heads: &[ChangeHash]) -> bool {
+        heads
+            .iter()
+            .all(|head| self.doc.get_change_by_hash(head).is_some())
+    }
+
     pub fn get_heads(&mut self) -> Vec<ChangeHash> {
         self.doc.get_heads()
     }

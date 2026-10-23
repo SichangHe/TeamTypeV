@@ -22,15 +22,11 @@ pub struct Cli {
 
 #[derive(Args)]
 pub struct ShareJoinFlags {
-    /// Do not synchronize version-control directories like .git/ or .jj/. By default they are
-    /// synchronized: all branches, commits, etc. as well as your .git/config, so new commits
-    /// immediately appear at all peers. Only the peer holding the Git lock may change them. The
-    /// lock starts with the sharer and moves to another peer when they edit or run Git while the
-    /// holder has been idle for 3 minutes; Git commands of everyone else fail, naming the holder.
+    /// Deprecated no-op: version-control directories are never synchronized.
     #[arg(long)]
     pub no_sync_vcs: bool,
-    /// Synchronizing version-control directories is now the default; this flag does nothing.
-    #[arg(long, hide = true)]
+    /// Deprecated no-op: Git commands run on the sharer.
+    #[arg(long)]
     pub sync_vcs: bool,
     /// Use an alternative Magic Wormhole mailbox server relay url
     #[arg(long)]
@@ -95,9 +91,12 @@ pub enum Commands {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
-    /// Ask the running daemon for the Git lock, and fail if another peer holds it. Run by the Git
-    /// hook that Teamtype installs, before Git changes a branch.
-    GitLock,
+    /// Run Git on the sharer, after synchronizing your edits. Interactive editors are disabled.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Replace one exact piece of text in a file through the running daemon. For command line
     /// tools such as coding agents.
     ///
