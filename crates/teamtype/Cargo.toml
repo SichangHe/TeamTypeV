@@ -60,6 +60,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 automerge = "0.10"
 constant_time_eq = "0.4"
+blake3 = "1"
 dissimilar = "1"
 docstr.workspace = true
 futures.workspace = true

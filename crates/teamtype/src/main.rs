@@ -100,15 +100,20 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Could not read {}", path.display())),
                     (None, None) => bail!("Missing content for the agent edit"),
                 });
-            agent_edit::run(&directory, &file, &old?, &new?).await?;
-            return agent_edit::save_snapshot(&directory, &agent, &file);
+            agent_edit::prepare_snapshot(&directory, &agent, &file)?;
+            let content = agent_edit::run(&directory, &file, &old?, &new?).await?;
+            if let Err(error) =
+                agent_edit::save_snapshot(&directory, &agent, &file, content.as_bytes())
+            {
+                eprintln!("Agent edit succeeded, but saving its snapshot failed: {error}");
+            }
+            return Ok(());
         }
         Commands::AgentRead { file, agent } => {
             return agent_edit::read(&directory, &agent, &file);
         }
         Commands::AgentDiff { file, agent } => {
-            agent_edit::diff(&directory, &agent, file.as_deref());
-            return Ok(());
+            return agent_edit::diff(&directory, &agent, file.as_deref());
         }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
@@ -483,5 +488,112 @@ fn prompt_bool(question: &str) -> Result<bool> {
         }
     } else {
         bail!("Failed to read answer");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// Runs the real stdin prompt in a separate test process so parallel tests cannot consume it.
+    fn check_overwrite(
+        directory: &Path,
+        answer: &str,
+        expected: &str,
+        prompts: bool,
+    ) -> Result<()> {
+        let mut child = Command::new(env::current_exe()?)
+            .args(["--exact", "tests::overwrite_prompt_child", "--nocapture"])
+            .env("TEAMTYPE_TEST_OVERWRITE_DIR", directory)
+            .env("TEAMTYPE_TEST_OVERWRITE_RESULT", expected)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(answer.as_bytes())?;
+        let output = child.wait_with_output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).contains("Overwrite them? (y/N):"),
+            prompts
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_prompt_child() -> Result<()> {
+        let Some(directory) = env::var_os("TEAMTYPE_TEST_OVERWRITE_DIR") else {
+            return Ok(());
+        };
+        let expected = env::var("TEAMTYPE_TEST_OVERWRITE_RESULT")?;
+        let result = confirm_overwrite(Path::new(&directory));
+        if expected == "ok" {
+            result?;
+        } else {
+            assert!(
+                result
+                    .expect_err("join must be refused")
+                    .to_string()
+                    .contains(&expected)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_confirmation_skips_empty_config_only_and_previously_joined_directories()
+    -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        check_overwrite(dir.path(), "", "ok", false)?;
+        std::fs::create_dir(dir.path().join(config::CONFIG_DIR))?;
+        std::fs::write(
+            dir.path().join(config::CONFIG_DIR).join("config"),
+            "configuration",
+        )?;
+        check_overwrite(dir.path(), "", "ok", false)?;
+        std::fs::write(dir.path().join("local.txt"), "keep me")?;
+        std::fs::write(join_marker(dir.path()), "")?;
+        check_overwrite(dir.path(), "", "ok", false)?;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("local.txt"))?,
+            "keep me"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_confirmation_requires_explicit_yes_and_never_marks_the_join() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(config::CONFIG_DIR))?;
+        let local = dir.path().join("local.txt");
+        std::fs::write(&local, "keep me")?;
+        for answer in ["n\n", "\n", "maybe\n", " yes\n"] {
+            check_overwrite(dir.path(), answer, "Aborting join", true)?;
+        }
+        check_overwrite(dir.path(), "", "Failed to read answer", true)?;
+        for answer in ["y\n", "yes\n", "Y\n", "YES\n"] {
+            check_overwrite(dir.path(), answer, "ok", true)?;
+        }
+        assert!(!join_marker(dir.path()).exists());
+        assert_eq!(std::fs::read_to_string(local)?, "keep me");
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_confirmation_protects_git_only_directories() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(".git"))?;
+        check_overwrite(dir.path(), "n\n", "Aborting join", true)?;
+        check_overwrite(dir.path(), "yes\n", "ok", true)?;
+        Ok(())
     }
 }

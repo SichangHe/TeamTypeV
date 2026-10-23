@@ -32,6 +32,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Test installer
+        run: python3 verification/test_install.py
+      - name: Test release reruns
+        run: python3 verification/test_nightly.py
       - name: Set up Rust toolchain
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -51,6 +55,8 @@ jobs:
         run: cargo test --locked --no-default-features --no-run --test fuzzer
       - name: Run default unit tests
         run: cargo test --locked --no-default-features -p teamtype
+      - name: Run CLI tests
+        run: cargo test --locked -p teamtype --bin teamtype --test agent_commands
       - name: Run default e2e tests
         run: cargo test --locked --no-default-features -p e2e-tests
       - if: ${{ matrix.nvim-version == 'v0.11.2' }}

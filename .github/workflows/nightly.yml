@@ -28,8 +28,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "build-$GITHUB_RUN_ID" --prerelease --target "$GITHUB_SHA" \
-            --title "Nightly build $GITHUB_RUN_ID" --notes "Built from $GITHUB_SHA."
+          build="build-$GITHUB_RUN_ID"
+          if ! gh release view "$build" >/dev/null 2>&1; then
+            gh release create "$build" --prerelease --target "$GITHUB_SHA" \
+              --title "Nightly build $GITHUB_RUN_ID" --notes "Built from $GITHUB_SHA."
+          fi
 
   upload-assets:
     needs: create-release

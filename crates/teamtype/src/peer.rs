@@ -1015,3 +1015,204 @@ mod recovery_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn connected_streams() -> Result<(
+        Endpoint,
+        Endpoint,
+        IrohEndpointConnection,
+        SendStream,
+        RecvStream,
+    )> {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")?
+            .bind()
+            .await?;
+        let client = Endpoint::builder(presets::Minimal)
+            .bind_addr("127.0.0.1:0")?
+            .bind()
+            .await?;
+        let (outgoing, incoming) = tokio::join!(client.connect(server.addr(), ALPN), async {
+            server
+                .accept()
+                .await
+                .context("No incoming connection")?
+                .await
+                .context("Accept failed")
+        });
+        let outgoing = outgoing?;
+        let incoming = incoming?;
+        let (mut send, _) = outgoing.open_bi().await?;
+        send.write_all(&[0]).await?;
+        let (_, mut receive) = incoming.accept_bi().await?;
+        receive.read_exact(&mut [0]).await?;
+        Ok((server, client, incoming, send, receive))
+    }
+
+    #[tokio::test]
+    async fn idle_writer_sends_heartbeats_and_preserves_message_framing() -> Result<()> {
+        timeout(Duration::from_secs(15), async {
+            let (_server, _client, _conn, send, mut receive) = connected_streams().await?;
+            let (tx, rx) = mpsc::channel(1);
+            let writer = tokio::spawn(PeerMessageStream::write_loop(send, rx));
+            assert!(matches!(PeerMessageStream::read_next(&mut receive).await?, PeerMessage::Heartbeat));
+            tx.send(PeerMessage::Hello("history".into())).await?;
+            assert!(matches!(PeerMessageStream::read_next(&mut receive).await?, PeerMessage::Hello(id) if id == "history"));
+            assert!(matches!(PeerMessageStream::read_next(&mut receive).await?, PeerMessage::Heartbeat));
+            drop(tx);
+            writer.await??;
+            Ok::<_, anyhow::Error>(())
+        }).await?
+    }
+
+    #[tokio::test]
+    async fn stalled_partial_frame_closes_connection_for_reconnect() -> Result<()> {
+        timeout(Duration::from_secs(15), async {
+            let (_server, _client, conn, mut send, receive) = connected_streams().await?;
+            let (tx, mut rx) = mpsc::channel(1);
+            let reader = tokio::spawn(PeerMessageStream::read_loop(receive, tx, conn.clone()));
+            send.write_all(&[0, 0]).await?;
+            let error = rx
+                .recv()
+                .await
+                .context("Reader dropped its result")?
+                .err()
+                .context("Stalled frame was accepted")?;
+            assert!(error.is::<tokio::time::error::Elapsed>(), "{error:#}");
+            assert!(conn.close_reason().is_some());
+            reader.await??;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
+    }
+
+    #[tokio::test]
+    async fn stalled_peer_reconnects_with_a_new_generation() -> Result<()> {
+        timeout(Duration::from_secs(20), async {
+            let server = Endpoint::builder(presets::Minimal)
+                .alpns(vec![ALPN.to_vec()])
+                .bind_addr("127.0.0.1:0")?
+                .bind()
+                .await?;
+            let client = Endpoint::builder(presets::Minimal)
+                .bind_addr("127.0.0.1:0")?
+                .bind()
+                .await?;
+            let directory = tempfile::tempdir()?;
+            fs::create_dir(directory.path().join(".teamtype"))?;
+            let config = AppConfig {
+                base_dir: directory.path().into(),
+                ..AppConfig::default()
+            };
+            let document_handle = DocumentActorHandle::new(&config, false, false, true);
+            let (message_tx, message_rx) = mpsc::channel(1);
+            let passphrase = SecretKey::from_bytes(&[42; 32]);
+            let mut actor = EndpointActor::new(
+                client,
+                message_rx,
+                message_tx,
+                document_handle,
+                passphrase.clone(),
+                config,
+            );
+            let (response_tx, response_rx) = oneshot::channel();
+            let initial = EndpointMessage::Connect {
+                secret_address: SecretAddress {
+                    endpoint_addr: server.addr(),
+                    passphrase: passphrase.clone(),
+                },
+                response_tx: Some(response_tx),
+                previous_attempts: 0,
+                generation: None,
+            };
+            // Connects run in a task that reports back through the actor's own channel.
+            let (connected, incoming) = tokio::join!(
+                async {
+                    actor.handle_message(initial).await?;
+                    let finished = actor.message_rx.recv().await.context("No connect result")?;
+                    actor.handle_message(finished).await
+                },
+                async {
+                    server
+                        .accept()
+                        .await
+                        .context("No initial connection")?
+                        .await
+                        .context("Initial accept failed")
+                }
+            );
+            connected?;
+            response_rx.await??;
+            let incoming = incoming?;
+            let (_silent_send, mut receive) = incoming.accept_bi().await?;
+            let mut received_passphrase = [0; 32];
+            receive.read_exact(&mut received_passphrase).await?;
+            assert_eq!(received_passphrase, passphrase.to_bytes());
+            let generation = actor.peer_generations[&server.id()];
+
+            let reconnect = actor
+                .message_rx
+                .recv()
+                .await
+                .context("No reconnect request")?;
+            assert!(matches!(&reconnect, EndpointMessage::Connect {
+                previous_attempts: 1, generation: Some(previous), ..
+            } if *previous == generation));
+            let (connected, replacement) = tokio::join!(
+                async {
+                    actor.handle_message(reconnect).await?;
+                    let finished = actor
+                        .message_rx
+                        .recv()
+                        .await
+                        .context("No reconnect result")?;
+                    actor.handle_message(finished).await
+                },
+                async {
+                    server
+                        .accept()
+                        .await
+                        .context("No replacement connection")?
+                        .await
+                        .context("Replacement accept failed")
+                }
+            );
+            connected?;
+            let replacement = replacement?;
+            assert!(actor.peer_generations[&server.id()] > generation);
+            let (_send, mut receive) = replacement.accept_bi().await?;
+            receive.read_exact(&mut received_passphrase).await?;
+            assert_eq!(received_passphrase, passphrase.to_bytes());
+            for task in actor.peer_tasks.values() {
+                task.abort();
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
+    }
+
+    #[tokio::test]
+    async fn progressing_frame_can_take_longer_than_peer_timeout() -> Result<()> {
+        timeout(Duration::from_secs(20), async {
+            let (_server, _client, _conn, mut send, mut receive) = connected_streams().await?;
+            let bytes = to_allocvec(&PeerMessage::Hello("progress".into()))?;
+            let sender = tokio::spawn(async move {
+                send.write_all(&u32::try_from(bytes.len())?.to_be_bytes()).await?;
+                for byte in bytes {
+                    sleep(Duration::from_secs(1)).await;
+                    send.write_all(&[byte]).await?;
+                }
+                Ok::<_, anyhow::Error>(send)
+            });
+            let started = tokio::time::Instant::now();
+            assert!(matches!(PeerMessageStream::read_next(&mut receive).await?, PeerMessage::Hello(id) if id == "progress"));
+            assert!(started.elapsed() > PEER_TIMEOUT);
+            let _send = sender.await??;
+            Ok::<_, anyhow::Error>(())
+        }).await?
+    }
+}

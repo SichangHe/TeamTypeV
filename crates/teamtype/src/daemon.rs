@@ -230,7 +230,7 @@ impl DocumentActor {
 
         if persistence_file_exists && persist {
             if !init {
-                s.restore_files_left_open();
+                s.check_files_left_open();
             }
             s.read_current_content_from_dir(init);
         } else if is_host {
@@ -510,18 +510,45 @@ impl DocumentActor {
         }
     }
 
-    /// After a crash, files that were open in an editor may differ from the saved document on disk,
-    /// which holds what was shared. Reading them from disk instead shared their text again, which
-    /// a live trial showed as duplicated lines for everyone.
-    fn restore_files_left_open(&mut self) {
-        let Ok(bytes) = sandbox::read_file(&self.app_config.base_dir, &self.open_files_list())
-        else {
-            return;
+    /// Refuses recovery when files left open after a crash differ from persisted history.
+    /// Never writes shared text over disk saves; differing versions require manual reconciliation.
+    /// After a crash, files that were open in editors may hold saves newer than the persisted
+    /// history. Never restore them from history: the disk version is kept, and the scan that
+    /// follows shares it like any other edit made while teamtype was down.
+    fn check_files_left_open(&self) {
+        let bytes = match sandbox::read_file(&self.app_config.base_dir, &self.open_files_list()) {
+            Ok(bytes) => bytes,
+            Err(err)
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return;
+            }
+            Err(err) => {
+                warn!("Cannot read the list of files open before the last stop: {err}");
+                self.save_files_open_in_editors();
+                return;
+            }
         };
         for line in String::from_utf8_lossy(&bytes).lines() {
-            let file_path = RelativePath::new(line);
-            if self.crdt_doc.file_exists(&file_path) {
-                self.write_file(&file_path);
+            let path = RelativePath::new(line);
+            let Some(content) = self.current_file_content(&path) else {
+                continue;
+            };
+            let shared = match content {
+                document::Content::String(text) => text.as_bytes(),
+                document::Content::Bytes(bytes) => bytes.as_slice(),
+            };
+            let saved = sandbox::read_file(
+                &self.app_config.base_dir,
+                &self.absolute_path_for_file_path(&path),
+            );
+            if !saved.is_ok_and(|saved| saved == shared) {
+                warn!(
+                    "{line} was open in an editor when teamtype last stopped and differs from \
+                     teamtype's history; keeping the version on disk."
+                );
             }
         }
         self.save_files_open_in_editors();

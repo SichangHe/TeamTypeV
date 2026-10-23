@@ -228,4 +228,58 @@ mod tests {
         let mode = fs::metadata(dir.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
     }
+
+    #[test]
+    fn restricting_parent_preserves_owner_permissions_and_special_bits() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        for original in [0o777, 0o750, 0o705, 0o700, 0o500, 0o577, 0o1700, 0o1777] {
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(original))?;
+            make_user_accessible_only(&dir.path().join("socket"))?;
+            let mode = fs::metadata(dir.path())?.permissions().mode() & 0o7777;
+            assert_eq!(mode, original & !0o077);
+            make_user_accessible_only(&dir.path().join("socket"))?;
+            assert_eq!(
+                fs::metadata(dir.path())?.permissions().mode() & 0o7777,
+                mode
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn restricting_parent_does_not_change_ancestor_permissions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let parent = dir.path().join("sockets");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777))?;
+        make_user_accessible_only(&parent.join("socket"))?;
+        assert_eq!(fs::metadata(&parent)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(dir.path())?.permissions().mode() & 0o777,
+            0o755
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restricting_missing_parent_reports_its_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let parent = dir.path().join("missing");
+        let error = make_user_accessible_only(&parent.join("socket"))
+            .expect_err("a missing parent must fail");
+        assert!(error.to_string().contains(&parent.display().to_string()));
+        assert!(!parent.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn restricting_root_socket_path_returns_error() {
+        let error =
+            make_user_accessible_only(Path::new("/")).expect_err("the root path has no parent");
+        assert_eq!(
+            error.to_string(),
+            "The socket path should not be the root directory"
+        );
+    }
 }

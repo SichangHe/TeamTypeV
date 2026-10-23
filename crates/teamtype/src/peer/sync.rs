@@ -204,3 +204,120 @@ impl SyncActor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::document::{Content, Document};
+    use crate::path::RelativePath;
+    use std::process::Command;
+
+    struct UnusedConnection;
+
+    #[async_trait]
+    impl Connection<PeerMessage> for UnusedConnection {
+        async fn send(&mut self, _: PeerMessage) -> Result<()> {
+            unreachable!("History checks do not use the transport")
+        }
+
+        async fn next(&mut self) -> Result<PeerMessage> {
+            unreachable!("History checks do not use the transport")
+        }
+    }
+
+    fn fixture(base_dir: &std::path::Path, history: Option<&str>, has_files: bool) -> Result<()> {
+        std::fs::create_dir(base_dir.join(".teamtype"))?;
+        let mut document = Document::default();
+        if let Some(history) = history {
+            let mut bytes = vec![0xff];
+            bytes.extend_from_slice(history.as_bytes());
+            document.set_file(
+                Content::Bytes(bytes),
+                &RelativePath::new(".teamtype/history"),
+            );
+        }
+        if has_files {
+            document.set_file(
+                Content::String("local changes".into()),
+                &RelativePath::new("local.txt"),
+            );
+            std::fs::write(base_dir.join("local.txt"), "local changes")?;
+        }
+        std::fs::write(base_dir.join(".teamtype/doc"), document.save())?;
+        std::fs::write(base_dir.join(".teamtype/joined"), "joined")?;
+        Ok(())
+    }
+
+    fn actor(base_dir: &std::path::Path, is_host: bool) -> SyncActor {
+        let config = AppConfig {
+            base_dir: base_dir.into(),
+            ..AppConfig::default()
+        };
+        SyncActor::new(
+            DocumentActorHandle::new(&config, false, is_host, true),
+            Box::new(UnusedConnection),
+        )
+    }
+
+    #[tokio::test]
+    async fn compatible_history_and_hosts_keep_local_state() -> Result<()> {
+        for (is_host, history, has_files, remote) in [
+            (false, Some("same"), true, "same"),
+            (false, None, false, "new"),
+            (false, Some("old"), true, ""),
+            (true, Some("old"), true, "new"),
+        ] {
+            let directory = tempfile::tempdir()?;
+            fixture(directory.path(), history, has_files)?;
+            let mut syncer = actor(directory.path(), is_host);
+            let before = syncer.document_handle.history_id().await;
+            syncer.receive_peer_message(PeerMessage::Heartbeat).await?;
+            syncer.check_history(remote).await;
+            assert_eq!(syncer.document_handle.history_id().await, before);
+            assert!(directory.path().join(".teamtype/doc").exists());
+            assert!(directory.path().join(".teamtype/joined").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn incompatible_history_refuses_without_overwriting_local_files() -> Result<()> {
+        for history in [Some("old"), None] {
+            let directory = tempfile::tempdir()?;
+            fixture(directory.path(), history, true)?;
+            let output = Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "peer::sync::tests::history_refusal_child",
+                    "--nocapture",
+                ])
+                .env("TEAMTYPE_HISTORY_REFUSAL_TEST_DIR", directory.path())
+                .output()?;
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!directory.path().join(".teamtype/doc").exists());
+            assert!(!directory.path().join(".teamtype/joined").exists());
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("local.txt"))?,
+                "local changes"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn history_refusal_child() -> Result<()> {
+        let Some(directory) = std::env::var_os("TEAMTYPE_HISTORY_REFUSAL_TEST_DIR") else {
+            return Ok(());
+        };
+        actor(std::path::Path::new(&directory), false)
+            .check_history("new")
+            .await;
+        anyhow::bail!("History mismatch did not terminate the joiner")
+    }
+}

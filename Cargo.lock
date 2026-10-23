@@ -4442,6 +4442,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automerge",
+ "blake3",
  "clap",
  "clap_complete",
  "clap_mangen",
