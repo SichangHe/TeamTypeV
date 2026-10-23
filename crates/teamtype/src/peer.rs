@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
+use std::future::IntoFuture;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -17,12 +18,14 @@ use std::time::Duration;
 use anyhow::bail;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::{StreamExt, stream::FuturesUnordered};
 use iroh::address_lookup::DnsAddressLookup;
 use iroh::address_lookup::pkarr::PkarrPublisher;
 use iroh::endpoint::{
-    Connection as IrohEndpointConnection, RecvStream, RelayMode, SendStream, presets,
+    Connection as IrohEndpointConnection, RecvStream, RelayMode, RelayStatus, SendStream,
+    TransportAddrInfo, presets,
 };
-use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey};
+use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey, Watcher};
 use postcard::{from_bytes, to_allocvec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -44,10 +47,71 @@ pub use tunnel::run as run_tunnel;
 const ALPN: &[u8] = b"/teamtype-fork/2";
 
 const PEER_TIMEOUT: Duration = Duration::from_secs(6);
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const ENDPOINT_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_REFRESH_DELAY: Duration = Duration::from_mins(5);
+
+/// Limits endpoint churn while allowing relay setup to finish.
+struct RelayRecovery {
+    since: tokio::time::Instant,
+    delay: Duration,
+    restored: bool,
+}
+
+impl RelayRecovery {
+    fn new() -> Self {
+        Self {
+            since: tokio::time::Instant::now(),
+            delay: CONNECT_TIMEOUT,
+            restored: false,
+        }
+    }
+
+    fn due(&mut self, live: bool, pending: bool) -> bool {
+        if live {
+            *self = Self::new();
+        }
+        !live
+            && !pending
+            && self.since.elapsed() >= CONNECT_TIMEOUT
+            && (self.restored
+                || (self.delay <= MAX_REFRESH_DELAY && self.since.elapsed() >= self.delay))
+    }
+
+    fn network_restored(&mut self) {
+        self.delay = CONNECT_TIMEOUT;
+        self.restored = true;
+    }
+
+    fn attempted(&mut self) {
+        self.since = tokio::time::Instant::now();
+        self.delay *= 2;
+        self.restored = false;
+    }
+}
 
 struct SecretAddress {
     endpoint_addr: EndpointAddr,
     passphrase: SecretKey,
+}
+
+impl SecretAddress {
+    fn reconnect_addr(&self, previous_attempts: usize) -> EndpointAddr {
+        if previous_attempts > 0 && previous_attempts.is_multiple_of(3) {
+            EndpointAddr::from_parts(
+                self.endpoint_addr.id,
+                self.endpoint_addr
+                    .addrs
+                    .iter()
+                    .filter(|addr| addr.is_relay())
+                    .cloned(),
+            )
+        } else {
+            self.endpoint_addr.clone()
+        }
+    }
 }
 
 impl FromStr for SecretAddress {
@@ -151,7 +215,12 @@ impl ConnectionManager {
     async fn bind_endpoint(app_config: &AppConfig, secret_key: SecretKey) -> Result<Endpoint> {
         let mut builder = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![ALPN.to_vec(), tunnel::ALPN.to_vec()]);
+            .alpns(vec![ALPN.to_vec(), tunnel::ALPN.to_vec()])
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .enable_segmentation_offload(false)
+                    .build(),
+            );
 
         let relay_mode = match &app_config.iroh_relay {
             Some(iroh_relay) => {
@@ -272,6 +341,13 @@ enum EndpointMessage {
         // Reconnects from an older connection must not replace a newer one.
         generation: Option<u64>,
     },
+    Connected {
+        secret_address: SecretAddress,
+        response_tx: Option<oneshot::Sender<Result<()>>>,
+        previous_attempts: usize,
+        generation: u64,
+        result: Result<IrohEndpointConnection>,
+    },
 }
 
 // Owns the Iroh endpoint, accepts incoming connections, and can be instructed to connect to
@@ -285,6 +361,7 @@ struct EndpointActor {
     my_passphrase: SecretKey,
     peer_tasks: HashMap<PublicKey, JoinHandle<()>>,
     peer_generations: HashMap<PublicKey, u64>,
+    connecting: HashMap<PublicKey, JoinHandle<()>>,
     next_generation: u64,
     forward_port: Option<u16>,
     /// Recent connection times per peer, to notice two peers that share a key.
@@ -309,6 +386,7 @@ impl EndpointActor {
             my_passphrase,
             peer_tasks: HashMap::new(),
             peer_generations: HashMap::new(),
+            connecting: HashMap::new(),
             next_generation: 0,
             forward_port: None,
             recent_connections: HashMap::new(),
@@ -331,38 +409,54 @@ impl EndpointActor {
                     return Ok(());
                 }
                 let generation = self.start_peer_generation(peer_id);
-                if previous_attempts > 1
-                    && !self.app_config.is_host()
-                    && self.peer_tasks.values().all(JoinHandle::is_finished)
-                {
-                    match ConnectionManager::bind_endpoint(
-                        &self.app_config,
-                        self.endpoint.secret_key().clone(),
-                    )
-                    .await
-                    {
-                        Ok(endpoint) => {
-                            let previous_endpoint = std::mem::replace(&mut self.endpoint, endpoint);
-                            tokio::spawn(async move { previous_endpoint.close().await });
-                        }
-                        Err(err) => warn!("Could not refresh the disconnected endpoint: {err:#}"),
-                    }
-                }
-                if response_tx.is_none() {
+                if previous_attempts > 0 && previous_attempts.is_multiple_of(3) {
                     self.endpoint.dns_resolver()?.reset();
-                    self.endpoint.network_change().await;
                 }
-                let endpoint_addr = secret_address.endpoint_addr.clone();
-                let connect = self.endpoint.connect(endpoint_addr, ALPN);
-                let connect_result = if response_tx.is_some() {
-                    connect.await.map_err(anyhow::Error::from)
+                let endpoint_addr = secret_address.reconnect_addr(previous_attempts);
+                let connect_timeout = if response_tx.is_some() {
+                    CONNECT_TIMEOUT
                 } else {
-                    timeout(Duration::from_secs(8), connect)
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|result| result.map_err(anyhow::Error::from))
+                    RETRY_CONNECT_TIMEOUT
                 };
-                let conn = match connect_result {
+                let endpoint = self.endpoint.clone();
+                let message_tx = self.message_tx.clone();
+                self.connecting.insert(
+                    peer_id,
+                    tokio::spawn(async move {
+                        let result =
+                            timeout(connect_timeout, endpoint.connect(endpoint_addr, ALPN))
+                                .await
+                                .map_err(anyhow::Error::from)
+                                .and_then(|result| result.map_err(anyhow::Error::from));
+                        let _ = message_tx
+                            .send(EndpointMessage::Connected {
+                                secret_address,
+                                response_tx,
+                                previous_attempts,
+                                generation,
+                                result,
+                            })
+                            .await;
+                    }),
+                );
+            }
+            EndpointMessage::Connected {
+                mut secret_address,
+                response_tx,
+                previous_attempts,
+                generation,
+                result,
+            } => {
+                let peer_id = secret_address.endpoint_addr.id;
+                if self.peer_generations.get(&peer_id) != Some(&generation) {
+                    debug!("Dropping superseded connection to peer {peer_id}.");
+                    if let Some(response_tx) = response_tx {
+                        let _ = response_tx.send(Ok(()));
+                    }
+                    return Ok(());
+                }
+                self.connecting.remove(&peer_id);
+                let conn = match result {
                     Ok(conn) => conn,
                     Err(err) => {
                         if format!("{err:#}").contains("known protocol") {
@@ -375,14 +469,12 @@ impl EndpointActor {
                                 .send(Err(err))
                                 .expect("Connect receiver dropped");
                         }
-                        Self::reconnect(
+                        tokio::spawn(Self::reconnect(
                             self.message_tx.clone(),
                             secret_address,
                             previous_attempts,
                             generation,
-                        )
-                        .await
-                        .expect("Failed to initiate reconnection");
+                        ));
                         // Not really Ok, but Ok enough.
                         return Ok(());
                     }
@@ -396,6 +488,13 @@ impl EndpointActor {
                     "Connected to peer: {}. Teamtype keeps syncing while it runs; press Ctrl+C to stop.",
                     conn.remote_id()
                 );
+
+                if let Some(remote) = self.endpoint.remote_info(peer_id).await {
+                    secret_address.endpoint_addr = EndpointAddr::from_parts(
+                        peer_id,
+                        remote.into_addrs().map(TransportAddrInfo::into_addr),
+                    );
+                }
 
                 if let Some(response_tx) = response_tx {
                     response_tx.send(Ok(())).expect("Connect receiver dropped");
@@ -492,25 +591,88 @@ impl EndpointActor {
         Ok(())
     }
 
+    // 🧑 "Also not syncing after a while"
+    /// Clears relay backoff while disconnected, including at the sharer. Handshakes run
+    /// concurrently so a stalled incoming connection cannot delay the relay check.
     async fn run(&mut self) {
+        let network_monitor = match netwatch::netmon::Monitor::new().await {
+            Ok(monitor) => Some(monitor),
+            Err(err) => {
+                warn!("Could not monitor network availability: {err}");
+                None
+            }
+        };
+        let mut network_was_up = true;
+        let mut relay_check = tokio::time::interval(RECONNECT_TIMEOUT);
+        relay_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut incoming_connections = FuturesUnordered::new();
+        let mut tunnel_tasks = Vec::new();
+        let mut recovery = RelayRecovery::new();
         loop {
             tokio::select! {
+                biased;
+                _ = relay_check.tick() => {
+                    let network_up = network_monitor.as_ref().is_none_or(|monitor| {
+                        let state = monitor.interface_state().get();
+                        state.have_v4 || state.have_v6
+                    });
+                    if network_up && !network_was_up {
+                        debug!("Network returned; refreshing disconnected relay state.");
+                        recovery.network_restored();
+                        if let Ok(resolver) = self.endpoint.dns_resolver() {
+                            resolver.reset();
+                        }
+                    }
+                    network_was_up = network_up;
+                    tunnel_tasks.retain(|task: &JoinHandle<()>| !task.is_finished());
+                    let live = self.peer_tasks.values().any(|task| !task.is_finished())
+                        || !tunnel_tasks.is_empty()
+                        || self.endpoint.home_relay_status().get().iter().any(RelayStatus::is_connected);
+                    self.connecting.retain(|_, task| !task.is_finished());
+                    let pending = !incoming_connections.is_empty()
+                        || (!recovery.restored && !self.connecting.is_empty());
+                    if recovery.due(live, pending) && network_up
+                        && !self.peer_generations.is_empty()
+                    {
+                        recovery.attempted();
+                        match ConnectionManager::bind_endpoint(
+                            &self.app_config,
+                            self.endpoint.secret_key().clone(),
+                        ).await {
+                            Ok(endpoint) => {
+                                debug!("Refreshing the disconnected relay endpoint.");
+                                let previous_endpoint = std::mem::replace(&mut self.endpoint, endpoint);
+                                let _ = timeout(ENDPOINT_CLOSE_TIMEOUT, previous_endpoint.close()).await;
+                            }
+                            Err(err) => warn!("Could not refresh the disconnected endpoint: {err:#}"),
+                        }
+                    }
+                }
                 maybe_incoming = self.endpoint.accept() => {
                     match maybe_incoming {
                         Some(incoming) => {
-                            match incoming.await {
-                                Ok(conn) => {
-                                    self.handle_incoming_connection(conn);
-                                }
-                                Err(err) => {
-                                    debug!("Error while accepting peer connection: {err}");
-                                }
-                            }
+                            incoming_connections.push(timeout(CONNECT_TIMEOUT, incoming.into_future()));
                         }
                         None => {
                             // Endpoint was closed. Let's shut down.
                             break
                         }
+                    }
+                }
+                Some(result) = incoming_connections.next() => {
+                    match result {
+                        Ok(Ok(conn)) => {
+                            if conn.alpn() == tunnel::ALPN {
+                                if let Some(port) = self.forward_port {
+                                    debug!("Tunnel connected: {}", conn.remote_id());
+                                    tunnel_tasks.push(tokio::spawn(tunnel::serve(conn, self.my_passphrase.clone(), port)));
+                                }
+                            } else {
+                                self.handle_incoming_connection(conn);
+                            }
+                        }
+                        Ok(Err(err)) => debug!("Error while accepting peer connection: {err}"),
+                        Err(err) => debug!("Error while accepting peer connection: {err}"),
                     }
                 }
                 maybe_message = self.message_rx.recv() => {
@@ -530,14 +692,6 @@ impl EndpointActor {
 
     fn handle_incoming_connection(&mut self, conn: IrohEndpointConnection) {
         let endpoint_id = conn.remote_id();
-        if conn.alpn() == tunnel::ALPN {
-            if let Some(port) = self.forward_port {
-                debug!("Tunnel connected: {endpoint_id}");
-                tokio::spawn(tunnel::serve(conn, self.my_passphrase.clone(), port));
-            }
-            return;
-        }
-
         info!("Peer connected: {}", &endpoint_id);
         self.warn_if_flapping(endpoint_id);
         self.start_peer_generation(endpoint_id);
@@ -710,5 +864,154 @@ impl Connection<PeerMessage> for PeerMessageStream {
             .recv()
             .await
             .context("Failed to await next peer message")?
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn rediscovery_keeps_relay_hint() -> Result<()> {
+        let relay: RelayUrl = "https://relay.example.com".parse()?;
+        let address = SecretAddress {
+            endpoint_addr: EndpointAddr::new(SecretKey::generate().public())
+                .with_relay_url(relay.clone())
+                .with_ip_addr("127.0.0.1:1234".parse()?),
+            passphrase: SecretKey::generate(),
+        };
+        assert_eq!(address.reconnect_addr(2), address.endpoint_addr);
+        let fresh = address.reconnect_addr(3);
+        assert_eq!(fresh.relay_urls().collect::<Vec<_>>(), vec![&relay]);
+        assert_eq!(fresh.ip_addrs().count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tunnel_survives_blocked_relay_without_sync_peers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        fs::create_dir(dir.path().join(".teamtype"))?;
+        let config = AppConfig {
+            base_dir: dir.path().to_path_buf(),
+            iroh_relay: Some("http://127.0.0.1:9".to_owned()),
+            ..AppConfig::default()
+        };
+        let endpoint = ConnectionManager::bind_endpoint(&config, SecretKey::generate()).await?;
+        let address = endpoint.addr();
+        let client = Endpoint::builder(presets::Minimal).bind().await?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let echo = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await?;
+            let (mut read, mut write) = tcp.split();
+            tokio::io::copy(&mut read, &mut write).await
+        });
+        let passphrase = SecretKey::generate();
+        let (tx, rx) = mpsc::channel(1);
+        let doc = DocumentActorHandle::new(&config, true, true, false);
+        let mut actor =
+            EndpointActor::new(endpoint.clone(), rx, tx, doc, passphrase.clone(), config);
+        actor.forward_port = Some(port);
+        actor.peer_generations.insert(client.id(), 1);
+        let task = tokio::spawn(async move { actor.run().await });
+        let conn = timeout(CONNECT_TIMEOUT, client.connect(address, tunnel::ALPN)).await??;
+        let (mut send, mut recv) = conn.open_bi().await?;
+        send.write_all(&passphrase.to_bytes()).await?;
+        send.write_all(b"before").await?;
+        let mut bytes = [0; 6];
+        timeout(PEER_TIMEOUT, recv.read_exact(&mut bytes)).await??;
+        assert_eq!(&bytes, b"before");
+        sleep(CONNECT_TIMEOUT + RECONNECT_TIMEOUT).await;
+        assert!(!endpoint.is_closed());
+        assert!(
+            endpoint
+                .home_relay_status()
+                .get()
+                .iter()
+                .all(|relay| !relay.is_connected())
+        );
+        send.write_all(b"after!").await?;
+        timeout(PEER_TIMEOUT, recv.read_exact(&mut bytes)).await??;
+        assert_eq!(&bytes, b"after!");
+        conn.close(0u32.into(), b"test finished");
+        task.abort();
+        echo.abort();
+        let _ = timeout(ENDPOINT_CLOSE_TIMEOUT, endpoint.close()).await;
+        let _ = timeout(ENDPOINT_CLOSE_TIMEOUT, client.close()).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn relay_setup_and_offline_backoff() {
+        let mut recovery = RelayRecovery::new();
+        recovery.since -= Duration::from_secs(5);
+        assert!(!recovery.due(false, false));
+        recovery.since -= Duration::from_secs(10);
+        assert!(recovery.due(false, false));
+        recovery.attempted();
+        assert_eq!(recovery.delay, Duration::from_secs(30));
+        let mut replacements = 1;
+        for _ in 0..900 {
+            recovery.since -= RECONNECT_TIMEOUT;
+            if recovery.due(false, false) {
+                recovery.attempted();
+                replacements += 1;
+            }
+        }
+        assert_eq!(replacements, 5, "offline replacements: {replacements}");
+        recovery.since -= Duration::from_hours(1);
+        assert!(!recovery.due(false, false));
+        assert!(!recovery.due(true, false));
+        assert_eq!(recovery.delay, CONNECT_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn direct_tunnels_and_handshakes_prevent_replacement() {
+        let mut recovery = RelayRecovery::new();
+        recovery.since -= MAX_REFRESH_DELAY;
+        assert!(!recovery.due(false, true));
+        assert!(recovery.due(false, false));
+        assert!(!recovery.due(true, false));
+    }
+
+    #[tokio::test]
+    async fn restoration_resets_backoff_but_keeps_minimum_age() {
+        let mut recovery = RelayRecovery::new();
+        recovery.network_restored();
+        assert!(!recovery.due(false, false));
+        recovery.since -= CONNECT_TIMEOUT;
+        recovery.restored = false;
+        recovery.delay = MAX_REFRESH_DELAY * 2;
+        assert!(!recovery.due(false, false));
+        recovery.network_restored();
+        assert_eq!(recovery.delay, CONNECT_TIMEOUT);
+        assert!(!recovery.due(false, true));
+        assert!(recovery.due(false, false));
+        recovery.attempted();
+        assert!(!recovery.restored);
+        assert!(!recovery.due(false, false));
+    }
+
+    #[tokio::test]
+    async fn slow_connect_finishes_within_deadline() -> Result<()> {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await?;
+        let client = Endpoint::builder(presets::Minimal).bind().await?;
+        let address = server.addr();
+        let accept = tokio::spawn(async move {
+            sleep(Duration::from_secs(5)).await;
+            let incoming = server.accept().await.context("server closed")?;
+            let conn = incoming.await?;
+            conn.closed().await;
+            server.close().await;
+            Ok::<_, anyhow::Error>(())
+        });
+        let conn = timeout(RETRY_CONNECT_TIMEOUT, client.connect(address, ALPN)).await??;
+        conn.close(0u32.into(), b"test finished");
+        timeout(ENDPOINT_CLOSE_TIMEOUT, client.close()).await?;
+        timeout(CONNECT_TIMEOUT, accept).await???;
+        Ok(())
     }
 }
