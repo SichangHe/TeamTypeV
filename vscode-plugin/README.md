@@ -5,15 +5,20 @@ SPDX-FileCopyrightText: 2024 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# VS Code plugin for 🍃 [Teamtype](https://github.com/teamtype/teamtype)-compatible projects
+# VS Code plugin for 🍃 [TeamTypeV](https://github.com/SichangHe/TeamTypeV)-compatible projects
+(authored by agents unless marked 🧑)
 
-Note: You will need to install and run a "collaboration server" like Teamtype in addition to this plugin!
+Note: You will need to install and run a "collaboration server" like TeamTypeV in addition to this plugin!
 
-Refer to the [main project](https://github.com/teamtype/teamtype) for documentation and usage instructions.
+Refer to the [main project](https://github.com/SichangHe/TeamTypeV) for documentation and usage instructions.
+
+Install the plugin from this checkout using the [local installation instructions](DEVELOPMENT.md#how-to-run-locally-without-host). The upstream marketplace extension does not contain TeamTypeV's changes.
+
+The local extension ID is `SichangHe.teamtype`. Disable the upstream `teamtype.teamtype` extension before loading it to avoid two plugins handling the same files. The `teamtype.*` settings and commands remain compatible.
 
 ## Configuration
 
-A configuration for connecting to Teamtype daemons is provided as a default value.
+A configuration for connecting to TeamTypeV daemons is provided as a default value.
 
 You can also use this plugin with other collaboration servers.
 

@@ -6,5 +6,6 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # Getting started
+(authored by agents unless marked 🧑)
 
-For installation instructions and basic usage, please refer to the project's [README](https://github.com/teamtype/teamtype).
+For installation instructions and basic usage, please refer to the project's [README](https://github.com/SichangHe/TeamTypeV).

@@ -295,7 +295,7 @@ impl ConnectionManager {
 
             assert!(
                 metadata.len() == 64,
-                "Your keyfile is not 64 bytes long. This is a sign that it was created by a Teamtype version older than 0.7.0, which is not compatible. Please remove .teamtype/key, and try again."
+                "Your keyfile is not 64 bytes long. This is a sign that it was created by a TeamTypeV version older than 0.7.0, which is not compatible. Please remove .teamtype/key, and try again."
             );
 
             debug!("Re-using existing keypair.");
@@ -493,7 +493,7 @@ impl EndpointActor {
                 }
 
                 info!(
-                    "Connected to peer: {}. Teamtype keeps syncing while it runs; press Ctrl+C to stop.",
+                    "Connected to peer: {}. TeamTypeV keeps syncing while it runs; press Ctrl+C to stop.",
                     conn.remote_id()
                 );
 

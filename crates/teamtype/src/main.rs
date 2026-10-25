@@ -146,7 +146,7 @@ async fn run_daemon(app_config: AppConfig, init_doc: bool) -> Result<Daemon> {
 
     config::ensure_teamtype_is_ignored(&app_config.base_dir)?;
 
-    debug!("Starting Teamtype on {}.", app_config.base_dir.display());
+    debug!("Starting TeamTypeV on {}.", app_config.base_dir.display());
 
     // Setup a new daemon from the derived config. Immediately join the handle because that's what
     // actually starts the local socket and any configured network connections. Return the result
@@ -383,13 +383,13 @@ fn setup_teamtype_directory(directory: &Path, temporary_directory: Option<&TempD
         let directory_is_temporary_directory = temporary_directory.is_some();
         if directory_is_temporary_directory {
             info!(
-                "'{}' is the temporary directory that is used as a Teamtype directory.",
+                "'{}' is the temporary directory that is used as a TeamTypeV directory.",
                 &directory.display()
             );
             sandbox::create_dir(directory, &teamtype_dir)?;
         } else {
             warn!(
-                "'{}' hasn't been used as a Teamtype directory before.",
+                "'{}' hasn't been used as a TeamTypeV directory before.",
                 &directory.display()
             );
 
@@ -400,7 +400,7 @@ fn setup_teamtype_directory(directory: &Path, temporary_directory: Option<&TempD
                 sandbox::create_dir(directory, &teamtype_dir)?;
                 info!("Created! Resuming launch.");
             } else {
-                bail!("Aborting launch. Teamtype needs a .teamtype/ directory to function");
+                bail!("Aborting launch. TeamTypeV needs a .teamtype/ directory to function");
             }
         }
     }

@@ -40,7 +40,7 @@ fn instantiate_initial_automerge_doc() -> Result<()> {
     );
     let force_generate = var_os("TEAMTYPE_GENERATE_NEW_INITIAL_AUTOMERGE_DOC").is_some();
     // The initial Automerge document state is hard coded and changing it would imply a breaking
-    // Teamtype release incompatible with old clients. Hence, the document generated here is tracked
+    // TeamTypeV release incompatible with old clients. Hence, the document generated here is tracked
     // in our VCS so we can see if it ever needs to be bumped, e.g. to use a new breaking version of
     // Automerge. Most people will never need to regenerate it, but removing the file or setting an
     // env var can be used to force a regeneration.

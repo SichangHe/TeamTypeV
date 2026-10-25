@@ -6,6 +6,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # Summary
+(authored by agents unless marked 🧑)
 
 [Introduction](introduction.md)
 
@@ -23,7 +24,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
     - [Offline support](offline-support.md)
     - [Configuration](configuration.md)
     - [Workarounds](workarounds.md)
-- [Teamtype in practice](in-practice.md)
+- [TeamTypeV in practice](in-practice.md)
     - [Pair programming](pair-programming.md)
     - [Shared notes](shared-notes.md)
     - [Working with Git](git-integration.md)

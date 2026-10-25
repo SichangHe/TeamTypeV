@@ -17,8 +17,8 @@ authors = [
     "blinry <mail@blinry.org>",
     "Caleb Maclennan <caleb@alerque.com>",
 ]
-homepage = "https://teamtype.github.io/teamtype/"
-repository = "https://github.com/teamtype/teamtype"
+homepage = "https://github.com/SichangHe/TeamTypeV"
+repository = "https://github.com/SichangHe/TeamTypeV"
 license = "AGPL-3.0-or-later"
 edition = "2024"
 rust-version = "1.92.0"

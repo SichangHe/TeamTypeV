@@ -6,8 +6,9 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # Local first
+(authored by agents unless marked 🧑)
 
-A core idea of Teamtype is that working collaboratively on files is that everyone will have a copy on their computer even if they stop working together.
+A core idea of TeamTypeV is that working collaboratively on files is that everyone will have a copy on their computer even if they stop working together.
 
 After you've initially synced with someone, your copy of the shared directory is fully independent from your peer.
 You can make changes to it, even when you don't have an Internet connection, and once you connect again, the daemons will sync in a more or less reasonable way.

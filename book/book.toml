@@ -7,7 +7,7 @@
 authors = ["blinry", "zormit"]
 language = "en"
 src = "src"
-title = "Teamtype Documentation"
+title = "TeamTypeV Documentation"
 
 [output.html]
-site-url = "/teamtype/"
+site-url = "/TeamTypeV/"

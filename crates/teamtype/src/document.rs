@@ -48,7 +48,7 @@ impl Default for Document {
         // We're baking a single static initial state into the binary rather than generating new documents
         // from a random seed in each client so that documents created by independent peers can be merged.
         // See build.rs for how to force a rebuild of this initial state, but be aware updating the initial
-        // state is a breaking change that will make Teamtype peers incompatible with each other.
+        // state is a breaking change that will make TeamTypeV peers incompatible with each other.
         // See https://automerge.org/docs/cookbook/modeling-data/#setting-up-an-initial-document-structure
         let initial_automerge_doc_bytes = include_bytes!("initial_automerge_doc.bin");
         Self::load(initial_automerge_doc_bytes)
@@ -273,7 +273,7 @@ impl Document {
             return;
         }
 
-        info!("Removing {file_path} from the Teamtype history.");
+        info!("Removing {file_path} from the TeamTypeV history.");
 
         // Remove from Automerge document.
         let file_map = self
@@ -290,7 +290,7 @@ impl Document {
     pub fn set_file(&mut self, content: Content, file_path: &RelativePath) {
         match content {
             Content::String(ref text) => {
-                info!("Initializing {file_path} in the Teamtype history.");
+                info!("Initializing {file_path} in the TeamTypeV history.");
                 self.files
                     .insert(file_path.clone(), Content::String(text.clone()));
 
@@ -322,7 +322,7 @@ impl Document {
 
                 // If the file was not in the document before, log this.
                 if !self.file_exists(file_path) {
-                    info!("Initializing binary {file_path} in the Teamtype history.");
+                    info!("Initializing binary {file_path} in the TeamTypeV history.");
                 }
 
                 self.doc

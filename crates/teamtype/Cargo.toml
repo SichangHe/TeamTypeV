@@ -7,13 +7,13 @@
 
 [package]
 name = "teamtype"
-description = "Enables real-time co-editing of local text files."
+description = "TeamTypeV: collaborative editing of local text files."
 version.workspace = true
 authors.workspace = true
 license.workspace = true
 readme = "README.md"
 include = ["*.rs", "*.toml", "src/initial_automerge_doc.bin", "src/git_activate.*"]
-documentation = "https://teamtype.github.io"
+documentation = "https://github.com/SichangHe/TeamTypeV"
 homepage.workspace = true
 repository.workspace = true
 keywords = [

@@ -7,7 +7,7 @@
 
 [package]
 name = "e2e-tests"
-description = "End-to-end testing of Teamtype including plugin integrations."
+description = "End-to-end testing of TeamTypeV including plugin integrations."
 publish = false
 version.workspace = true
 authors.workspace = true

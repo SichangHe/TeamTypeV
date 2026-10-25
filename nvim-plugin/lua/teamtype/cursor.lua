@@ -16,7 +16,7 @@ local M = {}
 --    }
 -- }
 local user_cursors = {}
-local cursor_namespace = vim.api.nvim_create_namespace("Teamtype")
+local cursor_namespace = vim.api.nvim_create_namespace("TeamTypeV")
 local offset_encoding = "utf-32"
 local cursor_timeout_ms = 300 * 1000
 local following_user_id = nil

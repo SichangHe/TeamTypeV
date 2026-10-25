@@ -180,7 +180,7 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
     bail!("Daemon closed the connection before confirming the agent edit")
 }
 
-// 🧑 "Does Teamtype give you a good way to see diffs from your last read/write? How should it be
+// 🧑 "Does TeamTypeV give you a good way to see diffs from your last read/write? How should it be
 // best done if not already?"
 /// Where `agent`'s snapshot of `file` is kept: the content it last read or wrote.
 fn snapshot_root(directory: &Path, agent: &str) -> Result<PathBuf> {
@@ -200,10 +200,10 @@ fn snapshot_root(directory: &Path, agent: &str) -> Result<PathBuf> {
     }
     let root = directory.join(".teamtype/agent-snapshots-v2");
     let agent_root = root.join(agent);
-    // Only Teamtype directories hold snapshots; never create `.teamtype` as a side effect.
+    // Only TeamTypeV directories hold snapshots; never create `.teamtype` as a side effect.
     if !directory.join(".teamtype").is_dir() {
         bail!(
-            "{} is not a Teamtype directory (no .teamtype); run agent commands inside a shared directory",
+            "{} is not a TeamTypeV directory (no .teamtype); run agent commands inside a shared directory",
             directory.display()
         );
     }

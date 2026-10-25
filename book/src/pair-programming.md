@@ -5,9 +5,10 @@ SPDX-FileCopyrightText: 2024 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# Using Teamtype for pair programming
+# Using TeamTypeV for pair programming
+(authored by agents unless marked 🧑)
 
-One use case for Teamtype is to do a **short collaboration session** on an existing project.
+One use case for TeamTypeV is to do a **short collaboration session** on an existing project.
 You could do this, for example, to pair program with another person, editing code together at the same time.
 
 This would also work for more than two people.
@@ -52,7 +53,7 @@ The hosting daemon should show a message like "Peer connected: ...".
 Connected peers can now open files and edit them together.
 Note the [common pitfalls](workarounds.md).
 
-### 5. Stop Teamtype
+### 5. Stop TeamTypeV
 
 To stop collaborating, stop the daemon (by pressing Ctrl-C in its terminal).
 Both peers will still have the code they worked on, and can continue their work independently.
@@ -60,9 +61,9 @@ Both peers will still have the code they worked on, and can continue their work 
 ### 6. Reconnect later
 
 Note that if the shared folder is **inside a Git repository with a remote**, your daemon will start a new history every time you start it.
-This is because when you're using Teamtype in parallel with Git fetches, updating your local files from the previous history doesn't make sense anymore.
+This is because when you're using TeamTypeV in parallel with Git fetches, updating your local files from the previous history doesn't make sense anymore.
 
-If you don't have a Git remote, Teamtype uses the [offline support](offline-support.md) feature.
-When you re-start Teamtype, it will scan for changes you've made in the meantime, and try to send them to the other peer.
+If you don't have a Git remote, TeamTypeV uses the [offline support](offline-support.md) feature.
+When you re-start TeamTypeV, it will scan for changes you've made in the meantime, and try to send them to the other peer.
 If you don't want this, you can delete the CRDT state in `.teamtype/doc` as a joining peer, to receive the history from your peer.
 The hosting peer doesn't need to do that, it will simply update their state to the latest file content and share that with others.

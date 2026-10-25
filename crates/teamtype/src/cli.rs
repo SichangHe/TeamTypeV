@@ -10,7 +10,8 @@ use clap::{Args, Parser, Subcommand};
 
 // TODO: Define these constants in the teamtype crate, and use them here.
 #[derive(Parser)]
-#[command(about, long_about = None)]
+// 🧑 "change all mentioning of TeamType ... let's do TeamTypeV instead of X"
+#[command(about = "TeamTypeV: collaborative editing of local text files.", long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {
     #[command(subcommand)]
@@ -80,7 +81,7 @@ pub enum Commands {
         #[command(flatten)]
         shared_flags: ShareJoinFlags,
     },
-    /// Open a JSON-RPC connection to the Teamtype daemon on stdin/stdout. Used by text editor plugins.
+    /// Open a JSON-RPC connection to the TeamTypeV daemon on stdin/stdout. Used by text editor plugins.
     Client,
     /// Reach the port a sharer forwards (`share --forward-port`) on localhost. Needs no shared
     /// directory.

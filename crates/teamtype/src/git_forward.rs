@@ -204,7 +204,7 @@ pub fn remove_old_hook(root: &Path) {
             && let Err(error) = std::fs::remove_file(&hook)
         {
             tracing::warn!(
-                "Could not remove old Teamtype Git hook {}: {error}",
+                "Could not remove old TeamTypeV Git hook {}: {error}",
                 hook.display()
             );
         }
@@ -620,7 +620,7 @@ pub async fn client(directory: Option<&Path>, args: Vec<OsString>) -> Result<i32
         .unwrap_or_else(|_| Path::new(""));
     let mut socket = UnixStream::connect(root.join(".teamtype/git.sock"))
         .await
-        .context("Teamtype daemon is offline; start share or join before running Git")?;
+        .context("TeamTypeV daemon is offline; start share or join before running Git")?;
     let request = Request {
         id: 0,
         args: args.into_iter().map(OsString::into_vec).collect(),

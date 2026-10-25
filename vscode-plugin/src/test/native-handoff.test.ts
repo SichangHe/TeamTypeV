@@ -15,7 +15,7 @@ suite("Native tab handoff", () => {
             const bin = process.env.TEAMTYPE_BINARY ?? path.resolve(__dirname, "../../../target/debug/teamtype")
             process.env.PATH = `${path.dirname(bin)}${path.delimiter}${process.env.PATH}`
             fs.writeFileSync(file, "base\n")
-            const extension = vscode.extensions.getExtension("teamtype.teamtype")!
+            const extension = vscode.extensions.getExtension("SichangHe.teamtype")!
             await extension.activate()
             const native = await vscode.workspace.openTextDocument(file)
             await vscode.window.showTextDocument(native)

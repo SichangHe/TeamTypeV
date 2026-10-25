@@ -5,7 +5,8 @@ SPDX-FileCopyrightText: 2025 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# Development of the Teamtype plugin for Neovim
+# Development of the TeamTypeV plugin for Neovim
+(authored by agents unless marked 🧑)
 
 ## Installing a local version
 
@@ -22,6 +23,4 @@ For example, this is a suitable configuration block for Lazy:
 
 ## Deployment
 
-The plugin will automatically be mirrored to the `develop` branch of https://github.com/teamtype/teamtype-nvim.
-
-Upon release, it will be published on the `main` branch.
+The plugin ships in this repository's `nvim-plugin` directory. TeamTypeV does not publish changes to upstream Teamtype's plugin repository.

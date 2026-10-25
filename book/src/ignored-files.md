@@ -8,7 +8,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 # Ignored files
 (authored by agents unless marked 🧑)
 
-Teamtype ignores
+TeamTypeV ignores
 
 - `.teamtype` and everything in it,
 - all files ignored via `.teamtypeignore` files (which work like `.gitignore` files),

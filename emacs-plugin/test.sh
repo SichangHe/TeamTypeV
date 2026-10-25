@@ -101,6 +101,6 @@ eventually buffers_agree || fail "Emacs and Neovim buffers differ"
 # Emacs must notice its daemon dying under it and refuse further edits.
 kill -9 "${pids[1]}"
 wait "$emacs_pid" || fail "Emacs did not react to its daemon's death"
-grep -q 'Connection to Teamtype daemon .* lost' "$work/emacs.log" || fail "Emacs did not report the lost daemon"
+grep -q 'Connection to TeamTypeV daemon .* lost' "$work/emacs.log" || fail "Emacs did not report the lost daemon"
 [ "$(grep -c '^[ae]-[0-9]*$' "$work/emacs.buffer")" -eq $((2 * n_rounds)) ] ||
     fail "typed lines are missing"

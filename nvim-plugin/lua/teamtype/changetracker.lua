@@ -31,7 +31,7 @@ local function is_empty(diff)
         and diff.range["start"].character == diff.range["end"].character
 end
 
--- Convert an LSP TextDocumentContentChangeEvent to a Teamtype delta.
+-- Convert an LSP TextDocumentContentChangeEvent to a TeamTypeV delta.
 local function lsp_diff_to_teamtype_delta(diff)
     return {
         {
@@ -41,7 +41,7 @@ local function lsp_diff_to_teamtype_delta(diff)
     }
 end
 
--- Convert a Teamtype delta to a list of LSP `TextEdit`s.
+-- Convert a TeamTypeV delta to a list of LSP `TextEdit`s.
 local function teamtype_delta_to_lsp_text_edits(delta)
     local text_edits = {}
     for _, replacement in ipairs(delta) do
@@ -91,7 +91,7 @@ local function fix_diff(diff, prev_lines, curr_lines)
     -- TODO: Update the following comment to describe the problem and the solution more clearly.
 
     -- Sometimes, Neovim deletes full lines by deleting the last line, plus an imaginary newline at the end. For example, to delete the second line, Neovim would delete from (line: 1, column: 0) to (line: 2, column 0).
-    -- But, in the case of deleting the last line, what we expect in the rest of Teamtype is to delete the newline *before* the line.
+    -- But, in the case of deleting the last line, what we expect in the rest of TeamTypeV is to delete the newline *before* the line.
     -- So let's change the deleted range to (line: 0, column: [last character of the first line]) to (line: 1, column: [last character of the second line]).
 
     if diff.range["end"].line == #prev_lines then
@@ -173,7 +173,7 @@ function M.track_changes(buffer, initial_lines, callback)
     -- calculate the difference between the previous and the current content.
     local prev_lines = initial_lines
 
-    -- Computes a Teamtype delta containing the changes between curr_lines and prev_lines.
+    -- Computes a TeamTypeV delta containing the changes between curr_lines and prev_lines.
     -- If the delta is not empty, call the callback.
     local function line_change(first_line, last_line, new_last_line)
         -- TODO: optimize with a cache

@@ -6,6 +6,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # Connection making
+(authored by agents unless marked 🧑)
 
 ## Join codes
 
@@ -16,7 +17,7 @@ You can learn about the security properties in the [Magic Wormhole documentation
 
 ## Secret addresses
 
-Since version 0.7.0 Teamtype uses iroh for making a connection.
+Since version 0.7.0 TeamTypeV uses iroh for making a connection.
 To connect to another daemon, we're using a combination of the iroh [Node Identifier](https://www.iroh.computer/docs/concepts/endpoint#node-identifiers) and a secret key which, smashed together, which looks like `429e94...0e9819#32374e...4a6789`.
 We call this the node's *secret address*.
 Treat it like a password.
@@ -33,7 +34,7 @@ When you want to have an "always online" host, such that every user can connect 
 
 Other systems solve this with a client-server architecture, where the server is always online, and the clients connect to it as needed.
 
-But Teamtype is fundamentally peer-to-peer, so what we suggest to use is what the research group Ink & Switch call a ["cloud peer"](https://www.inkandswitch.com/local-first/): You run a Teamtype peer on a public server, and all users will then connect to that server.
+But TeamTypeV is fundamentally peer-to-peer, so what we suggest to use is what the research group Ink & Switch call a ["cloud peer"](https://www.inkandswitch.com/local-first/): You run a TeamTypeV peer on a public server, and all users will then connect to that server.
 
 This is only recommended for people who are comfortable setting up services on a server.
 But the nice part is that if someone did this for you, you can just connect to it not worrying about the nitty-gritty networking details.

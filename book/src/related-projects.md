@@ -6,6 +6,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # Related Projects
+(authored by agents unless marked 🧑)
 
 There have been a number of attempts of enabling collaborative text editing!
 If you think a project is missing, feel free to [submit an issue or a PR][teamtype] to add them to the list!
@@ -14,7 +15,7 @@ If you think a project is missing, feel free to [submit an issue or a PR][teamty
 
 |                                                           | Open-source | Active[^a] | Peer-to-peer | CRDT[^c] | Editor-agnostic                                        |
 |-----------------------------------------------------------|-------------|------------|--------------|----------|--------------------------------------------------------|
-| [Teamtype][teamtype]                                      | ✅          | ✅         | ✅           | ✅       | ✅ (Neovim, VS Code, JetBrains IDEs, TeXstudio)        |
+| [TeamTypeV][teamtype]                                      | ✅          | ✅         | ✅           | ✅       | ✅ (Neovim, VS Code, Emacs)                          |
 | [Reflection][reflection]                                  | ✅          | ✅         | ✅           | ✅       | ❌ (Standalone)                                        |
 | [SubEthaEdit][subethaedit]                                | ✅          | ✅         | ✅           | ❌       | ❌ (Standalone)                                        |
 | [Open Collab Tools][opencollab]                           | ✅          | ✅         | ❌           | ✅       | ✅ (VS Code, Eclipse Theia)                            |
@@ -70,7 +71,7 @@ If you think a project is missing, feel free to [submit an issue or a PR][teamty
 [rustpad]: https://github.com/ekzhang/rustpad
 [subethaedit]: https://en.wikipedia.org/wiki/SubEthaEdit
 [tandem]: https://github.com/typeintandem/tandem
-[teamtype]: https://teamtype.org
+[teamtype]: https://github.com/SichangHe/TeamTypeV
 [teletype]: https://github.com/atom/teletype
 [togetherly]: https://github.com/zk-phi/togetherly
 [vsliveshare]: https://visualstudio.microsoft.com/services/live-share
