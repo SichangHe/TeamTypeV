@@ -34,7 +34,7 @@ The wrapper finds the shared root from the current directory. It applies through
 
 The sharer runs forwarded commands one at a time. Each command waits until that joiner's earlier edits have reached the sharer's document and files. Changes must have been sent by the editor plugin; before Git runs, the sharer flushes open buffers to disk. You can keep typing while Git runs. The daemon collects those edits and merges them with Git's completed changes before writing files again. On the sharer, saving or opening a file that does not exist yet reports a retry message during the command; retry after Git finishes. Existing files can still be opened. Changes made by other participants can also be included. Staging is shared: coordinate `add` and `commit` if several people are preparing commits.
 
-Use `teamtype git` on the sharer too: ordinary Git bypasses this coordination. Other programs that keep a shared file open for writing can lose later writes if the daemon replaces that file. Use the editor plugins or the `teamtype agent edit` command for concurrent edits; stop sharing before running an uncoordinated writer that must keep its file open.
+Use `teamtype git` on the sharer too: ordinary Git bypasses this coordination. Other programs that keep a shared file open for writing can lose later writes if the daemon replaces that file. Use the editor plugins or the `teamtype agent-edit` command for concurrent edits; stop sharing before running an uncoordinated writer that must keep its file open.
 
 Forwarded commands require the shared root to own a non-bare Git repository. A repository in a parent directory is rejected.
 
