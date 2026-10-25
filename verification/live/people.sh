@@ -242,7 +242,7 @@ python3 - "$work/c" <<'PYTHON'
 import json, socket, sys
 directory = sys.argv[1]
 uri = f"file://{directory}/shared.txt"
-requests = [{"jsonrpc": "2.0", "id": 1, "method": "open", "params": {"uri": uri, "content": ""}}]
+requests = [{"jsonrpc": "2.0", "id": 1, "method": "open", "params": {"uri": uri, "content": "", "daemonWrites": True}}]
 requests += [
     {"jsonrpc": "2.0", "id": i, "method": "cursor", "params": {"uri": uri, "ranges": []}}
     for i in range(2, 200)

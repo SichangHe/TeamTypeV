@@ -119,6 +119,7 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
                 uri: uri.clone(),
                 content: expected,
                 saves_file: false,
+                daemon_writes: true,
             },
         ),
         (

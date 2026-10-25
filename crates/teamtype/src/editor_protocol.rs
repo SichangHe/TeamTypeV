@@ -116,12 +116,18 @@ pub struct EditorProtocolMessageError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "camelCase")]
 pub enum EditorProtocolMessageFromEditor {
+    DaemonWriter {},
+    Save {
+        uri: DocumentUri,
+    },
     Open {
         uri: DocumentUri,
         content: String,
         /// The editor saves the file after each change, so the daemon must not also write it.
         #[serde(default, rename = "savesFile")]
         saves_file: bool,
+        #[serde(default, rename = "daemonWrites")]
+        daemon_writes: bool,
     },
     Close {
         uri: DocumentUri,
@@ -157,6 +163,7 @@ mod test_serde {
                     uri: "file:///tmp/file".into(),
                     content: "initial content".to_string(),
                     saves_file: false,
+                    daemon_writes: false,
                 }
             }
         );
@@ -175,6 +182,7 @@ mod test_serde {
                     uri: "file:///tmp/file".into(),
                     content: "initial content".to_string(),
                     saves_file: false,
+                    daemon_writes: false,
                 }
             }
         );

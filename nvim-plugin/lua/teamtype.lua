@@ -239,11 +239,13 @@ local function activate_config_for_buffer(config_name, buf_nr, root_dir)
         vim.cmd("silent write")
     end
 
-    client.connection:send_request("open", { uri = uri, content = content }, function()
-        debug("Tracking Edits")
-        ensure_autoread_is_off()
-        disable_writing()
-        track_edits(client, filename, uri, lines)
+    client.connection:send_request("daemonWriter", { check = true }, function()
+        client.connection:send_request("open", { uri = uri, content = content, daemonWrites = true }, function()
+            debug("Tracking Edits")
+            ensure_autoread_is_off()
+            disable_writing()
+            track_edits(client, filename, uri, lines)
+        end)
     end)
 end
 

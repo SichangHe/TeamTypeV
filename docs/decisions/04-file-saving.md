@@ -11,6 +11,8 @@ date: 2024-03-14
 ---
 # Who saves files?
 
+🤖 Superseded for editor saves by [daemon-owned editor saves](daemon-writes.md).
+
 ## Context and Problem Statement
 
 Usually, when opening a file in a text editor, the content is read into its buffer. The user then works on the buffer, and sometimes writes it back to the file.

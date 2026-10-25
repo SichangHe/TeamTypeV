@@ -41,10 +41,64 @@ pub fn write_file(
     let parent_dir = canonical_file_path
         .parent()
         .expect("Failed to get parent directory");
-    create_dir_all(absolute_base_dir, parent_dir).expect("Failed to create parent directory");
+    create_dir_all(absolute_base_dir, parent_dir)?;
 
     fs::write(canonical_file_path, content)?;
     Ok(())
+}
+
+/// Atomically replaces a file and returns the bytes it replaced.
+/// Keeping the displaced file prevents a concurrent Git checkout from disappearing between
+/// the daemon's last read and its write. Existing permissions are preserved.
+pub fn replace_file(
+    absolute_base_dir: &Path,
+    absolute_file_path: &Path,
+    content: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let path = check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
+    let parent = path.parent().context("File has no parent")?;
+    create_dir_all(absolute_base_dir, parent)?;
+    let metadata_dir = absolute_base_dir.join(".teamtype");
+    create_dir_all(absolute_base_dir, &metadata_dir)?;
+    let mut staged = tempfile::NamedTempFile::new_in(&metadata_dir)?;
+    staged.write_all(content)?;
+    if let Ok(metadata) = fs::metadata(&path) {
+        staged.as_file().set_permissions(metadata.permissions())?;
+    }
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "redox"
+    ))]
+    loop {
+        match rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            staged.path(),
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::RenameFlags::EXCHANGE,
+        ) {
+            Ok(()) => break Ok(Some(fs::read(staged.path())?)),
+            Err(rustix::io::Errno::NOENT) => match staged.persist_noclobber(&path) {
+                Ok(_) => break Ok(None),
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    staged = error.file;
+                }
+                Err(error) => break Err(error.error.into()),
+            },
+            Err(error) => break Err(error.into()),
+        }
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "redox"
+    )))]
+    {
+        bail!("Atomic file exchange is unsupported on this platform")
+    }
 }
 
 pub fn append_file(
@@ -225,6 +279,18 @@ fn absolute_and_canonicalized(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// Produces an ordinary replacement failure without permissions or mount setup.
+    #[test]
+    fn replacement_failure_preserves_original_bytes() -> Result<()> {
+        let dir = tempdir()?;
+        fs::write(dir.path().join(".teamtype"), b"occupied")?;
+        let path = dir.path().join("file.txt");
+        fs::write(&path, b"original")?;
+        assert!(replace_file(dir.path(), &path, b"shared").is_err());
+        assert_eq!(fs::read(path)?, b"original");
+        Ok(())
+    }
+
     #[test]
     fn joiner_does_not_enumerate_stale_tracked_ignored_files() -> Result<()> {
         let root = tempdir()?;

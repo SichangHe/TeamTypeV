@@ -66,6 +66,7 @@ docstr.workspace = true
 futures.workspace = true
 ignore = "0.4"
 nix = { version = "0.29", features = ["signal", "process", "poll"] }
+rustix = { version = "1", features = ["fs"] }
 iroh = "1"
 magic-wormhole = "0.8"
 microxdg = "0.2"

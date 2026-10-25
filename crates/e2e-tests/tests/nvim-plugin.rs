@@ -47,6 +47,23 @@ async fn nvim_sends_something_to_socket() {
     .expect("sends_something test timed out");
 }
 
+#[tokio::test]
+async fn nvim_refuses_sharing_with_a_daemon_without_writer_support() {
+    let (nvim, _, mut socket, _dir) = Neovim::new_teamtype_enabled("hi").await;
+    let request = timeout(Duration::from_secs(5), socket.recv())
+        .await
+        .expect("capability request");
+    assert_eq!(request["method"], "daemonWriter");
+    socket.send(&format!("{}\n", serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32601,"message":"Method not found"}}))).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    nvim.input("ia<Esc>").await;
+    assert!(
+        timeout(Duration::from_millis(200), socket.recv())
+            .await
+            .is_err()
+    );
+}
+
 async fn assert_nvim_deltas_yield_content(
     initial_content: &str,
     deltas: Vec<EditorTextOp>,

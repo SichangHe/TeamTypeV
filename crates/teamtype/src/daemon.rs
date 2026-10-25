@@ -13,7 +13,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use automerge::ChangeHash;
 use automerge::{
     Patch,
@@ -39,7 +39,7 @@ use crate::editor_protocol::{
     IncomingMessage, JSONRPCResponse, OutgoingMessage,
 };
 use crate::git_forward;
-use crate::path::{AbsolutePath, RelativePath};
+use crate::path::{AbsolutePath, FileUri, RelativePath};
 use crate::peer;
 use crate::sandbox;
 use crate::types::{
@@ -147,6 +147,9 @@ pub struct DocumentActor {
     /// Files an editor has open. Kept on disk too: after a crash, files an editor saved itself may
     /// be ahead of the saved document on disk.
     files_open_in_editors: HashSet<RelativePath>,
+    /// Last bytes read or written, used as the base of concurrent disk edits.
+    disk_content: HashMap<RelativePath, Vec<u8>>,
+    disk_edits: Vec<ComponentMessage>,
 }
 
 impl DocumentActor {
@@ -190,6 +193,8 @@ impl DocumentActor {
             save_fully: true,
             persist,
             files_open_in_editors: HashSet::default(),
+            disk_content: HashMap::new(),
+            disk_edits: Vec::new(),
         };
         git_forward::remove_old_hook(&s.app_config.base_dir);
         for path in s.crdt_doc.files() {
@@ -223,13 +228,6 @@ impl DocumentActor {
         }
 
         s
-    }
-
-    #[must_use]
-    fn editor_saves(&self, file_path: &RelativePath) -> bool {
-        self.editor_connections
-            .values()
-            .any(|connection| connection.0.saves(file_path))
     }
 
     /// If any editor owns the file, it means that the daemon doesn't have ownership.
@@ -303,7 +301,11 @@ impl DocumentActor {
                     .any(|path| !git_forward::excluded(path));
                 let _ = response_tx.send((id, has_files));
             }
-            DocMessage::Persist => self.persist(),
+            DocMessage::Persist => {
+                if let Err(error) = self.persist() {
+                    error!("Could not persist shared document: {error:#}");
+                }
+            }
             DocMessage::ReceiveSyncMessage {
                 message,
                 state: mut peer_state,
@@ -381,8 +383,9 @@ impl DocumentActor {
                                 }
                             }
                         }
-                        PatchEffect::FileBytes(file_path, bytes) => {
-                            self.ensure_file_has_bytes(&file_path, &bytes);
+                        PatchEffect::FileBytes(file_path, _) => {
+                            self.invalidate_editor_file(&file_path);
+                            self.write_file(&file_path);
                         }
                         PatchEffect::NoEffect => {}
                     }
@@ -445,30 +448,27 @@ impl DocumentActor {
                 self.react_to_ephemeral_message(ephemeral_message).await;
             }
         }
+        self.send_disk_edits().await;
     }
 
     // 🧑 "make it work for three or more people reliably"
     /// Saves the document. Runs before every file write, so that a daemon killed at any moment
     /// restarts with a document at least as new as its files. With files newer than the document,
     /// the daemon shared their text again and a live trial showed duplicated lines for everyone.
-    fn persist(&mut self) {
+    fn persist(&mut self) -> Result<()> {
         let persistence_file = self.app_config.base_dir.join(".teamtype/doc");
-        if self.save_fully {
+        let result = if self.save_fully {
             debug!("Persisting CRDT document fully.");
             let bytes = self.crdt_doc.save();
             sandbox::write_file(&self.app_config.base_dir, &persistence_file, &bytes)
-                .unwrap_or_else(|_| {
-                    panic!("Failed to persist to '{}'", persistence_file.display())
-                });
-            self.save_fully = false;
         } else {
             debug!("Persisting CRDT document incrementally.");
             let bytes = self.crdt_doc.save_incremental();
             sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes)
-                .unwrap_or_else(|_| {
-                    panic!("Failed to persist to '{}'", persistence_file.display())
-                });
-        }
+        };
+        // Saving advances Automerge's incremental cursor even when disk I/O fails.
+        self.save_fully = result.is_err();
+        result.with_context(|| format!("Failed to persist to '{}'", persistence_file.display()))
     }
 
     fn open_files_list(&self) -> PathBuf {
@@ -490,7 +490,7 @@ impl DocumentActor {
         .unwrap_or_else(|err| panic!("Failed to save the list of open files: {err}"));
     }
 
-    /// Writes files that no editor saves itself any more, and drops closed files from the list.
+    /// Drops closed files from the recovery list.
     fn release_files(&mut self) {
         let files: Vec<RelativePath> = self.files_open_in_editors.iter().cloned().collect();
         let mut changed = false;
@@ -561,6 +561,77 @@ impl DocumentActor {
         editor_id: EditorId,
         message: &EditorProtocolMessageFromEditor,
     ) -> Result<Vec<EditorProtocolMessageToEditor>, EditorProtocolMessageError> {
+        if matches!(message, EditorProtocolMessageFromEditor::DaemonWriter {}) {
+            return Ok(vec![]);
+        }
+        if let EditorProtocolMessageFromEditor::Save { uri } = message {
+            let path = FileUri::try_from(uri.clone())
+                .and_then(|uri| {
+                    RelativePath::try_from_absolute(
+                        &self.app_config.base_dir,
+                        &uri.to_absolute_path(),
+                    )
+                })
+                .map_err(|error| EditorProtocolMessageError {
+                    code: -1,
+                    message: error.to_string(),
+                    data: None,
+                })?;
+            if !self
+                .editor_connections
+                .get(&editor_id)
+                .is_some_and(|(connection, _)| connection.owns(&path))
+            {
+                return Err(EditorProtocolMessageError {
+                    code: -1,
+                    message: "File is not shared by this editor".into(),
+                    data: None,
+                });
+            }
+            self.file_created_or_changed(&path);
+            if !matches!(
+                self.current_file_content(&path),
+                Some(document::Content::String(_))
+            ) {
+                return Err(EditorProtocolMessageError {
+                    code: -1,
+                    message: "The shared file is no longer UTF-8 text; reopen it before saving"
+                        .into(),
+                    data: None,
+                });
+            }
+            let saved = self.try_write_file(&path);
+            self.send_disk_edits().await;
+            saved.map_err(|error| EditorProtocolMessageError {
+                code: -1,
+                message: format!("Could not save shared file: {error:#}"),
+                data: None,
+            })?;
+            return Ok(vec![]);
+        }
+        if let EditorProtocolMessageFromEditor::Open { uri, .. }
+        | EditorProtocolMessageFromEditor::Edit { uri, .. } = message
+            && let Ok(uri) = FileUri::try_from(uri.clone())
+            && let Ok(path) =
+                RelativePath::try_from_absolute(&self.app_config.base_dir, &uri.to_absolute_path())
+            && self.disk_content.contains_key(&path)
+        {
+            self.file_created_or_changed(&path);
+            if matches!(message, EditorProtocolMessageFromEditor::Edit { .. })
+                && !matches!(
+                    self.current_file_content(&path),
+                    Some(document::Content::String(_))
+                )
+            {
+                return Err(EditorProtocolMessageError {
+                    code: -1,
+                    message: "The shared file is no longer UTF-8 text; reopen it before editing"
+                        .into(),
+                    data: None,
+                });
+            }
+        }
+        self.send_disk_edits().await;
         // First, convert the editor message into a component message (+ transformed edits from the
         // OT server).
         let (inside_message, mut messages_to_editor) = self
@@ -647,13 +718,24 @@ impl DocumentActor {
         if git_forward::excluded(&relative_file_path) {
             return;
         }
-        if self.owns(&relative_file_path) {
+        {
             match watcher_event.event_type {
                 WatcherEventType::Created | WatcherEventType::Changed => {
                     self.file_created_or_changed(&relative_file_path);
+                    if matches!(
+                        self.current_file_content(&relative_file_path),
+                        Some(document::Content::String(_))
+                    ) {
+                        self.write_file(&relative_file_path);
+                    }
                 }
                 WatcherEventType::Removed => {
-                    self.file_removed(&relative_file_path);
+                    let absolute = self.absolute_path_for_file_path(&relative_file_path);
+                    if sandbox::exists(&self.app_config.base_dir, &absolute).unwrap_or(false) {
+                        self.file_created_or_changed(&relative_file_path);
+                    } else {
+                        self.file_removed(&relative_file_path);
+                    }
                 }
             }
         }
@@ -672,6 +754,12 @@ impl DocumentActor {
         let new_content = match sandbox::read_file(&self.app_config.base_dir, &file_path) {
             Ok(content) => content,
             Err(e) => {
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    self.file_removed(relative_file_path);
+                    return;
+                }
                 warn!(
                     "The file watcher noticed a file creation/change for {relative_file_path}, \
                     but we couldn't read it: {e} (probably it was deleted after the change?)"
@@ -679,15 +767,62 @@ impl DocumentActor {
                 return;
             }
         };
+        self.merge_disk_content(relative_file_path, new_content);
+    }
+
+    fn merge_disk_content(&mut self, relative_file_path: &RelativePath, new_content: Vec<u8>) {
+        if self.disk_content.get(relative_file_path) == Some(&new_content) {
+            return;
+        }
         if let Ok(new_content) = String::from_utf8(new_content.clone()) {
-            self.crdt_doc.update_text(&new_content, relative_file_path);
-            // TODO: Once we get back to processing file changes while editors have it
-            // open, send the delta returned by update_text to editors.
+            let desired = if let (Some(base), Some(document::Content::String(current))) = (
+                self.disk_content
+                    .get(relative_file_path)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+                self.current_file_content(relative_file_path),
+            ) {
+                let shared: operational_transform::OperationSeq =
+                    TextDelta::from(dissimilar::diff(base, current)).into();
+                let outside: operational_transform::OperationSeq =
+                    TextDelta::from(dissimilar::diff(base, &new_content)).into();
+                let (_, outside) = shared
+                    .transform(&outside)
+                    .expect("Disk and shared edits have the same base");
+                TextDelta::from(outside)
+                    .apply_to(current)
+                    .expect("Transformed disk edit fits shared text")
+            } else {
+                new_content.clone()
+            };
+            self.disk_content
+                .insert(relative_file_path.clone(), new_content.into_bytes());
+            if let Some(delta) = self.crdt_doc.update_text(&desired, relative_file_path) {
+                self.disk_edits.push(ComponentMessage::Edit {
+                    file_path: relative_file_path.clone(),
+                    delta,
+                });
+            }
         } else {
+            self.invalidate_editor_file(relative_file_path);
+            self.disk_content
+                .insert(relative_file_path.clone(), new_content.clone());
             self.crdt_doc
                 .set_file(document::Content::Bytes(new_content), relative_file_path);
         }
         let _ = self.doc_changed_ping_tx.send(());
+    }
+
+    /// Binary replacements invalidate text operations until the editor reopens the file.
+    fn invalidate_editor_file(&mut self, path: &RelativePath) {
+        for (connection, _) in self.editor_connections.values_mut() {
+            connection.invalidate_file(path);
+        }
+    }
+
+    async fn send_disk_edits(&mut self) {
+        for message in std::mem::take(&mut self.disk_edits) {
+            self.broadcast_to_editors(None, &message).await;
+        }
     }
 
     #[must_use]
@@ -765,35 +900,43 @@ impl DocumentActor {
     }
 
     // 🧑 "make it work for three or more people reliably"
-    /// Writes the file to disk, unless an open editor saves it itself: a second writer made VS
-    /// Code's saves fail with "File Modified Since" in a live trial. Other open files are written,
-    /// so that tools reading the disk, such as agents, see the shared text.
+    // 🧑 "their save just tells teamtype to write"
+    /// Merges outside changes before writing shared text.
     fn write_file(&mut self, file_path: &RelativePath) {
-        if self.editor_saves(file_path) {
-            return;
-        }
-        if let Some(document::Content::String(text)) = self.current_file_content(file_path) {
-            let bytes = text.clone().into_bytes();
-            self.ensure_file_has_bytes(file_path, &bytes);
-        } else {
-            warn!(
-                "Failed to get content of file '{file_path}' when writing to disk. Key should have existed?"
-            );
+        if let Err(error) = self.try_write_file(file_path) {
+            error!("Could not write shared file {file_path}: {error:#}");
         }
     }
 
-    fn ensure_file_has_bytes(&mut self, file_path: &RelativePath, bytes: &[u8]) {
+    fn try_write_file(&mut self, file_path: &RelativePath) -> Result<()> {
+        if self.disk_content.contains_key(file_path) {
+            self.file_created_or_changed(file_path);
+        }
+        while let Some(content) = self.current_file_content(file_path).cloned() {
+            let bytes = match &content {
+                document::Content::String(text) => text.as_bytes(),
+                document::Content::Bytes(bytes) => bytes,
+            };
+            self.ensure_file_has_bytes(file_path, bytes)?;
+            if self.current_file_content(file_path) == Some(&content) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_file_has_bytes(&mut self, file_path: &RelativePath, bytes: &[u8]) -> Result<()> {
         if git_forward::excluded(file_path) {
-            return;
+            return Ok(());
         }
         let abs_path = self.absolute_path_for_file_path(file_path);
         if sandbox::exists(&self.app_config.base_dir, &abs_path)
-            .expect("Failed to check for file existence before writing to it")
+            .context("Failed to check for file existence before writing")?
         {
             if let Ok(current_bytes) = sandbox::read_file(&self.app_config.base_dir, &abs_path) {
                 if bytes == current_bytes {
                     debug!("File content is already the desired one, not writing.");
-                    return;
+                    return Ok(());
                 }
             } else {
                 debug!("Failed to read {abs_path} to check for equal content before writing.");
@@ -803,10 +946,17 @@ impl DocumentActor {
         }
 
         if self.persist {
-            self.persist();
+            self.persist()?;
         }
-        sandbox::write_file(&self.app_config.base_dir, &abs_path, bytes)
-            .unwrap_or_else(|err| panic!("Failed to write to file {abs_path}: {err}"));
+        let displaced = sandbox::replace_file(&self.app_config.base_dir, &abs_path, bytes)
+            .with_context(|| format!("Failed to write to file {abs_path}"))?;
+        if let Some(displaced) = displaced
+            && self.disk_content.contains_key(file_path)
+        {
+            self.merge_disk_content(file_path, displaced);
+        }
+        self.disk_content.insert(file_path.clone(), bytes.to_vec());
+        Ok(())
     }
 
     fn read_current_content_from_dir(&mut self, init: bool) {
@@ -830,20 +980,18 @@ impl DocumentActor {
                     if git_forward::excluded(&relative_file_path) {
                         continue;
                     }
-                    if self.owns(&relative_file_path) {
+                    if init {
+                        self.disk_content
+                            .insert(relative_file_path.clone(), bytes.clone());
                         if let Ok(text) = String::from_utf8(bytes.clone()) {
-                            if init {
-                                self.crdt_doc.set_file(
-                                    document::Content::String(text.clone()),
-                                    &relative_file_path,
-                                );
-                            } else {
-                                self.crdt_doc.update_text(&text, &relative_file_path);
-                            }
+                            self.crdt_doc
+                                .set_file(document::Content::String(text), &relative_file_path);
                         } else {
                             self.crdt_doc
                                 .set_file(document::Content::Bytes(bytes), &relative_file_path);
                         }
+                    } else {
+                        self.file_created_or_changed(&relative_file_path);
                     }
                 }
                 Err(e) => {
@@ -858,7 +1006,6 @@ impl DocumentActor {
                 .expect(
                     "Should have been able to check for file existence while reading current directory content"
                 )
-                && self.owns(&relative_file_path)
                 && !git_forward::excluded(&relative_file_path)
             {
                 warn!(
@@ -870,23 +1017,14 @@ impl DocumentActor {
         let _ = self.doc_changed_ping_tx.send(());
     }
 
-    /// Git reads disk, including files normally saved by an editor.
-    fn flush_git_files(&self) -> Result<()> {
-        for path in &self.files_open_in_editors {
-            if git_forward::excluded(path) {
+    /// Reconciles open files before Git reads them.
+    fn flush_git_files(&mut self) -> Result<()> {
+        let paths: Vec<_> = self.files_open_in_editors.iter().cloned().collect();
+        for path in paths {
+            if git_forward::excluded(&path) {
                 continue;
             }
-            let bytes = match self.current_file_content(path) {
-                Some(document::Content::String(text)) => text.as_bytes(),
-                Some(document::Content::Bytes(bytes)) => bytes,
-                None => continue,
-            };
-            let absolute = self.absolute_path_for_file_path(path);
-            if !sandbox::read_file(&self.app_config.base_dir, &absolute)
-                .is_ok_and(|disk| disk == bytes)
-            {
-                sandbox::write_file(&self.app_config.base_dir, &absolute, bytes)?;
-            }
+            self.try_write_file(&path)?;
         }
         Ok(())
     }
@@ -902,9 +1040,9 @@ impl DocumentActor {
     fn remove_file(&mut self, file_path: &RelativePath) {
         if self.owns(file_path) {
             self.crdt_doc.remove_file(file_path);
+            self.disk_content.remove(file_path);
         } else {
-            // TODO: Once we remove the concept of ownership entirely, make sure to send proper
-            // ComponentMessage to the editors that remove their entire content.
+            self.merge_disk_content(file_path, vec![]);
         }
     }
 
@@ -1401,6 +1539,7 @@ mod tests {
     //use crate::types::factories::*;
 
     mod document_actor {
+        include!("daemon_save_tests.rs");
         use tempfile::{TempDir, tempdir};
 
         use super::*;
@@ -1466,6 +1605,109 @@ mod tests {
             actor.assert_file_content(&RelativePath::new("file1"), "content1");
             actor.assert_file_content(&RelativePath::new("file2"), "content2");
             actor.assert_file_content(&RelativePath::new("sub/file3"), "content3");
+        }
+
+        #[tokio::test]
+        async fn outside_write_is_merged_before_saving_an_open_file() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            let path = RelativePath::new("file1");
+            let uri = actor
+                .absolute_path_for_file_path(&path)
+                .to_file_uri()
+                .to_string();
+            let (stream, _reader) = tokio::net::UnixStream::pair().expect("editor socket");
+            let (_, writer) = tokio::io::split(stream);
+            actor.editor_connections.insert(
+                1,
+                (
+                    EditorConnection::new("test".into(), actor.app_config.clone()),
+                    tokio_util::codec::FramedWrite::new(writer, editor::OutgoingProtocolCodec),
+                ),
+            );
+            actor
+                .react_to_message_from_editor(
+                    1,
+                    &EditorProtocolMessageFromEditor::Open {
+                        uri: uri.clone(),
+                        content: "content1".into(),
+                        saves_file: false,
+                        daemon_writes: true,
+                    },
+                )
+                .await
+                .expect("open");
+            for n in 0..20 {
+                let old = match actor.current_file_content(&path) {
+                    Some(document::Content::String(text)) => text.clone(),
+                    _ => panic!("shared text"),
+                };
+                let outside = format!("{old}\noutside-{n}");
+                std::fs::write(dir.path().join("file1"), &outside).expect("outside write");
+                let shared = format!("typed-{n}\n{old}");
+                let delta = TextDelta::from(dissimilar::diff(&old, &shared));
+                let (message, _) = actor
+                    .editor_connections
+                    .get_mut(&1)
+                    .expect("editor")
+                    .0
+                    .message_from_editor(&EditorProtocolMessageFromEditor::Edit {
+                        uri: uri.clone(),
+                        revision: n,
+                        delta: crate::types::EditorTextDelta::try_from_delta(delta, &old)
+                            .expect("editor delta"),
+                    })
+                    .expect("local edit before watcher delivery");
+                let ComponentMessage::Edit { delta, .. } = message else {
+                    panic!("edit")
+                };
+                actor
+                    .crdt_doc
+                    .apply_delta_to_doc(&delta, &path)
+                    .expect("typing before watcher delivery");
+                if n % 2 == 0 {
+                    actor.flush_git_files().expect("Git flush");
+                    actor.send_disk_edits().await;
+                } else {
+                    actor
+                        .react_to_message_from_editor(
+                            1,
+                            &EditorProtocolMessageFromEditor::Save { uri: uri.clone() },
+                        )
+                        .await
+                        .expect("save");
+                }
+                let expected = format!("typed-{n}\n{outside}");
+                actor.assert_file_content(&path, &expected);
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("file1")).expect("disk"),
+                    expected
+                );
+            }
+            std::fs::write(dir.path().join("file1"), [0xff]).expect("outside binary write");
+            for message in [
+                EditorProtocolMessageFromEditor::Save { uri: uri.clone() },
+                EditorProtocolMessageFromEditor::Edit {
+                    uri,
+                    revision: 20,
+                    delta: crate::types::EditorTextDelta(vec![]),
+                },
+            ] {
+                assert!(
+                    actor
+                        .react_to_message_from_editor(1, &message)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    std::fs::read(dir.path().join("file1")).expect("binary"),
+                    [0xff]
+                );
+            }
+            actor
+                .react_to_message_from_editor(1, &EditorProtocolMessageFromEditor::DaemonWriter {})
+                .await
+                .expect("actor remains alive");
         }
     }
 }

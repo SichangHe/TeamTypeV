@@ -87,7 +87,18 @@ impl MockSocket {
     }
 
     pub async fn acknowledge_open(&mut self) -> JSONValue {
-        let json = self.recv().await;
+        let mut json = self.recv().await;
+        if json
+            .get("method")
+            .is_some_and(|method| method == "daemonWriter")
+        {
+            self.send(&format!(
+                "{}\n",
+                serde_json::json!({"jsonrpc":"2.0", "id":json["id"], "result":"success"})
+            ))
+            .await;
+            json = self.recv().await;
+        }
         if json.get("method").unwrap() == "open" {
             let id = json.get("id").unwrap();
             let response = serde_json::json!({

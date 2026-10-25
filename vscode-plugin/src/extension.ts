@@ -123,12 +123,97 @@ let clients: Client[] = []
 // TODO: if we load from disk, this will also cause edits :-/
 let t0 = Date.now()
 const mutex = new Mutex()
-let expectedContentAfterRemoteEdit: string | null = null
+interface PendingDocumentChange {
+    event: vscode.TextDocumentChangeEvent
+    lines: string[]
+    content: string
+    version: number
+}
 
-const openType = new rpc.RequestType<{uri: string; content: string; savesFile: boolean}, string, void>("open")
+let pendingRemote: {
+    uri: string
+    content: string
+    version: number
+    changes: PendingDocumentChange[]
+} | null = null
+
 const closeType = new rpc.RequestType<{uri: string}, string, void>("close")
 const editType = new rpc.RequestType<Edit, string, void>("edit")
 const cursorType = new rpc.NotificationType<Cursor>("cursor")
+
+function protocolUri(document: vscode.TextDocument): string {
+    return document.uri.with({scheme: "file"}).toString()
+}
+
+const sharedContents = new Map<string, Uint8Array>()
+const opening = new Set<string>()
+const nativeCleanContents = new WeakMap<vscode.TextDocument, string>()
+const pendingNativeCleanContents = new WeakMap<vscode.TextDocument, string>()
+
+function rememberNativeCleanContent(document: vscode.TextDocument) {
+    if (document.uri.scheme === "file" && !document.isDirty) {
+        nativeCleanContents.set(document, document.getText())
+        pendingNativeCleanContents.delete(document)
+    }
+}
+
+/** Content events can precede the dirty-state event for the same native edit. */
+function rememberNativeChange(event: vscode.TextDocumentChangeEvent) {
+    const document = event.document
+    if (document.uri.scheme !== "file") return
+    if (event.contentChanges.length) {
+        const previous = pendingNativeCleanContents.get(document)
+        if (previous !== undefined) nativeCleanContents.set(document, previous)
+        pendingNativeCleanContents.delete(document)
+        if (!document.isDirty && nativeCleanContents.has(document)) {
+            pendingNativeCleanContents.set(document, document.getText())
+        }
+    } else if (document.isDirty) {
+        pendingNativeCleanContents.delete(document)
+    } else {
+        rememberNativeCleanContent(document)
+    }
+}
+
+// 🧑 "their save just tells teamtype to write"
+class SharedFileSystem implements vscode.FileSystemProvider {
+    readonly onDidChangeFile = new vscode.EventEmitter<vscode.FileChangeEvent[]>().event
+    watch() {
+        return new vscode.Disposable(() => {})
+    }
+    stat(uri: vscode.Uri): vscode.FileStat {
+        return {type: vscode.FileType.File, ctime: 0, mtime: 0, size: this.readFile(uri).byteLength}
+    }
+    readFile(uri: vscode.Uri): Uint8Array {
+        const document = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri.toString())
+        return (
+            sharedContents.get(uri.toString()) ??
+            (document ? Buffer.from(document.getText(), "utf8") : fs.readFileSync(uri.fsPath))
+        )
+    }
+    async writeFile(uri: vscode.Uri): Promise<void> {
+        await mutex.runExclusive(async () => {
+            const document = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri.toString())
+            const client = document && clientsForDocument(document)[0]
+            if (!client || client.process.exitCode !== null || client.process.signalCode !== null) {
+                throw vscode.FileSystemError.Unavailable("Teamtype daemon is disconnected")
+            }
+            await client.connection.sendRequest("save", {uri: protocolUri(document!)})
+        })
+    }
+    readDirectory(): [string, vscode.FileType][] {
+        return []
+    }
+    createDirectory(): never {
+        throw vscode.FileSystemError.NoPermissions()
+    }
+    delete(): never {
+        throw vscode.FileSystemError.NoPermissions()
+    }
+    rename(): never {
+        throw vscode.FileSystemError.NoPermissions()
+    }
+}
 
 function uriToFname(uri: string): string {
     const prefix = "file://"
@@ -205,7 +290,7 @@ function openCurrentTextDocuments() {
 }
 
 function documentForUri(uri: string): vscode.TextDocument | undefined {
-    return vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri)
+    return vscode.workspace.textDocuments.find((doc) => doc.uri.scheme === "teamtype" && protocolUri(doc) === uri)
 }
 
 // Apply given TextEdits to content of the TextDocument, and return the resulting content.
@@ -236,7 +321,9 @@ export function contentAfterEdits(document: vscode.TextDocument, edits: vscode.T
 async function processEditFromDaemon(client: Client, edit: Edit) {
     try {
         await mutex.runExclusive(async () => {
-            let revision = client.ot_states[edit.uri].revision
+            const state = client.ot_states[edit.uri]
+            if (!state) return
+            let revision = state.revision
             if (edit.revision !== revision.editor) {
                 debug(`Received edit for revision ${edit.revision} (!= ${revision.editor}), ignoring`)
                 return
@@ -249,32 +336,44 @@ async function processEditFromDaemon(client: Client, edit: Edit) {
             const document = documentForUri(uri)
             if (document) {
                 let textEdits = teamtypeDeltasToVSCodeTextEdits(document, edit.delta)
-                expectedContentAfterRemoteEdit = contentAfterEdits(document, textEdits)
-                let worked = await applyEdit(client, document, edit)
-                if (worked) {
+                const content = contentAfterEdits(document, textEdits)
+                if (content === document.getText()) {
                     revision.daemon += 1
+                    return
+                }
+                const pending = {uri, content, version: document.version, changes: [] as PendingDocumentChange[]}
+                pendingRemote = pending
+                let worked = false
+                try {
+                    worked = await applyEdit(client, document, edit)
+                } finally {
+                    if (pendingRemote === pending) pendingRemote = null
+                    let remoteApplied = false
+                    for (const change of pending.changes) {
+                        if (
+                            !remoteApplied &&
+                            worked &&
+                            change.version === pending.version + 1 &&
+                            change.content === pending.content
+                        ) {
+                            remoteApplied = true
+                            revision.daemon += 1
+                            state.content = change.lines
+                        } else {
+                            processLocalEdit(change.event, change.lines)
+                        }
+                    }
+                }
+                if (worked) {
                     // Attempt auto-save to avoid the situation where one user closes a modified
                     // document without saving, which will cause VS Code to undo the dirty changes.
                     document.save()
                 } else {
                     debug("rejected an applyEdit, sending empty delta")
 
-                    if (expectedContentAfterRemoteEdit === null) {
-                        // The user made an edit that resulted in the same content, we (wrongly) ignored it, and didn't
-                        // send it to the daemon.
-                        // We're going to accept this edge-case, but should increase the daemon revision, to simulate
-                        // a successful application of the remote edit.
-                        // TODO: We could even try to send out the edit again now!
-                        debug("the case")
-                        revision.daemon += 1
-                    } else {
-                        debug("the other case")
-                        // Otherwise, send back an empty delta (TODO I don't remember why?)
-                        let theEdit: Edit = {uri, revision: revision.daemon, delta: []}
-                        client.connection.sendRequest(editType, theEdit)
-                        revision.editor += 1
-                        expectedContentAfterRemoteEdit = null
-                    }
+                    let theEdit: Edit = {uri, revision: revision.daemon, delta: []}
+                    client.connection.sendRequest(editType, theEdit)
+                    revision.editor += 1
                 }
             } else {
                 throw new Error(`No document for URI ${uri}, why is the daemon sending me this?`)
@@ -303,7 +402,7 @@ async function processCursorFromDaemon(cursor: CursorFromDaemon) {
                     }
                 })
         }
-        setCursor(cursor.userid, cursor.name || "anonymous", vscode.Uri.parse(uri), selections)
+        setCursor(cursor.userid, cursor.name || "anonymous", document?.uri ?? vscode.Uri.parse(uri), selections)
     } catch {
         // If we couldn't convert teamtypeRangeToVSCodeRange, it's probably because
         // we received the cursor message before integrating the edits, typing at the end of a line.
@@ -324,12 +423,6 @@ async function applyEdit(client: Client, document: vscode.TextDocument, edit: Ed
     workspaceEdit.set(document.uri, edits)
     let worked = await vscode.workspace.applyEdit(workspaceEdit)
 
-    // TODO: Make this more efficient by replacing only the changed lines.
-    // The challenge with that is that we need to compute how many lines are
-    // left after the edit.
-    if (worked) {
-        updateContents(client, document)
-    }
     return worked
 }
 
@@ -348,30 +441,138 @@ function findOrCreateClient(name: string, directory: string): Client {
     return client
 }
 
-function activateConfigForTextDocument(name: string, document: vscode.TextDocument, directory: string) {
+async function activateConfigForTextDocument(name: string, document: vscode.TextDocument, directory: string) {
+    const key = document.uri.toString()
+    if (opening.has(key)) return
+    opening.add(key)
+    try {
+        await openSharedDocument(name, document, directory)
+    } catch (error) {
+        vscode.window.showErrorMessage(`Teamtype could not transfer this file: ${error}`)
+    } finally {
+        opening.delete(key)
+    }
+}
+
+export async function openSharedDocument(name: string, document: vscode.TextDocument, directory: string) {
+    const original = document
+    rememberNativeCleanContent(original)
+    if (!nativeCleanContents.has(original)) {
+        await prepareNativeHandoff(original)
+        vscode.window.showErrorMessage(
+            "Teamtype cannot safely merge this dirty buffer because its original clean text is unknown. Its unsaved edits remain in this read-only tab; reconcile them with the file on disk before sharing.",
+        )
+        return
+    }
+    const existing = documentForUri(protocolUri(document))
+    if (existing && clientsForDocument(existing).length) {
+        await prepareNativeHandoff(original)
+        if (original.isDirty) {
+            vscode.window.showErrorMessage(
+                "Teamtype: this file is already shared. Copy the native tab's unsaved edits into the shared tab; the native tab is now read-only.",
+            )
+            return
+        }
+        await closeNativeDocument(original)
+        await vscode.window.showTextDocument(existing, {preview: false})
+        return
+    }
     let client = findOrCreateClient(name, directory)
-
-    const uri = document.uri.toString()
+    try {
+        new TextDecoder("utf-8", {fatal: true}).decode(fs.readFileSync(original.uri.fsPath))
+        await client.connection.sendRequest("daemonWriter", {})
+        await prepareNativeHandoff(original)
+    } catch (error) {
+        vscode.window.showErrorMessage(`Teamtype cannot share this file: ${error}`)
+        return
+    }
+    rememberNativeCleanContent(original)
+    const initialContent = nativeCleanContents.get(original)!
+    const sharedUri = original.uri.with({scheme: "teamtype"})
+    const transferredContent = original.getText()
+    const transferredVersion = original.version
+    sharedContents.set(sharedUri.toString(), Buffer.from(initialContent, "utf8"))
+    document = await vscode.workspace.openTextDocument(sharedUri)
+    sharedContents.delete(sharedUri.toString())
+    if (document.getText() !== transferredContent) {
+        const transfer = new vscode.WorkspaceEdit()
+        transfer.replace(sharedUri, new vscode.Range(0, 0, document.lineCount, 0), transferredContent)
+        if (!(await vscode.workspace.applyEdit(transfer))) {
+            throw new Error("Could not copy the native edits; the original remains open and read-only")
+        }
+    }
+    if (original.version !== transferredVersion) {
+        vscode.window.showErrorMessage(
+            "Teamtype: the native document changed during transfer. Its edits remain in the read-only native tab; sharing has not started.",
+        )
+        return
+    }
+    await closeNativeDocument(original)
+    const uri = protocolUri(document)
     debug("OPEN " + decodeURI(uri))
-    const content = document.getText()
-    client.connection
-        // This plugin saves the document after each change, so the daemon leaves the file to it.
-        .sendRequest(openType, {uri, content, savesFile: true})
+    client.ot_states[uri] = {revision: new Revision(), content: getLines(document)}
+    const opened = client.connection.sendRequest("open", {uri, content: initialContent, daemonWrites: true})
+    const delta = handoffDelta(initialContent, transferredContent)
+    const edited = delta.length ? client.connection.sendRequest(editType, {uri, revision: 0, delta}) : Promise.resolve()
+    if (delta.length) client.ot_states[uri].revision.editor += 1
+    await vscode.window.showTextDocument(document, {preview: false})
+    await Promise.all([opened, edited])
         .then(() => {
-            client.ot_states[uri] = {
-                revision: new Revision(),
-                content: getLines(document),
-            }
-
-            updateContents(client, document)
             debug("Successfully opened. Tracking changes.")
+            document.save()
         })
-        .catch(() => {
-            debug("OPEN failed")
+        .catch((error) => {
+            delete client.ot_states[uri]
+            throw error
         })
 }
 
+/** Preserves local edits as one operation against the native document's original version. */
+function handoffDelta(before: string, after: string): Delta[] {
+    const oldChars = Array.from(before)
+    const newChars = Array.from(after)
+    let start = 0
+    while (start < oldChars.length && start < newChars.length && oldChars[start] === newChars[start]) start++
+    let end = oldChars.length
+    let newEnd = newChars.length
+    while (end > start && newEnd > start && oldChars[end - 1] === newChars[newEnd - 1]) {
+        end--
+        newEnd--
+    }
+    if (start === end && start === newEnd) return []
+    const position = (offset: number): Position => {
+        const lines = oldChars.slice(0, offset).join("").split("\n")
+        return {line: lines.length - 1, character: Array.from(lines[lines.length - 1]).length}
+    }
+    return [{range: {start: position(start), end: position(end)}, replacement: newChars.slice(start, newEnd).join("")}]
+}
+
+async function prepareNativeHandoff(original: vscode.TextDocument) {
+    await vscode.window.showTextDocument(original, {preview: false})
+    if (vscode.window.activeTextEditor?.document !== original) {
+        throw new Error("The active editor changed before the native document could be made read-only")
+    }
+    await vscode.commands.executeCommand("workbench.action.files.setActiveEditorReadonlyInSession")
+    if (vscode.window.activeTextEditor?.document !== original) {
+        throw new Error("The active editor changed while preparing the native document")
+    }
+}
+
+async function closeNativeDocument(original: vscode.TextDocument) {
+    await vscode.window.showTextDocument(original, {preview: false})
+    await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor")
+    const tabs = vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .filter(
+            (tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === original.uri.toString(),
+        )
+    if (tabs.length && !(await vscode.window.tabGroups.close(tabs))) {
+        throw new Error("Teamtype could not close the read-only native tabs; sharing has not started")
+    }
+}
+
 async function processUserOpen(document: vscode.TextDocument) {
+    rememberNativeCleanContent(document)
     // Ignore documents using the git: scheme, which is used by VS Code's Git integration.
     if (document.uri.scheme !== "file") {
         return
@@ -394,86 +595,72 @@ function clientsForDocument(document: vscode.TextDocument): Client[] {
 }
 
 function clientTracksDocument(client: Client, document: vscode.TextDocument): boolean {
-    return Object.keys(client.ot_states).includes(document.uri.toString())
+    return document.uri.scheme === "teamtype" && Object.keys(client.ot_states).includes(protocolUri(document))
 }
 
 function processUserClose(document: vscode.TextDocument) {
     for (let client of clientsForDocument(document)) {
-        const uri = document.uri.toString()
+        const uri = protocolUri(document)
         client.connection.sendRequest(closeType, {uri})
 
         delete client.ot_states[uri]
     }
 }
 
-function isRemoteEdit(event: vscode.TextDocumentChangeEvent): boolean {
-    let actualContent = event.document.getText()
-    return actualContent === expectedContentAfterRemoteEdit
-}
-
 // NOTE: We might get multiple events per document.version,
 // as the _state_ of the document might change (like isDirty).
 function processUserEdit(event: vscode.TextDocumentChangeEvent) {
-    if (isRemoteEdit(event)) {
-        expectedContentAfterRemoteEdit = null
-        debug("Ignoring remote event (we have caused it)")
+    rememberNativeChange(event)
+    if (event.contentChanges.length === 0) return
+    const uri = protocolUri(event.document)
+    const lines = getLines(event.document)
+    if (pendingRemote?.uri === uri) {
+        pendingRemote.changes.push({event, lines, content: event.document.getText(), version: event.document.version})
         return
     }
+    processLocalEdit(event, lines)
+}
 
+function processLocalEdit(event: vscode.TextDocumentChangeEvent, lines: string[]) {
     for (let client of clientsForDocument(event.document)) {
-        mutex
-            .runExclusive(() => {
-                let document = event.document
+        try {
+            let document = event.document
 
-                // For some reason we get multiple events per edit caused by us.
-                // Let's actively skip the empty ones to make debugging output below less noisy.
-                if (event.contentChanges.length === 0) {
-                    if (document.isDirty === false) {
-                        debug("Ignoring empty docChange. (probably saving...)")
-                    }
-                    return
-                }
+            const uri = protocolUri(document)
 
-                const uri = document.uri.toString()
+            let revision = client.ot_states[uri].revision
 
-                let revision = client.ot_states[uri].revision
+            let edits = vsCodeChangeEventToTeamtypeEdits(client, event)
 
-                let edits = vsCodeChangeEventToTeamtypeEdits(client, event)
+            for (const theEdit of edits) {
+                // interestingly this seems to block when it can't send
+                client.connection.sendRequest(editType, theEdit).catch((e) => {
+                    vscode.window.showErrorMessage(
+                        `Error while sending edit to Teamtype daemon: ${e}. This is probably a bug in the VS Code plugin.`,
+                    )
+                })
+                revision.editor += 1
 
-                for (const theEdit of edits) {
-                    // interestingly this seems to block when it can't send
-                    client.connection.sendRequest(editType, theEdit).catch((e) => {
-                        vscode.window.showErrorMessage(
-                            `Error while sending edit to Teamtype daemon: ${e}. This is probably a bug in the VS Code plugin.`,
-                        )
-                    })
-                    revision.editor += 1
+                debug(`sent edit for dR ${revision.daemon} (having edR ${revision.editor})`)
+            }
 
-                    debug(`sent edit for dR ${revision.daemon} (having edR ${revision.editor})`)
-                }
+            // TODO: Make this more efficient by replacing only the changed lines.
+            // The challenge with that is that we need to compute how many lines are
+            // left after the edit.
+            client.ot_states[uri].content = lines
 
-                // TODO: Make this more efficient by replacing only the changed lines.
-                // The challenge with that is that we need to compute how many lines are
-                // left after the edit.
-                updateContents(client, document)
-
-                // Attempt auto-save to avoid the situation where one user closes a modified
-                // document without saving, which will cause VS Code to undo the dirty changes.
-                // If the document is empty, don't save - this will trigger a
-                // "The content of the file is newer." warning.
-                if (document.getText() !== "") {
-                    document.save()
-                }
-            })
-            .catch((e: Error) => {
-                vscode.window.showErrorMessage(`Error while sending edit to Teamtype daemon: ${e}`)
-            })
+            // Attempt auto-save to avoid the situation where one user closes a modified
+            // document without saving, which will cause VS Code to undo the dirty changes.
+            document.save()
+        } catch (e) {
+            vscode.window.showErrorMessage(`Error while sending edit to Teamtype daemon: ${e}`)
+        }
     }
 }
 
 function processSelection(event: vscode.TextEditorSelectionChangeEvent) {
     for (let client of clientsForDocument(event.textEditor.document)) {
-        let uri = event.textEditor.document.uri.toString()
+        let uri = protocolUri(event.textEditor.document)
         let content = client.ot_states[uri].content
         let ranges = event.selections.map((s) => {
             return vsCodeRangeToTeamtypeRange(content, s)
@@ -484,20 +671,19 @@ function processSelection(event: vscode.TextEditorSelectionChangeEvent) {
 
 function vsCodeChangeEventToTeamtypeEdits(client: Client, event: vscode.TextDocumentChangeEvent): Edit[] {
     let document = event.document
-    let uri = document.uri.toString()
+    let uri = protocolUri(document)
 
     let ot_state = client.ot_states[uri]
     let revision = ot_state.revision
 
     let content = ot_state.content
-    let edits = []
-
-    for (const change of event.contentChanges) {
-        let delta = vsCodeChangeToTeamtypeDelta(content, change)
-        let theEdit: Edit = {uri, revision: revision.daemon, delta: [delta]}
-        edits.push(theEdit)
-    }
-    return edits
+    return [
+        {
+            uri,
+            revision: revision.daemon,
+            delta: event.contentChanges.map((change) => vsCodeChangeToTeamtypeDelta(content, change)),
+        },
+    ]
 }
 
 function vsCodeChangeToTeamtypeDelta(content: string[], change: vscode.TextDocumentContentChangeEvent): Delta {
@@ -517,6 +703,7 @@ export function activate(context: vscode.ExtensionContext) {
     configurations = vscode.workspace.getConfiguration("teamtype").get<{[key: string]: Configuration}>("configs", {})
 
     context.subscriptions.push(
+        vscode.workspace.registerFileSystemProvider("teamtype", new SharedFileSystem(), {isCaseSensitive: true}),
         vscode.workspace.onDidChangeTextDocument(processUserEdit),
         vscode.workspace.onDidOpenTextDocument(processUserOpen),
         vscode.workspace.onDidCloseTextDocument(processUserClose),
@@ -549,7 +736,7 @@ function die(text: string): never {
 }
 
 function updateContents(client: Client, document: vscode.TextDocument) {
-    client.ot_states[document.uri.toString()].content = getLines(document)
+    client.ot_states[protocolUri(document)].content = getLines(document)
 }
 
 function getLines(document: vscode.TextDocument): string[] {

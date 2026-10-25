@@ -27,6 +27,9 @@
 (defvar-local teamtype--client nil
   "The teamtype client associated with this buffer.")
 
+(defvar-local teamtype--shared nil
+  "Whether native writes are forbidden for this buffer.")
+
 (defvar-local teamtype--ignore-changes nil
   "When non-nil, buffer changes are ignored and not sent to daemon.")
 
@@ -117,10 +120,20 @@ Returns a cons (LINE . CHARACTER)."
         (let ((client (teamtype--find-or-create-client root-dir)))
           (teamtype--open-file client buffer-file-name))))))
 
-(defun teamtype--open-file (client filepath)
+(cl-defun teamtype--open-file (client filepath)
   "Open FILEPATH with CLIENT."
+  (unless (memq (coding-system-base buffer-file-coding-system) '(utf-8 undecided))
+    (cl-return-from teamtype--open-file nil))
+  (condition-case err
+      (jsonrpc-request (plist-get client :connection) 'daemonWriter '(:check t))
+    (error
+     (message "Teamtype needs a daemon with daemon-owned saves: %S" err)
+     (cl-return-from teamtype--open-file nil)))
   ;; Lock files (`.#name`) in the shared directory would be synced as files.
   (setq-local create-lockfiles nil)
+  (setq-local backup-inhibited t)
+  (auto-save-mode -1)
+  (when (bound-and-true-p auto-revert-mode) (auto-revert-mode -1))
   (setq-local teamtype--client client)
   (setq-local teamtype--editor-revision 0)
   (setq-local teamtype--daemon-revision 0)
@@ -134,9 +147,12 @@ Returns a cons (LINE . CHARACTER)."
     ;; an edit notification that follows it unread until the daemon sends more data.
     (teamtype--track-changes)
     (jsonrpc-async-request
-     connection 'open `(:uri ,uri :content ,content)
+     connection 'open `(:uri ,uri :content ,content :daemonWrites t)
      ;; This file is dynamically bound, so the callbacks get `filepath' by backquote.
-     :success-fn `(lambda (_result) (message "Teamtype: tracking %s" ,filepath))
+     :success-fn `(lambda (_result)
+                   (when-let ((buffer (find-buffer-visiting ,filepath)))
+                     (with-current-buffer buffer (setq-local teamtype--shared t)))
+                   (message "Teamtype: tracking %s" ,filepath))
      :error-fn `(lambda (err)
                   (message "Teamtype error opening file: %S" err)
                   (when-let ((buffer (find-buffer-visiting ,filepath)))
@@ -188,6 +204,17 @@ Returns a cons (LINE . CHARACTER)."
   "Start tracking changes for the current buffer."
   (add-hook 'before-change-functions #'teamtype--before-change nil t)
   (add-hook 'after-change-functions #'teamtype--after-change nil t))
+
+;; 🧑 "their save just tells teamtype to write"
+(defun teamtype--save ()
+  "Ask the daemon to save this shared buffer without writing it from Emacs."
+  (when (or teamtype--shared teamtype--client)
+    (unless teamtype--client (user-error "Teamtype daemon is disconnected"))
+    (jsonrpc-request
+     (plist-get teamtype--client :connection) 'save
+     `(:uri ,(teamtype--path-to-uri buffer-file-name)))
+    (set-visited-file-modtime)
+    t))
 
 ;;; Protocol Message Handlers
 
@@ -256,6 +283,13 @@ later edits don't invalidate positions of earlier edits."
 
 ;;; User Interface Modifications
 
+(defun teamtype--verify-file-modtime (original &optional buffer)
+  "Let the daemon reconcile disk changes for shared BUFFER before a save."
+  (with-current-buffer (or buffer (current-buffer))
+    (if (or teamtype--client teamtype--shared)
+        t
+      (funcall original buffer))))
+
 (defun teamtype--prevent-prompt-when-file-changes-on-disk ()
   "Disables the supersession check, which is coming up because the daemon writes to disk."
   (defun teamtype--suppress-supersession-check (original-fn &rest args)
@@ -273,6 +307,8 @@ later edits don't invalidate positions of earlier edits."
   "Set up Teamtype for the current Emacs session."
   (add-hook 'find-file-hook #'teamtype--file-opened)
   (add-hook 'kill-buffer-hook #'teamtype--close-file)
+  (add-hook 'write-contents-functions #'teamtype--save)
+  (advice-add 'verify-visited-file-modtime :around #'teamtype--verify-file-modtime)
   (teamtype--prevent-prompt-when-file-changes-on-disk))
 (teamtype--setup)
 

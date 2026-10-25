@@ -11,6 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn spawn_editor_listener(socket: &Path, document: teamtype::daemon::DocumentActorHandle) {
+    static SOCKET_SETUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SOCKET_SETUP.lock().expect("socket setup lock");
+    teamtype::editor::spawn_socket_listener(socket, document).expect("editor listener");
+}
+
 fn agent(directory: &Path, args: &[&str]) -> Output {
     std::fs::create_dir_all(directory.join(".teamtype")).expect("project metadata directory");
     let mut child = Command::new("sh")
@@ -507,7 +513,71 @@ fn edit_refuses_daemon_content_that_changed_before_barrier() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn editor_owned_file_snapshots_the_agents_write_before_the_editor_saves() {
+async fn outside_write_before_watcher_delivery_survives_an_editor_edit() {
+    use teamtype::types::{RevisionedEditorTextDelta, RevisionedTextDelta};
+    let dir = tempfile::tempdir().expect("project");
+    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, "base\n").expect("initial text");
+    let config = teamtype::config::AppConfig {
+        base_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let document = teamtype::daemon::DocumentActorHandle::new(&config, true, true, true);
+    let socket = dir.path().join(".teamtype/socket");
+    spawn_editor_listener(&socket, document);
+    let mut editor = std::os::unix::net::UnixStream::connect(socket).expect("editor");
+    editor
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    let mut reader = BufReader::new(editor.try_clone().expect("reader"));
+    let uri = format!("file://{}", file.display());
+    writeln!(
+        editor,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"open", "params":{
+            "uri":uri, "content":"base\n", "daemonWrites":true
+        }})
+    )
+    .expect("open");
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("opened");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&line)
+            .expect("response")
+            .get("error")
+            .is_none()
+    );
+    std::fs::write(&file, "base\noutside\n").expect("outside write without a watcher event");
+    writeln!(editor, "{}", serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"edit", "params":{
+        "uri":uri, "revision":0, "delta":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"replacement":"typed\n"}]
+    }})).expect("type concurrently");
+    writeln!(editor, "{}", serde_json::json!({"jsonrpc":"2.0", "id":3, "method":"cursor", "params":{"uri":uri,"ranges":[]}})).expect("barrier");
+    let mut buffer = "typed\nbase\n".to_owned();
+    loop {
+        line.clear();
+        assert!(reader.read_line(&mut line).expect("message") > 0);
+        let message: serde_json::Value = serde_json::from_str(&line).expect("JSON");
+        assert!(message.get("error").is_none(), "{message}");
+        if message["id"] == 3 {
+            break;
+        }
+        if message["method"] == "edit" && message["params"]["revision"] == 1 {
+            let edit: RevisionedEditorTextDelta =
+                serde_json::from_value(message["params"].clone()).expect("delta");
+            buffer = RevisionedTextDelta::try_from_rev_ed_delta(edit, &buffer)
+                .expect("convert delta")
+                .delta
+                .apply_to(&buffer)
+                .expect("apply delta");
+        }
+    }
+    assert_eq!(buffer, "typed\nbase\noutside\n");
+    assert_eq!(std::fs::read_to_string(file).expect("disk"), buffer);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_owned_file_saves_the_agents_write_with_an_open_editor() {
     let dir = tempfile::tempdir().expect("project");
     std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
     let file = dir.path().join("note.txt");
@@ -518,13 +588,13 @@ async fn editor_owned_file_snapshots_the_agents_write_before_the_editor_saves() 
     };
     let document = teamtype::daemon::DocumentActorHandle::new(&config, true, true, true);
     let socket = dir.path().join(".teamtype/socket");
-    teamtype::editor::spawn_socket_listener(&socket, document).expect("editor listener");
+    spawn_editor_listener(&socket, document);
     let mut editor = std::os::unix::net::UnixStream::connect(socket).expect("editor connection");
     editor
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("editor timeout");
     let open = serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"open", "params":{
-        "uri": format!("file://{}", file.display()), "content":"hello\n", "savesFile":true
+        "uri": format!("file://{}", file.display()), "content":"hello\n", "daemonWrites":true
     }});
     writeln!(editor, "{open}").expect("open file");
     let mut reader = BufReader::new(editor.try_clone().expect("editor reader"));
@@ -548,11 +618,10 @@ async fn editor_owned_file_snapshots_the_agents_write_before_the_editor_saves() 
     ));
     assert_eq!(
         std::fs::read_to_string(&file).expect("editor owns saves"),
-        "hello\n"
+        "world\n"
     );
     let diff = successful(agent(dir.path(), &["agent-diff", "--file", "note.txt"]));
-    assert!(diff.contains("-world\n+hello\n"), "{diff}");
-    std::fs::write(&file, "world\n").expect("editor saves");
+    assert_eq!(diff, "");
     assert_eq!(
         successful(agent(dir.path(), &["agent-diff", "--file", "note.txt"])),
         ""
@@ -571,8 +640,7 @@ async fn edit_through_document_daemon_persists_and_refreshes_snapshot() {
         ..teamtype::config::AppConfig::default()
     };
     let document = teamtype::daemon::DocumentActorHandle::new(&config, true, true, true);
-    teamtype::editor::spawn_socket_listener(&dir.path().join(".teamtype/socket"), document)
-        .expect("real daemon editor listener");
+    spawn_editor_listener(&dir.path().join(".teamtype/socket"), document);
     successful(agent(
         dir.path(),
         &[

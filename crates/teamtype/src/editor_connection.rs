@@ -4,7 +4,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use tracing::debug;
 
@@ -28,8 +28,6 @@ pub struct EditorConnection {
     app_config: AppConfig,
     /// There's one [`OTServer`] per open buffer.
     ot_servers: HashMap<RelativePath, OTServer>,
-    /// Open files this editor saves itself after each change.
-    files_it_saves: HashSet<RelativePath>,
     /// The name other people see.
     username: Option<String>,
 }
@@ -41,7 +39,6 @@ impl EditorConnection {
             username: app_config.username.clone(),
             app_config,
             ot_servers: HashMap::new(),
-            files_it_saves: HashSet::new(),
         }
     }
 
@@ -50,9 +47,9 @@ impl EditorConnection {
         self.ot_servers.contains_key(file_path)
     }
 
-    #[must_use]
-    pub fn saves(&self, file_path: &RelativePath) -> bool {
-        self.files_it_saves.contains(file_path)
+    /// Requires a fresh open after the shared file stops being text.
+    pub fn invalidate_file(&mut self, file_path: &RelativePath) {
+        self.ot_servers.remove(file_path);
     }
 
     /// A message from inside is either an edit from another local editor or an edit that came
@@ -127,7 +124,17 @@ impl EditorConnection {
                 uri,
                 content,
                 saves_file,
+                daemon_writes,
             } => {
+                if *saves_file || !*daemon_writes {
+                    return Err(EditorProtocolMessageError {
+                        code: -1,
+                        message:
+                            "Update the editor plugin: shared files must be written by the daemon"
+                                .into(),
+                        data: None,
+                    });
+                }
                 let uri = FileUri::try_from(uri.clone()).map_err(anyhow_err_to_protocol_err)?;
                 let absolute_path = uri.to_absolute_path();
                 let relative_path =
@@ -155,13 +162,17 @@ impl EditorConnection {
                     });
                 }
 
+                let bytes = sandbox::read_file(&self.app_config.base_dir, &absolute_path)
+                    .map_err(anyhow_err_to_protocol_err)?;
+                if std::str::from_utf8(&bytes).is_err() {
+                    return Err(EditorProtocolMessageError {
+                        code: -1,
+                        message: "Only UTF-8 files can be shared with an editor".into(),
+                        data: None,
+                    });
+                }
                 let ot_server = OTServer::new(content.clone());
                 self.ot_servers.insert(relative_path.clone(), ot_server);
-                if *saves_file {
-                    self.files_it_saves.insert(relative_path.clone());
-                } else {
-                    self.files_it_saves.remove(&relative_path);
-                }
 
                 Ok((
                     ComponentMessage::Open {
@@ -180,7 +191,6 @@ impl EditorConnection {
 
                 debug!("Got a 'close' message for {relative_path}");
                 self.ot_servers.remove(&relative_path);
-                self.files_it_saves.remove(&relative_path);
 
                 Ok((
                     ComponentMessage::Close {
@@ -277,6 +287,10 @@ impl EditorConnection {
                     vec![],
                 ))
             }
+            EditorProtocolMessageFromEditor::DaemonWriter {}
+            | EditorProtocolMessageFromEditor::Save { .. } => {
+                unreachable!("Handled by document actor")
+            }
         }
     }
 }
@@ -290,6 +304,44 @@ mod tests {
 
     use super::*;
     use crate::types::factories::*;
+
+    #[test]
+    fn legacy_and_binary_editor_opens_are_rejected() {
+        let dir = tempdir().expect("directory");
+        let file = dir.path().join("file");
+        fs::write(&file, "outside").expect("text");
+        let config = AppConfig {
+            base_dir: dir.path().into(),
+            ..Default::default()
+        };
+        let mut connection = EditorConnection::new("test".into(), config);
+        for (saves_file, daemon_writes) in [(true, false), (false, false), (true, true)] {
+            assert!(
+                connection
+                    .message_from_editor(&EditorProtocolMessageFromEditor::Open {
+                        uri: format!("file://{}", file.display()),
+                        content: "stale".into(),
+                        saves_file,
+                        daemon_writes,
+                    })
+                    .is_err()
+            );
+            assert!(!connection.owns(&RelativePath::new("file")));
+            assert_eq!(fs::read(&file).expect("unchanged"), b"outside");
+        }
+        fs::write(&file, [0xff]).expect("binary");
+        assert!(
+            connection
+                .message_from_editor(&EditorProtocolMessageFromEditor::Open {
+                    uri: format!("file://{}", file.display()),
+                    content: "decoded".into(),
+                    saves_file: false,
+                    daemon_writes: true,
+                })
+                .is_err()
+        );
+        assert_eq!(fs::read(file).expect("unchanged binary"), [0xff]);
+    }
 
     #[test]
     fn opening_file_in_wrong_dir_fails() {
@@ -307,6 +359,7 @@ mod tests {
                 uri: "file:///foobar/file".to_string(),
                 content: String::new(),
                 saves_file: false,
+                daemon_writes: true,
             });
 
         assert!(result.is_err());
@@ -331,6 +384,7 @@ mod tests {
                 uri: format!("file://{}", file.display()),
                 content: "initial content".to_string(),
                 saves_file: false,
+                daemon_writes: true,
             });
         assert_eq!(
             result,
