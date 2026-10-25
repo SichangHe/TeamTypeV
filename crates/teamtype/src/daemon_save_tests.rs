@@ -1,5 +1,57 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[test]
+fn git_completion_preserves_files_created_in_shared_history() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let path = RelativePath::new("new-peer-file");
+    assert!(actor.start_git(&[])?);
+    actor.crdt_doc.update_text("created during Git", &path);
+    actor.write_file(&path);
+    assert!(!dir.path().join("new-peer-file").exists());
+    actor.finish_git()?;
+    actor.assert_file_content(&path, "created during Git");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("new-peer-file"))?,
+        "created during Git"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn opening_missing_file_during_git_requires_retry_without_creating_it() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let (_uri, _reader) = open_test_editor(&mut actor, &RelativePath::new("file1")).await;
+    assert!(actor.start_git(&[])?);
+    let path = RelativePath::new("new-file");
+    let request = EditorProtocolMessageFromEditor::Open {
+        uri: actor
+            .absolute_path_for_file_path(&path)
+            .to_file_uri()
+            .to_string(),
+        content: "new content".into(),
+        saves_file: false,
+        daemon_writes: true,
+    };
+    let error = actor
+        .react_to_message_from_editor(1, &request)
+        .await
+        .expect_err("Git owns disk writes");
+    assert!(error.message.contains("retry opening"));
+    assert!(!dir.path().join("new-file").exists());
+    actor.finish_git()?;
+    actor
+        .react_to_message_from_editor(1, &request)
+        .await
+        .expect("retry open after Git");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("new-file"))?,
+        "new content"
+    );
+    Ok(())
+}
+
 async fn open_test_editor(
     actor: &mut DocumentActor,
     path: &RelativePath,

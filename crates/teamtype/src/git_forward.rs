@@ -271,7 +271,12 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
                 }
             };
             if let Err(error) = result {
-                worker_handle.git_finished().await;
+                let error = match worker_handle.git_finished().await {
+                    Ok(()) => error,
+                    Err(cleanup) => {
+                        error.context(format!("Could not reconcile Git files: {cleanup:#}"))
+                    }
+                };
                 let _ = timeout(
                     CONNECT_TIMEOUT,
                     job.response.send(Response::Error(format!("{error:#}"))),
@@ -436,7 +441,7 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
         bail!("Only the sharer executes Git");
     }
     timeout(CONNECT_TIMEOUT, async {
-        while !handle.git_ready(job.request.heads.clone()).await? {
+        while !handle.git_started(job.request.heads.clone()).await? {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         Ok::<(), anyhow::Error>(())
@@ -463,7 +468,7 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     }
     if let Some(terminal) = &job.request.terminal {
         let code = terminal::execute(job, git_program()?, &root, &cwd, terminal).await?;
-        handle.git_finished().await;
+        handle.git_finished().await?;
         job.response
             .send(Response::Exit(code, handle.git_heads().await))
             .await?;
@@ -546,30 +551,24 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
         () = job.response.closed() => Err(anyhow::anyhow!("Git client disconnected")),
     };
     input_task.abort();
-    let status = match result {
-        Ok(status) => status,
-        Err(error) => {
-            group.terminate();
-            let stopped = timeout(Duration::from_secs(2), async {
-                loop {
-                    let _ = child.try_wait();
-                    if nix::sys::signal::killpg(nix::unistd::Pid::from_raw(group.pid as i32), None)
-                        .is_err()
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            })
-            .await;
-            if stopped.is_err() {
-                group.signal(nix::sys::signal::Signal::SIGKILL);
+    group.terminate();
+    let stopped = timeout(Duration::from_secs(2), async {
+        loop {
+            let _ = child.try_wait();
+            if nix::sys::signal::killpg(nix::unistd::Pid::from_raw(group.pid as i32), None).is_err()
+            {
+                break;
             }
-            let _ = child.wait().await;
-            return Err(error);
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    };
-    handle.git_finished().await;
+    })
+    .await;
+    if stopped.is_err() {
+        group.signal(nix::sys::signal::Signal::SIGKILL);
+    }
+    let _ = child.wait().await;
+    let status = result?;
+    handle.git_finished().await?;
     let heads = handle.git_heads().await;
     job.response
         .send(Response::Exit(
@@ -842,6 +841,7 @@ fn validate_args(args: &[Vec<u8>]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::peer::sync::{Connection, PeerMessage, SyncActor};
+    include!("git_save_tests.rs");
 
     struct SlowConnection {
         writer: tokio::net::unix::OwnedWriteHalf,
@@ -994,6 +994,7 @@ mod tests {
         };
         let host = DocumentActorHandle::new(&host_config, true, true, false);
         let join = DocumentActorHandle::new(&join_config, true, false, false);
+        let (mut editor, uri) = test_editor(&host, "file", "initial").await?;
         start(host.clone())?;
         let (a, b) = UnixStream::pair()?;
         let host_sync =
@@ -1022,8 +1023,16 @@ mod tests {
         let input = vec![42; 8 * 1024 * 1024];
         stream_input(&mut input.as_slice(), &mut socket).await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        std::fs::write(host_root.path().join("file"), "during upload")?;
-        host.git_heads().await;
+        let edited = test_editor_request(
+            &host,
+            &mut editor,
+            "edit",
+            serde_json::json!({
+                "uri": uri, "revision": 0, "delta": test_edit_delta("initial", "during upload")
+            }),
+        )
+        .await?;
+        assert!(edited.get("error").is_none(), "{edited}");
         timeout(Duration::from_secs(2), async {
             while std::fs::read(join_root.path().join("file")).ok().as_deref()
                 != Some(b"during upload")

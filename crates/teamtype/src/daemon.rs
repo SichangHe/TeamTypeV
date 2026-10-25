@@ -76,8 +76,12 @@ pub enum DocMessage {
         heads: Vec<ChangeHash>,
         response_tx: oneshot::Sender<Result<bool>>,
     },
+    GitStarted {
+        heads: Vec<ChangeHash>,
+        response_tx: oneshot::Sender<Result<bool>>,
+    },
     GitFinished {
-        response_tx: oneshot::Sender<()>,
+        response_tx: oneshot::Sender<Result<()>>,
     },
     /// This document's history ID, and whether it has any files.
     HistoryId {
@@ -109,6 +113,7 @@ impl fmt::Debug for DocMessage {
             Self::RescanFiles => "RescanFiles".to_string(),
             Self::GitHeads { .. } => "GitHeads".to_string(),
             Self::GitReady { .. } => "GitReady".to_string(),
+            Self::GitStarted { .. } => "GitStarted".to_string(),
             Self::GitFinished { .. } => "GitFinished".to_string(),
             Self::HistoryId { .. } => "HistoryId".to_string(),
             Self::Persist => "Persist".to_string(),
@@ -150,6 +155,9 @@ pub struct DocumentActor {
     /// Last bytes read or written, used as the base of concurrent disk edits.
     disk_content: HashMap<RelativePath, Vec<u8>>,
     disk_edits: Vec<ComponentMessage>,
+    git_running: bool,
+    deferred_writes: HashSet<RelativePath>,
+    deferred_removals: HashSet<RelativePath>,
 }
 
 impl DocumentActor {
@@ -195,6 +203,9 @@ impl DocumentActor {
             files_open_in_editors: HashSet::default(),
             disk_content: HashMap::new(),
             disk_edits: Vec::new(),
+            git_running: false,
+            deferred_writes: HashSet::new(),
+            deferred_removals: HashSet::new(),
         };
         git_forward::remove_old_hook(&s.app_config.base_dir);
         for path in s.crdt_doc.files() {
@@ -276,16 +287,20 @@ impl DocumentActor {
             }
             DocMessage::GitReady { heads, response_tx } => {
                 let ready = self.crdt_doc.has_changes(&heads);
-                let result = if ready {
+                let result = if ready && !self.git_running {
                     self.flush_git_files().map(|()| true)
                 } else {
-                    Ok(false)
+                    Ok(ready)
                 };
                 let _ = response_tx.send(result);
             }
+            DocMessage::GitStarted { heads, response_tx } => {
+                let result = self.start_git(&heads);
+                let _ = response_tx.send(result);
+            }
             DocMessage::GitFinished { response_tx } => {
-                self.read_current_content_from_dir(false);
-                let _ = response_tx.send(());
+                let result = self.finish_git();
+                let _ = response_tx.send(result);
             }
             DocMessage::HistoryId { response_tx } => {
                 let id = match self.current_file_content(&RelativePath::new(HISTORY_ID)) {
@@ -334,14 +349,11 @@ impl DocumentActor {
                                 self.write_file(&file_path);
                             } else if self.owns(&file_path) {
                                 info!("Removing file {file_path}.");
-
-                                sandbox::remove_file(
-                                    &self.app_config.base_dir,
-                                    &self.absolute_path_for_file_path(&file_path),
-                                )
-                                .unwrap_or_else(|err| {
-                                    warn!("Failed to remove file {file_path}: {err}");
-                                });
+                                if self.git_running {
+                                    self.deferred_removals.insert(file_path);
+                                } else {
+                                    self.remove_disk_file(&file_path);
+                                }
                             } else {
                                 // At least one editor has the file open. We want to allow it to
                                 // keep editing it. Conceptually, we want to treat the file as
@@ -564,6 +576,18 @@ impl DocumentActor {
         if matches!(message, EditorProtocolMessageFromEditor::DaemonWriter {}) {
             return Ok(vec![]);
         }
+        if self.git_running
+            && let EditorProtocolMessageFromEditor::Open { uri, .. } = message
+            && let Ok(uri) = FileUri::try_from(uri.clone())
+            && sandbox::exists(&self.app_config.base_dir, &uri.to_absolute_path())
+                .is_ok_and(|exists| !exists)
+        {
+            return Err(EditorProtocolMessageError {
+                code: -1,
+                message: "Git is running; retry opening when the command finishes".into(),
+                data: None,
+            });
+        }
         if let EditorProtocolMessageFromEditor::Save { uri } = message {
             let path = FileUri::try_from(uri.clone())
                 .and_then(|uri| {
@@ -711,6 +735,9 @@ impl DocumentActor {
     }
 
     fn handle_watcher_event(&mut self, watcher_event: &WatcherEvent) {
+        if self.git_running {
+            return;
+        }
         let relative_file_path =
             RelativePath::try_from_path(&self.app_config.base_dir, &watcher_event.file_path)
                 .expect("Watcher event should have a path within the base directory");
@@ -750,6 +777,9 @@ impl DocumentActor {
     // registers a creation when the file is only changed. We check whether or not the CRDT
     // contains the file already in the `update_text` method anyway.
     fn file_created_or_changed(&mut self, relative_file_path: &RelativePath) {
+        if self.git_running {
+            return;
+        }
         let file_path = self.absolute_path_for_file_path(relative_file_path);
         let new_content = match sandbox::read_file(&self.app_config.base_dir, &file_path) {
             Ok(content) => content,
@@ -903,12 +933,20 @@ impl DocumentActor {
     // 🧑 "their save just tells teamtype to write"
     /// Merges outside changes before writing shared text.
     fn write_file(&mut self, file_path: &RelativePath) {
+        if self.git_running {
+            self.deferred_writes.insert(file_path.clone());
+            return;
+        }
         if let Err(error) = self.try_write_file(file_path) {
             error!("Could not write shared file {file_path}: {error:#}");
         }
     }
 
     fn try_write_file(&mut self, file_path: &RelativePath) -> Result<()> {
+        if self.git_running {
+            self.deferred_writes.insert(file_path.clone());
+            anyhow::bail!("Git is running; retry saving when the command finishes");
+        }
         if self.disk_content.contains_key(file_path) {
             self.file_created_or_changed(file_path);
         }
@@ -960,6 +998,9 @@ impl DocumentActor {
     }
 
     fn read_current_content_from_dir(&mut self, init: bool) {
+        if self.git_running {
+            return;
+        }
         debug!("Reading current contents from disk (init: {init}).");
         let mut paths = sandbox::enumerate_non_ignored_files(&self.app_config);
         paths.extend(
@@ -1001,6 +1042,11 @@ impl DocumentActor {
         }
 
         for relative_file_path in self.crdt_doc.files() {
+            if self.deferred_writes.contains(&relative_file_path)
+                && !self.disk_content.contains_key(&relative_file_path)
+            {
+                continue;
+            }
             let absolute_file_path = self.absolute_path_for_file_path(&relative_file_path);
             if !sandbox::exists(&self.app_config.base_dir, &absolute_file_path)
                 .expect(
@@ -1027,6 +1073,47 @@ impl DocumentActor {
             self.try_write_file(&path)?;
         }
         Ok(())
+    }
+
+    /// Defers shared-file I/O at the same actor boundary that flushes pre-command edits.
+    fn start_git(&mut self, heads: &[ChangeHash]) -> Result<bool> {
+        if self.git_running || !self.crdt_doc.has_changes(heads) {
+            return Ok(false);
+        }
+        self.flush_git_files()?;
+        self.git_running = true;
+        Ok(true)
+    }
+
+    /// Merges completed Git writes before writing edits received during the command.
+    fn finish_git(&mut self) -> Result<()> {
+        if !self.git_running {
+            return Ok(());
+        }
+        self.git_running = false;
+        for path in std::mem::take(&mut self.deferred_removals) {
+            if !self.crdt_doc.file_exists(&path) {
+                self.remove_disk_file(&path);
+            }
+        }
+        self.read_current_content_from_dir(false);
+        let mut result = Ok(());
+        for path in std::mem::take(&mut self.deferred_writes) {
+            if let Err(error) = self.try_write_file(&path) {
+                result = Err(error);
+            }
+        }
+        self.flush_git_files()?;
+        result
+    }
+
+    fn remove_disk_file(&self, file_path: &RelativePath) {
+        if let Err(error) = sandbox::remove_file(
+            &self.app_config.base_dir,
+            &self.absolute_path_for_file_path(file_path),
+        ) {
+            warn!("Failed to remove file {file_path}: {error}");
+        }
     }
 
     fn current_file_content(&self, file_path: &RelativePath) -> Option<&document::Content> {
@@ -1333,11 +1420,22 @@ impl DocumentActorHandle {
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Document actor stopped")))
     }
 
-    pub async fn git_finished(&self) {
+    pub async fn git_started(&self, heads: Vec<ChangeHash>) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_message(DocMessage::GitStarted { heads, response_tx })
+            .await;
+        response_rx
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Document actor stopped")))
+    }
+
+    pub async fn git_finished(&self) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send_message(DocMessage::GitFinished { response_tx })
             .await;
-        let _ = response_rx.await;
+        response_rx
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Document actor stopped")))
     }
 
     pub async fn content(&self) -> Option<document::Content> {

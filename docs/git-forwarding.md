@@ -27,7 +27,17 @@ User setup, direnv activation, and terminal behavior are documented in
   - the exit response includes the sharer's heads; the requesting daemon waits up to ten seconds for those changes to be written and open buffers flushed
     - a delayed synchronization produces a warning and preserves Git's exit code
   - before execution, open buffers are flushed to disk, including files normally saved by an editor
-  - checkout tests keep files closed in editors; outside changes to open buffers depend on the separate editor update fix
+  - execution starts at a separate actor boundary from exit-response synchronization
+    - the sharer defers shared-file writes, removals, and disk rescans until the child stops
+    - editor operations still update shared history and propagate to peers
+    - save requests return an explicit retry error while Git runs
+    - opening a nonexistent file also returns a retry error, because ignore checking otherwise creates it
+    - completion or cancellation merges final disk contents, then flushes deferred edits
+    - failures also release this boundary; reconciliation errors reach the Git caller
+  - ordinary checkout may refuse saved modifications; explicit restoration is an outside deletion and remains deleted
+  - coordination covers forwarded Git and plugins that delegate saves to the daemon
+    - arbitrary programs holding a file open across daemon replacement can still write into the displaced inode
+    - those later bytes are not merged; direct Git commands outside forwarding have the same limitation
 - Git uses the sharer's identity, repository configuration, credentials, and hooks
   - inherited `GIT_*` environment variables are cleared
   - global options are allowlisted; configuration, execution, and directory overrides are rejected
@@ -76,4 +86,5 @@ User setup, direnv activation, and terminal behavior are documented in
   - `git_forward_regressions.sh` covers open, delayed and large stdin, silent execution, ignored tracked edits, and stalled output
     - `CASE=portable` shadows `setsid` with a failing executable
   - `slow_stdin_upload_keeps_document_sync_responsive` runs real actors, Git, and Unix streams with a throttled connection
+  - `git_save_tests` pauses a real Git child with an open writer during editor typing and saving, checks cancellation, and exercises checkout refusal and explicit restoration
   - `python3 verification/live/git_terminal.py` checks activation in bash, zsh, and fish, a commit editor, `add -p`, a pager, terminal resize, interrupts, and restored terminal modes through real daemons and pseudo-terminals
