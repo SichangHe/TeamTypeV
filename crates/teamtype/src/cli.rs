@@ -91,7 +91,7 @@ pub enum Commands {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
-    /// Run Git on the sharer, after synchronizing your edits. Interactive editors are disabled.
+    /// Run Git on the sharer after synchronizing your edits; terminals support interactive Git.
     #[command(disable_help_flag = true, disable_version_flag = true)]
     Git {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

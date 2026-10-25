@@ -188,7 +188,7 @@ Bridges:
 <!-- authored by agents -->
 The sharer keeps the Git repository. Joiners run `teamtype git status`, `teamtype git add FILE`, and `teamtype git commit -m "MESSAGE"`; commands wait for their preceding edits and execute on the sharer. Checkout and other file changes synchronize to everyone. Joiners need no `.git`.
 
-To forward ordinary `git` invocations, add the joined directory's `.teamtype/bin` to PATH before starting your editor. Commands use the sharer's identity and credentials. Pager, automatic colors, and interactive editors are disabled. Both VCS synchronization flags are deprecated no-ops. See [Git setup and limits](book/src/git-integration-synchronized.md).
+For ordinary `git`, run `source .teamtype/activate` in bash or zsh, or `source .teamtype/activate.fish` in fish, before starting your editor. Run `deactivate` to restore your PATH. Terminal commands support interactive editors, `add -p`, pagers, and colors using the sharer's programs and configuration. Tools that read `.git` directly still need a local repository. Both VCS synchronization flags are deprecated no-ops. See [Git setup and limits](book/src/git-integration-synchronized.md), including automatic activation with direnv.
 
 ## 🔨 Contributing
 

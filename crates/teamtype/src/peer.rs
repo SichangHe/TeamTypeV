@@ -44,12 +44,13 @@ pub use tunnel::run as run_tunnel;
 
 /// Changes whenever peers of different versions cannot understand each other, so that they fail
 /// to connect with a clear message instead of disconnecting after every message.
-const ALPN: &[u8] = b"/teamtype-fork/4";
+const ALPN: &[u8] = b"/teamtype-fork/5";
 
 #[test]
 fn forwarding_protocol_rejects_legacy_alpn() {
     assert_ne!(ALPN, b"/teamtype-fork/2".as_slice());
     assert_ne!(ALPN, b"/teamtype-fork/3".as_slice());
+    assert_ne!(ALPN, b"/teamtype-fork/4".as_slice());
 }
 
 const PEER_TIMEOUT: Duration = Duration::from_secs(6);
@@ -474,13 +475,14 @@ impl EndpointActor {
                             response_tx
                                 .send(Err(err))
                                 .expect("Connect receiver dropped");
+                        } else {
+                            tokio::spawn(Self::reconnect(
+                                self.message_tx.clone(),
+                                secret_address,
+                                previous_attempts,
+                                generation,
+                            ));
                         }
-                        tokio::spawn(Self::reconnect(
-                            self.message_tx.clone(),
-                            secret_address,
-                            previous_attempts,
-                            generation,
-                        ));
                         // Not really Ok, but Ok enough.
                         return Ok(());
                     }
@@ -1025,6 +1027,52 @@ mod recovery_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_initial_connection_leaves_retry_to_caller() -> Result<()> {
+        let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
+        let peer_id = SecretKey::generate().public();
+        let directory = tempfile::tempdir()?;
+        fs::create_dir(directory.path().join(".teamtype"))?;
+        let config = AppConfig {
+            base_dir: directory.path().into(),
+            ..AppConfig::default()
+        };
+        let document_handle = DocumentActorHandle::new(&config, false, false, true);
+        let (message_tx, message_rx) = mpsc::channel(1);
+        let passphrase = SecretKey::from_bytes(&[42; 32]);
+        let mut actor = EndpointActor::new(
+            endpoint,
+            message_rx,
+            message_tx,
+            document_handle,
+            passphrase.clone(),
+            config,
+        );
+        actor.peer_generations.insert(peer_id, 1);
+        let (response_tx, response_rx) = oneshot::channel();
+        actor
+            .handle_message(EndpointMessage::Connected {
+                secret_address: SecretAddress {
+                    endpoint_addr: EndpointAddr::new(peer_id),
+                    passphrase,
+                },
+                response_tx: Some(response_tx),
+                previous_attempts: 0,
+                generation: 1,
+                result: Err(anyhow::anyhow!("Initial connection failed")),
+            })
+            .await?;
+        assert!(response_rx.await?.is_err());
+        assert!(
+            timeout(Duration::from_millis(100), actor.message_rx.recv())
+                .await
+                .is_err(),
+            "Caller retry must not compete with a background reconnect"
+        );
+        actor.endpoint.close().await;
+        Ok(())
+    }
 
     async fn connected_streams() -> Result<(
         Endpoint,

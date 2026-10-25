@@ -1,13 +1,18 @@
 # Git forwarding
 (authored by agents unless marked 🧑)
 
+User setup, direnv activation, and terminal behavior are documented in
+[forwarded Git commands](../book/src/git-integration-synchronized.md).
+
 - 🧑 "Maybe we just intercept all the git stuff and forward them to the server?"
 - `git_forward` owns the local Unix socket and one command queue per daemon
   - only the sharer executes commands
   - joiners install `.teamtype/bin/git`, forwarding to `teamtype git`
+    - generated activation files prepend its absolute directory and restore PATH and any previous deactivate function
+    - bash/zsh and fish templates quote paths independently
   - arguments, relative working directory, and stdin travel over the authenticated peer connection
   - stdout and stderr use bounded channels and 16 KiB chunks
-  - nonterminal stdin travels in 16 KiB chunks until EOF; terminal stdin is empty
+  - nonterminal stdin travels in 16 KiB chunks until EOF; stdin-only terminals send empty input
     - each daemon queues execution immediately and spools arriving input to a private temporary file
     - readers wait for appended bytes until explicit EOF; Git chooses whether to read stdin
     - the client reads stdin on a detached thread so an open pipe cannot hold runtime shutdown
@@ -26,11 +31,21 @@
 - Git uses the sharer's identity, repository configuration, credentials, and hooks
   - inherited `GIT_*` environment variables are cleared
   - global options are allowlisted; configuration, execution, and directory overrides are rejected
-  - pager, automatic colors, terminal credential prompts, and Git editors are disabled
+  - the nonterminal path disables pagers, automatic colors, terminal credential prompts, and Git editors
   - `process_group(0)` creates a separate Unix process group without an external utility
     - works on Linux and macOS while retaining the workspace prohibition on unsafe code
-    - all standard streams are pipes; SSH uses batch mode and askpass is disabled
-  - interactive terminal sessions are unsupported
+    - in the nonterminal path, all standard streams are pipes; SSH uses batch mode and askpass is disabled
+  - `git_terminal` uses `portable-pty` to start a Unix session with a controlling terminal
+    - `/teamtype-fork/5` excludes older peers whose request encoding lacks terminal metadata
+    - local signal subscriptions and raw-mode restoration are installed before submitting the request
+    - until the sharer reports execution started, interrupt/quit input and signals cancel locally, including queued commands
+    - the client opens stdin's terminal device separately so nonblocking reads do not change stdin's file flags or require a controlling terminal
+    - `stty size` reads the initial size and subsequent window changes
+    - nonblocking master reads and writes share one async loop, preventing input/output deadlocks
+    - length-prefixed input, size, and signal events use the existing spool and peer acknowledgements
+      - independent spool readers deliver control events even while the pseudo-terminal stops accepting input
+    - partial event bytes survive selection of output or process-status polling
+    - process exit drains terminal output through EOF; disconnect terminates the process group before the queue advances
   - joiners must be trusted; forwarding is not a sandbox
   - the shared root must own the repository; discovery cannot reach a parent repository
 - commands have no execution deadline
@@ -50,6 +65,8 @@
 - connection loss never retries a command
   - a command may have executed before its response was lost
   - inspect status before retrying
+  - initial connection retries belong to the caller; background reconnect handles attempts without a caller
+    - competing retries previously replaced an active connection during terminal Git
 - version-control directories never enter synchronization
   - old persisted metadata is removed from the document on startup
   - legacy hooks containing `Installed by teamtype` are removed at startup and before execution
@@ -59,3 +76,4 @@
   - `git_forward_regressions.sh` covers open, delayed and large stdin, silent execution, ignored tracked edits, and stalled output
     - `CASE=portable` shadows `setsid` with a failing executable
   - `slow_stdin_upload_keeps_document_sync_responsive` runs real actors, Git, and Unix streams with a throttled connection
+  - `python3 verification/live/git_terminal.py` checks activation in bash, zsh, and fish, a commit editor, `add -p`, a pager, terminal resize, interrupts, and restored terminal modes through real daemons and pseudo-terminals

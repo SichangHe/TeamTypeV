@@ -27,6 +27,9 @@ use tokio::time::timeout;
 
 use crate::daemon::DocumentActorHandle;
 
+#[path = "git_terminal.rs"]
+mod terminal;
+
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const OUTPUT_TIMEOUT: Duration = Duration::from_mins(3);
@@ -38,6 +41,7 @@ pub struct Request {
     args: Vec<Vec<u8>>,
     cwd: Vec<u8>,
     pub heads: Vec<ChangeHash>,
+    terminal: Option<terminal::Terminal>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +52,7 @@ pub enum Response {
     Stderr(Vec<u8>),
     Exit(i32, Vec<ChangeHash>),
     Error(String),
+    Started,
 }
 
 impl Response {
@@ -289,6 +294,7 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
     Ok(())
 }
 
+// 🧑 "Is there a way to get git working directly by having something like a virtual environment?"
 fn install_wrapper(root: &Path) -> Result<()> {
     let bin = root.join(".teamtype/bin");
     std::fs::create_dir_all(&bin)?;
@@ -303,9 +309,22 @@ fn install_wrapper(root: &Path) -> Result<()> {
         format!("#!/bin/sh\nexec '{quoted}' git -- \"$@\"\n"),
     )?;
     std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755))?;
+    let path = bin.to_str().context("Shared path is not UTF-8")?;
+    std::fs::write(
+        root.join(".teamtype/activate"),
+        include_str!("git_activate.sh")
+            .replace("@BIN@", &format!("'{}'", path.replace('\'', "'\\''"))),
+    )?;
+    std::fs::write(
+        root.join(".teamtype/activate.fish"),
+        include_str!("git_activate.fish").replace(
+            "@BIN@",
+            &format!("'{}'", path.replace('\\', "\\\\").replace('\'', "\\'")),
+        ),
+    )?;
     tracing::info!(
-        "Git runs on the sharer. Use `teamtype git ...`, or add {} to PATH.",
-        bin.display()
+        "Git runs on the sharer. Use `teamtype git ...`, or source {} (fish: activate.fish).",
+        root.join(".teamtype/activate").display()
     );
     Ok(())
 }
@@ -441,6 +460,14 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
         .canonicalize().context("Git working directory does not exist on the sharer; empty directories are not synchronized")?;
     if !cwd.starts_with(&root) {
         bail!("Git working directory must be inside the shared directory");
+    }
+    if let Some(terminal) = &job.request.terminal {
+        let code = terminal::execute(job, git_program()?, &root, &cwd, terminal).await?;
+        handle.git_finished().await;
+        job.response
+            .send(Response::Exit(code, handle.git_heads().await))
+            .await?;
+        return Ok(());
     }
     let mut command = group_command(git_program()?);
     for (key, _) in std::env::vars_os() {
@@ -599,11 +626,20 @@ pub async fn client(directory: Option<&Path>, args: Vec<OsString>) -> Result<i32
         args: args.into_iter().map(OsString::into_vec).collect(),
         cwd: cwd.as_os_str().as_bytes().to_vec(),
         heads: vec![],
+        terminal: terminal::Terminal::detect()?,
     };
+    let (started, running) = tokio::sync::watch::channel(false);
+    let mut terminal = request
+        .terminal
+        .as_ref()
+        .map(|_| terminal::Client::new(running))
+        .transpose()?;
     write_frame(&mut socket, &request).await?;
     let (mut reader, mut writer) = socket.into_split();
     let input = async {
-        if std::io::stdin().is_terminal() {
+        if let Some(terminal) = &mut terminal {
+            return terminal.input(&mut writer).await;
+        } else if std::io::stdin().is_terminal() {
             write_frame(&mut writer, &Vec::<u8>::new()).await?;
         } else {
             let (sender, mut chunks) = mpsc::channel(1);
@@ -639,9 +675,17 @@ pub async fn client(directory: Option<&Path>, args: Vec<OsString>) -> Result<i32
                 .context("Lost connection to the Git daemon")?
             {
                 Response::Accepted => {}
+                Response::Started => {
+                    started.send_replace(true);
+                }
                 Response::Queued(command) => {
+                    let newline = if request.terminal.is_some() {
+                        "\r\n"
+                    } else {
+                        "\n"
+                    };
                     stderr
-                        .write_all(format!("Git queued behind: {command}\n").as_bytes())
+                        .write_all(format!("Git queued behind: {command}{newline}").as_bytes())
                         .await?;
                     stderr.flush().await?;
                 }
@@ -659,6 +703,14 @@ pub async fn client(directory: Option<&Path>, args: Vec<OsString>) -> Result<i32
                     }
                 }
                 Response::Stderr(bytes) => {
+                    let bytes = if request.terminal.is_some() {
+                        bytes
+                            .split(|byte| *byte == b'\n')
+                            .collect::<Vec<_>>()
+                            .join(b"\r\n".as_slice())
+                    } else {
+                        bytes
+                    };
                     if let Err(error) = async {
                         stderr.write_all(&bytes).await?;
                         stderr.flush().await
@@ -877,6 +929,7 @@ mod tests {
                     args: vec![b"status".to_vec()],
                     cwd: vec![],
                     heads: vec![],
+                    terminal: None,
                 },
                 response,
                 input,
@@ -962,6 +1015,7 @@ mod tests {
                 args: vec![b"hash-object".to_vec(), b"--stdin".to_vec()],
                 cwd: vec![],
                 heads: vec![],
+                terminal: None,
             },
         )
         .await?;
@@ -1068,6 +1122,7 @@ mod tests {
                 args: vec![b"status".to_vec()],
                 cwd: vec![],
                 heads: vec![],
+                terminal: None,
             },
         )
         .await?;
