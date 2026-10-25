@@ -576,18 +576,6 @@ impl DocumentActor {
         if matches!(message, EditorProtocolMessageFromEditor::DaemonWriter {}) {
             return Ok(vec![]);
         }
-        if self.git_running
-            && let EditorProtocolMessageFromEditor::Open { uri, .. } = message
-            && let Ok(uri) = FileUri::try_from(uri.clone())
-            && sandbox::exists(&self.app_config.base_dir, &uri.to_absolute_path())
-                .is_ok_and(|exists| !exists)
-        {
-            return Err(EditorProtocolMessageError {
-                code: -1,
-                message: "Git is running; retry opening when the command finishes".into(),
-                data: None,
-            });
-        }
         if let EditorProtocolMessageFromEditor::Save { uri } = message {
             let path = FileUri::try_from(uri.clone())
                 .and_then(|uri| {
@@ -663,7 +651,7 @@ impl DocumentActor {
             .get_mut(&editor_id)
             .expect("Could not get editor connection")
             .0
-            .message_from_editor(message)?;
+            .message_from_editor(!self.git_running, message)?;
 
         // Then, forward them to the "core", and get back component messages that should be
         // returned to the editor (because, for example, it opened a file with a not up-to-date
@@ -1749,12 +1737,15 @@ mod tests {
                     .get_mut(&1)
                     .expect("editor")
                     .0
-                    .message_from_editor(&EditorProtocolMessageFromEditor::Edit {
-                        uri: uri.clone(),
-                        revision: n,
-                        delta: crate::types::EditorTextDelta::try_from_delta(delta, &old)
-                            .expect("editor delta"),
-                    })
+                    .message_from_editor(
+                        true,
+                        &EditorProtocolMessageFromEditor::Edit {
+                            uri: uri.clone(),
+                            revision: n,
+                            delta: crate::types::EditorTextDelta::try_from_delta(delta, &old)
+                                .expect("editor delta"),
+                        },
+                    )
                     .expect("local edit before watcher delivery");
                 let ComponentMessage::Edit { delta, .. } = message else {
                     panic!("edit")

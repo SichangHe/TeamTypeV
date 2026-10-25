@@ -107,6 +107,7 @@ impl EditorConnection {
     /// editor has missed.
     pub fn message_from_editor(
         &mut self,
+        allow_file_creation: bool,
         message: &EditorProtocolMessageFromEditor,
     ) -> Result<(ComponentMessage, Vec<EditorProtocolMessageToEditor>), EditorProtocolMessageError>
     {
@@ -145,6 +146,14 @@ impl EditorConnection {
                 if !sandbox::exists(&self.app_config.base_dir, &absolute_path)
                     .map_err(anyhow_err_to_protocol_err)?
                 {
+                    if !allow_file_creation {
+                        return Err(EditorProtocolMessageError {
+                            code: -1,
+                            message: "Git is running; retry opening when the command finishes"
+                                .into(),
+                            data: None,
+                        });
+                    }
                     // Creating nonexisting files allows us to traverse this file for whether it's
                     // ignored, which is needed to even be allowed to open it.
                     sandbox::write_file(&self.app_config.base_dir, &absolute_path, b"")
@@ -318,12 +327,15 @@ mod tests {
         for (saves_file, daemon_writes) in [(true, false), (false, false), (true, true)] {
             assert!(
                 connection
-                    .message_from_editor(&EditorProtocolMessageFromEditor::Open {
-                        uri: format!("file://{}", file.display()),
-                        content: "stale".into(),
-                        saves_file,
-                        daemon_writes,
-                    })
+                    .message_from_editor(
+                        true,
+                        &EditorProtocolMessageFromEditor::Open {
+                            uri: format!("file://{}", file.display()),
+                            content: "stale".into(),
+                            saves_file,
+                            daemon_writes,
+                        }
+                    )
                     .is_err()
             );
             assert!(!connection.owns(&RelativePath::new("file")));
@@ -332,12 +344,15 @@ mod tests {
         fs::write(&file, [0xff]).expect("binary");
         assert!(
             connection
-                .message_from_editor(&EditorProtocolMessageFromEditor::Open {
-                    uri: format!("file://{}", file.display()),
-                    content: "decoded".into(),
-                    saves_file: false,
-                    daemon_writes: true,
-                })
+                .message_from_editor(
+                    true,
+                    &EditorProtocolMessageFromEditor::Open {
+                        uri: format!("file://{}", file.display()),
+                        content: "decoded".into(),
+                        saves_file: false,
+                        daemon_writes: true,
+                    }
+                )
                 .is_err()
         );
         assert_eq!(fs::read(file).expect("unchanged binary"), [0xff]);
@@ -354,13 +369,15 @@ mod tests {
 
         let mut editor_connection = EditorConnection::new("1".to_string(), app_config);
 
-        let result =
-            editor_connection.message_from_editor(&EditorProtocolMessageFromEditor::Open {
+        let result = editor_connection.message_from_editor(
+            true,
+            &EditorProtocolMessageFromEditor::Open {
                 uri: "file:///foobar/file".to_string(),
                 content: String::new(),
                 saves_file: false,
                 daemon_writes: true,
-            });
+            },
+        );
 
         assert!(result.is_err());
     }
@@ -379,13 +396,15 @@ mod tests {
         let mut editor_connection = EditorConnection::new("1".to_string(), app_config);
 
         // Editor opens the file.
-        let result =
-            editor_connection.message_from_editor(&EditorProtocolMessageFromEditor::Open {
+        let result = editor_connection.message_from_editor(
+            true,
+            &EditorProtocolMessageFromEditor::Open {
                 uri: format!("file://{}", file.display()),
                 content: "initial content".to_string(),
                 saves_file: false,
                 daemon_writes: true,
-            });
+            },
+        );
         assert_eq!(
             result,
             Ok((
@@ -413,12 +432,14 @@ mod tests {
         );
 
         // Editor sends an edit.
-        let result =
-            editor_connection.message_from_editor(&EditorProtocolMessageFromEditor::Edit {
+        let result = editor_connection.message_from_editor(
+            true,
+            &EditorProtocolMessageFromEditor::Edit {
                 uri: format!("file://{}", file.display()),
                 revision: 0,
                 delta: ed_delta_single((0, 3), (0, 3), "y"),
-            });
+            },
+        );
         let (inside_message, messages_to_editor) = result.unwrap();
         let delta = insert(4, "y"); // Position gets transformed!
         assert_eq!(
