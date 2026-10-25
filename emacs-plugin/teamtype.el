@@ -14,7 +14,7 @@
 ;; :connection - the JSON-RPC connection
 ;; :files - hash table mapping file paths to file state
 (defvar teamtype--clients nil
-  "List of active Teamtype clients.")
+  "List of active TeamTypeV clients.")
 
 ;;; File State (buffer-local variables)
 
@@ -69,7 +69,7 @@ Returns a cons (LINE . CHARACTER)."
 ;;; Client Management
 
 (defun teamtype--find-or-create-client (root-dir)
-  "Find or create a Teamtype client for ROOT-DIR."
+  "Find or create a TeamTypeV client for ROOT-DIR."
   ;; Look for existing client for this root directory.
   (let ((client (cl-find-if (lambda (c) (string= (plist-get c :root-dir) root-dir))
                             teamtype--clients)))
@@ -77,7 +77,7 @@ Returns a cons (LINE . CHARACTER)."
         (teamtype--create-client root-dir))))
 
 (defun teamtype--create-client (root-dir)
-  "Create a new Teamtype client for ROOT-DIR."
+  "Create a new TeamTypeV client for ROOT-DIR."
   (let* ((default-directory root-dir) ; Set working directory for the process.
          (process-name (format "teamtype-%s" root-dir))
          (process (make-process
@@ -96,7 +96,7 @@ Returns a cons (LINE . CHARACTER)."
                        :connection connection
                        :files (make-hash-table :test 'equal))))
     (push client teamtype--clients)
-    (message "Connected to Teamtype daemon in %s" root-dir)
+    (message "Connected to TeamTypeV daemon in %s" root-dir)
     client))
 
 (defun teamtype--daemon-lost (root-dir)
@@ -108,12 +108,12 @@ Returns a cons (LINE . CHARACTER)."
       (when (and teamtype--client (string= (plist-get teamtype--client :root-dir) root-dir))
         (setq-local teamtype--client nil)
         (setq buffer-read-only t))))
-  (message "Connection to Teamtype daemon in %s lost. Restart the daemon, then reopen the files." root-dir))
+  (message "Connection to TeamTypeV daemon in %s lost. Restart the daemon, then reopen the files." root-dir))
 
 ;;; File Operations
 
 (defun teamtype--file-opened ()
-  "Handle opening a file in a Teamtype-enabled directory."
+  "Handle opening a file in a TeamTypeV-enabled directory."
   (when buffer-file-name
     (let ((root-dir (teamtype--find-root buffer-file-name)))
       (when root-dir
@@ -127,7 +127,7 @@ Returns a cons (LINE . CHARACTER)."
   (condition-case err
       (jsonrpc-request (plist-get client :connection) 'daemonWriter '(:check t))
     (error
-     (message "Teamtype needs a daemon with daemon-owned saves: %S" err)
+     (message "TeamTypeV needs a daemon with daemon-owned saves: %S" err)
      (cl-return-from teamtype--open-file nil)))
   ;; Lock files (`.#name`) in the shared directory would be synced as files.
   (setq-local create-lockfiles nil)
@@ -152,15 +152,15 @@ Returns a cons (LINE . CHARACTER)."
      :success-fn `(lambda (_result)
                    (when-let ((buffer (find-buffer-visiting ,filepath)))
                      (with-current-buffer buffer (setq-local teamtype--shared t)))
-                   (message "Teamtype: tracking %s" ,filepath))
+                   (message "TeamTypeV: tracking %s" ,filepath))
      :error-fn `(lambda (err)
-                  (message "Teamtype error opening file: %S" err)
+                  (message "TeamTypeV error opening file: %S" err)
                   (when-let ((buffer (find-buffer-visiting ,filepath)))
                     (with-current-buffer buffer
                       (setq-local teamtype--client nil)))))))
 
 (defun teamtype--close-file ()
-  "Close the current file in Teamtype."
+  "Close the current file in TeamTypeV."
   (when (and teamtype--client buffer-file-name)
     (let* ((uri (teamtype--path-to-uri buffer-file-name))
            (connection (plist-get teamtype--client :connection)))
@@ -198,7 +198,7 @@ Returns a cons (LINE . CHARACTER)."
          `(:uri ,uri :revision ,teamtype--daemon-revision :delta ,delta)
          ;; The default success callback fails on the daemon's string result.
          :success-fn #'ignore
-         :error-fn (lambda (err) (message "Teamtype edit rejected: %S" err)))))))
+         :error-fn (lambda (err) (message "TeamTypeV edit rejected: %S" err)))))))
 
 (defun teamtype--track-changes ()
   "Start tracking changes for the current buffer."
@@ -209,7 +209,7 @@ Returns a cons (LINE . CHARACTER)."
 (defun teamtype--save ()
   "Ask the daemon to save this shared buffer without writing it from Emacs."
   (when (or teamtype--shared teamtype--client)
-    (unless teamtype--client (user-error "Teamtype daemon is disconnected"))
+    (unless teamtype--client (user-error "TeamTypeV daemon is disconnected"))
     (jsonrpc-request
      (plist-get teamtype--client :connection) 'save
      `(:uri ,(teamtype--path-to-uri buffer-file-name)))
@@ -304,7 +304,7 @@ later edits don't invalidate positions of earlier edits."
 ;;; Setup
 
 (defun teamtype--setup ()
-  "Set up Teamtype for the current Emacs session."
+  "Set up TeamTypeV for the current Emacs session."
   (add-hook 'find-file-hook #'teamtype--file-opened)
   (add-hook 'kill-buffer-hook #'teamtype--close-file)
   (add-hook 'write-contents-functions #'teamtype--save)

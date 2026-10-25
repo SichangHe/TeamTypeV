@@ -95,7 +95,7 @@ drop() {
 }
 nvim_says_disconnected() {
     [ "$(nvim_expr "$1" '&modifiable')" = 0 ] &&
-        grep -q 'Connection to Teamtype daemon lost' "$work/$1.nvim.log"
+        grep -q 'Connection to TeamTypeV daemon lost' "$work/$1.nvim.log"
 }
 rejoin() {
     start_daemon "$1"

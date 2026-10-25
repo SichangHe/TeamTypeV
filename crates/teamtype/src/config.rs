@@ -242,7 +242,7 @@ fn get_username_from_git(base_dir: &Path) -> Option<String> {
             "{}",
             &docstr!(format!
                 /// Using the Git username '{username}' as username, to display next to the cursors other people see.
-                /// Teamtype uses the Git username as username by default.
+                /// TeamTypeV uses the Git username as username by default.
                 /// You can set the configuration value `username` in your `.teamtype/config` to override this username.
                 /// You can also use the flag `--username` when using the `share`/`join` subcommands.
             )
@@ -330,7 +330,7 @@ fn add_teamtype_to_local_gitignore(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keeps local Teamtype state out of Git on both sharers and joiners.
+/// Keeps local TeamTypeV state out of Git on both sharers and joiners.
 pub fn ensure_teamtype_is_ignored(directory: &Path) -> Result<()> {
     let ignore_file = directory.join(CONFIG_DIR).join(".gitignore");
     if !ignore_file.exists() || teamtype_directory_should_be_ignored_but_isnt(directory) {

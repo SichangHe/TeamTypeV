@@ -5,10 +5,11 @@ SPDX-FileCopyrightText: 2024 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# Using Teamtype for writing shared notes
+# Using TeamTypeV for writing shared notes
+(authored by agents unless marked 🧑)
 
-Another use case for Teamtype is to have a **long-lasting collaboration session** on a directory of text files (over the span of months or years).
-This is similar to how you would use Google Docs, Teamtype or Hedgedoc to work on text.
+Another use case for TeamTypeV is to have a **long-lasting collaboration session** on a directory of text files (over the span of months or years).
+This is similar to how you would use Google Docs, TeamTypeV or Hedgedoc to work on text.
 It would be suited for groups who want to write notes or documentation together.
 
 This use case is different from the "pair-programming" use case, because there, all peers are online at the same time.
@@ -19,7 +20,7 @@ We suggest to use a ["cloud peer"](connection-making.md#cloud-peer), a peer that
 
 ## Step-by-step guide
 
-You need to have access to a server on the Internet, and install the Teamtype daemon there.
+You need to have access to a server on the Internet, and install the TeamTypeV daemon there.
 
 ### 1. Set up the directory
 

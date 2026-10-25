@@ -50,7 +50,7 @@ function M.status()
         return ""
     end
 
-    local result = "Teamtype: "
+    local result = "TeamTypeV: "
 
     local n = cursor.number_of_cursors()
     if n > 0 then
@@ -163,18 +163,18 @@ local function find_or_create_client(config_name, root_dir)
             process_operation_for_editor(client, m, p)
         end,
         on_error = function(code, ...)
-            print("Teamtype connection error: ", code, vim.inspect({ ... }))
+            print("TeamTypeV connection error: ", code, vim.inspect({ ... }))
         end,
         on_exit = function(code, _)
             if code == 0 then
                 vim.schedule(function()
                     vim.api.nvim_err_writeln(
-                        "Connection to Teamtype daemon lost. Probably it crashed or was stopped. Please restart the daemon, then Neovim."
+                        "Connection to TeamTypeV daemon lost. Probably it crashed or was stopped. Please restart the daemon, then Neovim."
                     )
                 end)
             else
                 print(
-                    "Could not connect to Teamtype daemon. Did you start it (in "
+                    "Could not connect to TeamTypeV daemon. Did you start it (in "
                         .. root_dir
                         .. ")? To stop trying, remove the .teamtype/ directory."
                 )
@@ -311,7 +311,7 @@ end
 
 local function print_info()
     if #clients == 0 then
-        print("Not connected to any Teamtype daemon.")
+        print("Not connected to any TeamTypeV daemon.")
         return
     end
 
@@ -328,7 +328,7 @@ end
 
 local function legacy_command(f)
     return function()
-        print("You are using a deprecated user command Ethersync*. Please use the corresponding Teamtype* instead.")
+        print("You are using a deprecated user command Ethersync*. Please use the corresponding TeamTypeV* instead.")
         f()
     end
 end

@@ -46,7 +46,7 @@ jobs:
         with:
           neovim: true
           version: ${{ matrix.nvim-version }}
-      - name: Build Teamtype
+      - name: Build TeamTypeV
         run: cargo build --profile test
       - run: nvim --version
       - name: Compile default tests

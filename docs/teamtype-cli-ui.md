@@ -9,7 +9,8 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 status: accepted
 date: 2024-03-14
 ---
-# Teamtype UI Specification
+# TeamTypeV UI Specification
+(authored by agents unless marked 🧑)
 
 This document contains our current idea of how the Commandline User Interface looks like.
 (This document could later become the README. Note that the UI doesn't exist yet in this form.)

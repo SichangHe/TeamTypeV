@@ -6,13 +6,14 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # Editor plugin development guide
+(authored by agents unless marked 🧑)
 
-This document describes the protocol between the Teamtype daemon and the text editors.
+This document describes the protocol between the TeamTypeV daemon and the text editors.
 It should contain everything you need to implement a plugin for a new editor!
 
 ## How to connect to the daemon
 
-Teamtype consists of two parts: The daemon and editor plugins.
+TeamTypeV consists of two parts: The daemon and editor plugins.
 
 The daemon takes care of synchronization with other peers.
 An editor, on the other hand, has to communicate with the daemon to send it changes made to the file by the user, as well as changes of cursor positions.
@@ -21,12 +22,12 @@ The daemon will send other people's changes and cursor positions back to the edi
 To make this as easy as possible for your plugin, we're using the same protocol as the [Language Server Protocol](https://microsoft.github.io/language-server-protocol/overviews/lsp/overview/): [JSON-RPC](https://www.jsonrpc.org/specification).
 So if your editor plugin system allows connecting to an LSP, you'll hopefully can re-use the component opening a JSON-RPC connection.
 
-The editor plugin will need to spawn the command `teamtype client` (which is our helper tool to connect to a running Teamtype daemon), and speak JSON-RPC (with Content-Length headers) with the standard input/output of that process.
+The editor plugin will need to spawn the command `teamtype client` (which is our helper tool to connect to a running TeamTypeV daemon), and speak JSON-RPC (with Content-Length headers) with the standard input/output of that process.
 Think of `teamtype client` as the LSP Server when looking at it from the editor's perspective.
 
 ## File ownership
 
-Teamtype has the concept of file ownership.
+TeamTypeV has the concept of file ownership.
 By default, the daemon has ownership, which means that, as external tools make changes to files, the daemon will pick up those changes.
 
 But when an editor sends an "open" message, it takes ownership; changes by external tools will be ignored.
@@ -42,10 +43,10 @@ For each open file, editors store two integers:
 - The *daemon revision* describes how many changes the editor received from the daemon.
   It needs to be incremented after receiving an edit from the daemon.
 
-## How the editor recognizes Teamtype-enabled directories
+## How the editor recognizes TeamTypeV-enabled directories
 
-Similar how Git repositories have a `.git` directory at the top level, Teamtype-enabled directories have an `.teamtype` directory at the top level.
-The editor must only send messages for files inside Teamtype-enabled directories.
+Similar how Git repositories have a `.git` directory at the top level, TeamTypeV-enabled directories have an `.teamtype` directory at the top level.
+The editor must only send messages for files inside TeamTypeV-enabled directories.
 
 ## The daemon-editor protocol
 
@@ -130,7 +131,7 @@ These should be sent as notifications, there is no need to reply to them.
 ### Sending an example message to the daemon
 
 To send messages to the daemon manually, you can try the following.
-Assuming you can start the daemon in a testing directory as described in the [README](https://github.com/teamtype/teamtype?tab=readme-ov-file#-basic-usage), now we add some debugging output:
+Assuming you can start the daemon in a testing directory as described in the [README](https://github.com/SichangHe/TeamTypeV#share-or-join), now we add some debugging output:
 ```bash
 RUST_LOG=teamtype=debug teamtype share playground
 # Note for below: You will see some output like "Listening on UNIX socket: <dir>/.teamtype/socket"
@@ -156,7 +157,7 @@ You can send it to the daemon like this:
 python tools/dummy-jsonrpc.py playground/file | teamtype client
 ```
 
-### Seeing what an existing Teamtype plugin sends
+### Seeing what an existing TeamTypeV plugin sends
 
 On the other hand, not running any daemon, you can see what the plugin "wants" to communicate as follows.
 In the demon console (stop it), we now just plainly listen on the socket for incoming data:

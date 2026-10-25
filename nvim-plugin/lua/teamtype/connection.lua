@@ -40,7 +40,7 @@ function M.connect(cmd, directory, dispatchers)
     local executable = cmd[1]
     if vim.fn.executable(executable) == 0 then
         vim.api.nvim_err_writeln(
-            "Tried to connect to the Teamtype daemon, but `"
+            "Tried to connect to the TeamTypeV daemon, but `"
                 .. executable
                 .. "` executable was not found. Make sure that is in your PATH."
         )
@@ -63,7 +63,7 @@ function M.connect(cmd, directory, dispatchers)
         connection = vim.lsp.rpc.start(cmd, dispatchers, extra_spawn_params)
     end
 
-    print("Connected to Teamtype daemon!")
+    print("Connected to TeamTypeV daemon!")
 
     local result = { connection = connection }
     setmetatable(result, { __index = Connection })

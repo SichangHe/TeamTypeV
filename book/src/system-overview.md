@@ -6,8 +6,9 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # System overview
+(authored by agents unless marked 🧑)
 
-Teamtype is a system for real-time local-first collaboration on text files, where
+TeamTypeV is a system for real-time local-first collaboration on text files, where
 - *real-time* means that edits and cursor movements should appear immediately while you are in a connection with your peer
 - *local-first* means that it's also possible to continue working on the project while you're (temporarily) offline
 
@@ -28,14 +29,14 @@ system |                  system |
 
 ## Text editor
 
-Text editors (with an installed Teamtype plugin) is what users most directly communicate with.
+Text editors (with an installed TeamTypeV plugin) is what users most directly communicate with.
 If they make a change to a file, the editor instantly communicates every single character edit to the daemon.
 
 The plugins also display other peoples' cursors in real-time.
 
 ## Daemon
 
-On each participant's computer, there's a Teamtype daemon, keeping the file's content in a data structure called "CRDT".
+On each participant's computer, there's a TeamTypeV daemon, keeping the file's content in a data structure called "CRDT".
 
 The daemon collects changes being communicated by the connected editor, and syncs them with other peers.
 If conflicts arise, because two edits happened at the same time, they will be resolved by the daemon automatically.

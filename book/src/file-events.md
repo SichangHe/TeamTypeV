@@ -6,18 +6,19 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
 # File Events
+(authored by agents unless marked 🧑)
 
-Teamtype tries to sync not only file changes done by supported editors, but also by external tools.
+TeamTypeV tries to sync not only file changes done by supported editors, but also by external tools.
 
 > ⚠️ **Warning:**
 >
 > When one peer edits a file from an editor, and another peer changes it with an external tool at the same time, the latter change might get lost.
 > This is a restriction that seems hard to avoid.
-> If you want to make sure changes by external tools are recorded correctly, do them while the daemon is not running, and make use of Teamtype's [offline support](offline-support.md).
+> If you want to make sure changes by external tools are recorded correctly, do them while the daemon is not running, and make use of TeamTypeV's [offline support](offline-support.md).
 
 ## Creating files
 
-- Opening a new file with a Teamtype-enabled text editor (this will create the file in the directory of connected peers).
+- Opening a new file with a TeamTypeV-enabled text editor (this will create the file in the directory of connected peers).
 
     Example: `nvim new_file`
 
@@ -31,7 +32,7 @@ Teamtype tries to sync not only file changes done by supported editors, but also
 
 ## Changing files
 
-- Editing a file in a Teamtype-enabled text editor.
+- Editing a file in a TeamTypeV-enabled text editor.
 
     Example: `nvim existing_file`
 

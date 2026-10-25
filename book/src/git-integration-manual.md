@@ -8,16 +8,16 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 # Independent local repositories
 (authored by agents unless marked 🧑)
 
-Joiners normally use [forwarded Git commands](git-integration-synchronized.md), with the repository on the sharer. The manual workflow below applies only if you deliberately keep separate repositories and invoke ordinary local Git without Teamtype's wrapper. Version-control metadata is always excluded from synchronization; `--no-sync-vcs` is a deprecated no-op.
+Joiners normally use [forwarded Git commands](git-integration-synchronized.md), with the repository on the sharer. The manual workflow below applies only if you deliberately keep separate repositories and invoke ordinary local Git without TeamTypeV's wrapper. Version-control metadata is always excluded from synchronization; `--no-sync-vcs` is a deprecated no-op.
 
 For the workflows below, we assume that you already have an established Git repository among the collaborating peers.
 
-## How Teamtype and Git interact
+## How TeamTypeV and Git interact
 
-Teamtype tracks changes that you make to files in editors with a Teamtype plugin, and with [external tools](file-events.md).
+TeamTypeV tracks changes that you make to files in editors with a TeamTypeV plugin, and with [external tools](file-events.md).
 
-However, any change to the `.git` directory and the staging area (which is in fact also tracked in the `.git` repository) is *ignored* by Teamtype by default.
-This means that in this mode, Teamtype does not sync
+However, any change to the `.git` directory and the staging area (which is in fact also tracked in the `.git` repository) is *ignored* by TeamTypeV by default.
+This means that in this mode, TeamTypeV does not sync
 - commits you create,
 - files that you stage or unstage, or
 - changes you're making to the HEAD.
@@ -64,7 +64,7 @@ git push
 ### Other peers
 
 1. Any other peer can then fetch the changes without applying them.
-    Note: The changes *are* already applied to their working tree, through Teamtype.
+    Note: The changes *are* already applied to their working tree, through TeamTypeV.
 
     ```bash
     git fetch

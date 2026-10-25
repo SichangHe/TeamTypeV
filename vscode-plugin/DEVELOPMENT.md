@@ -5,13 +5,14 @@ SPDX-FileCopyrightText: 2024 zormit <nt4u@kpvn.de>
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
-# VS Code Teamtype plugin
+# VS Code TeamTypeV plugin
+(authored by agents unless marked 🧑)
 
 ## How to run locally
 
 1. `npm install`
 2. Open this directory in VS Code, then start debugging with F5.
-3. Open a file in a Teamtype-enabled directory to launch the plugin.
+3. Open a file in a TeamTypeV-enabled directory to launch the plugin.
 
 ## How to run locally without "host"
 

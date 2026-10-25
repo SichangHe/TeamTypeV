@@ -108,7 +108,7 @@ class InstallTests(unittest.TestCase):
                 self.assert_installed(self.run_install(), directory)
                 self.assertEqual(
                     (self.root / "url").read_text().strip(),
-                    f"https://github.com/SichangHe/teamtype--teamtype/releases/download/nightly/teamtype-{platform}.tar.gz",
+                    f"https://github.com/SichangHe/TeamTypeV/releases/download/nightly/teamtype-{platform}.tar.gz",
                 )
 
     def test_custom_directory_and_release_preserve_spaces(self) -> None:

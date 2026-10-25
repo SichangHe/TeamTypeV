@@ -90,18 +90,18 @@ class Client {
 
         this.process.on("error", (err) => {
             vscode.window.showErrorMessage(
-                `Failed to start Teamtype client. Maybe the command is not in your PATH?: ${err.message}`,
+                `Failed to start TeamTypeV client. Maybe the command is not in your PATH?: ${err.message}`,
             )
         })
 
         this.process.on("exit", () => {
             vscode.window.showErrorMessage(
-                `Connection to Teamtype daemon in '${directory}' lost or failed to initiate. Maybe there's no daemon running there?`,
+                `Connection to TeamTypeV daemon in '${directory}' lost or failed to initiate. Maybe there's no daemon running there?`,
             )
         })
 
         if (!this.process.stdout || !this.process.stdin) {
-            die("Failed to spawn Teamtype client (no stdin/stdout)")
+            die("Failed to spawn TeamTypeV client (no stdin/stdout)")
         }
 
         this.connection = rpc.createMessageConnection(
@@ -196,7 +196,7 @@ class SharedFileSystem implements vscode.FileSystemProvider {
             const document = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri.toString())
             const client = document && clientsForDocument(document)[0]
             if (!client || client.process.exitCode !== null || client.process.signalCode !== null) {
-                throw vscode.FileSystemError.Unavailable("Teamtype daemon is disconnected")
+                throw vscode.FileSystemError.Unavailable("TeamTypeV daemon is disconnected")
             }
             await client.connection.sendRequest("save", {uri: protocolUri(document!)})
         })
@@ -380,7 +380,7 @@ async function processEditFromDaemon(client: Client, edit: Edit) {
             }
         })
     } catch (e) {
-        vscode.window.showErrorMessage(`Error while processing edit from Teamtype daemon: ${e}`)
+        vscode.window.showErrorMessage(`Error while processing edit from TeamTypeV daemon: ${e}`)
     }
 }
 
@@ -448,7 +448,7 @@ async function activateConfigForTextDocument(name: string, document: vscode.Text
     try {
         await openSharedDocument(name, document, directory)
     } catch (error) {
-        vscode.window.showErrorMessage(`Teamtype could not transfer this file: ${error}`)
+        vscode.window.showErrorMessage(`TeamTypeV could not transfer this file: ${error}`)
     } finally {
         opening.delete(key)
     }
@@ -460,7 +460,7 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
     if (!nativeCleanContents.has(original)) {
         await prepareNativeHandoff(original)
         vscode.window.showErrorMessage(
-            "Teamtype cannot safely merge this dirty buffer because its original clean text is unknown. Its unsaved edits remain in this read-only tab; reconcile them with the file on disk before sharing.",
+            "TeamTypeV cannot safely merge this dirty buffer because its original clean text is unknown. Its unsaved edits remain in this read-only tab; reconcile them with the file on disk before sharing.",
         )
         return
     }
@@ -469,7 +469,7 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
         await prepareNativeHandoff(original)
         if (original.isDirty) {
             vscode.window.showErrorMessage(
-                "Teamtype: this file is already shared. Copy the native tab's unsaved edits into the shared tab; the native tab is now read-only.",
+                "TeamTypeV: this file is already shared. Copy the native tab's unsaved edits into the shared tab; the native tab is now read-only.",
             )
             return
         }
@@ -483,7 +483,7 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
         await client.connection.sendRequest("daemonWriter", {})
         await prepareNativeHandoff(original)
     } catch (error) {
-        vscode.window.showErrorMessage(`Teamtype cannot share this file: ${error}`)
+        vscode.window.showErrorMessage(`TeamTypeV cannot share this file: ${error}`)
         return
     }
     rememberNativeCleanContent(original)
@@ -503,7 +503,7 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
     }
     if (original.version !== transferredVersion) {
         vscode.window.showErrorMessage(
-            "Teamtype: the native document changed during transfer. Its edits remain in the read-only native tab; sharing has not started.",
+            "TeamTypeV: the native document changed during transfer. Its edits remain in the read-only native tab; sharing has not started.",
         )
         return
     }
@@ -567,7 +567,7 @@ async function closeNativeDocument(original: vscode.TextDocument) {
             (tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === original.uri.toString(),
         )
     if (tabs.length && !(await vscode.window.tabGroups.close(tabs))) {
-        throw new Error("Teamtype could not close the read-only native tabs; sharing has not started")
+        throw new Error("TeamTypeV could not close the read-only native tabs; sharing has not started")
     }
 }
 
@@ -636,7 +636,7 @@ function processLocalEdit(event: vscode.TextDocumentChangeEvent, lines: string[]
                 // interestingly this seems to block when it can't send
                 client.connection.sendRequest(editType, theEdit).catch((e) => {
                     vscode.window.showErrorMessage(
-                        `Error while sending edit to Teamtype daemon: ${e}. This is probably a bug in the VS Code plugin.`,
+                        `Error while sending edit to TeamTypeV daemon: ${e}. This is probably a bug in the VS Code plugin.`,
                     )
                 })
                 revision.editor += 1
@@ -653,7 +653,7 @@ function processLocalEdit(event: vscode.TextDocumentChangeEvent, lines: string[]
             // document without saving, which will cause VS Code to undo the dirty changes.
             document.save()
         } catch (e) {
-            vscode.window.showErrorMessage(`Error while sending edit to Teamtype daemon: ${e}`)
+            vscode.window.showErrorMessage(`Error while sending edit to TeamTypeV daemon: ${e}`)
         }
     }
 }
@@ -698,7 +698,7 @@ function showCursorNotification() {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    debug("Teamtype extension activated!")
+    debug("TeamTypeV extension activated!")
 
     configurations = vscode.workspace.getConfiguration("teamtype").get<{[key: string]: Configuration}>("configs", {})
 

@@ -2,13 +2,13 @@
 
 This plugin adds real-time collaborative editing functionality to Neovim.
 You can use it for pair programming or note-taking, for example. It is mainly
-meant to be used with Teamtype, but can also be configured to work with other
+meant to be used with TeamTypeV, but can also be configured to work with other
 collaborative software speaking the same protocol.
 
 ==============================================================================
 INSTALLATION                                             *teamtype-installation*
 
-See main README at |https://github.com/teamtype/teamtype-nvim|.
+See |https://github.com/SichangHe/TeamTypeV/blob/live-multi-editor/nvim-plugin/README.md|.
 
 ==============================================================================
 CONFIGURATION                                           *teamtype-configuration*
@@ -18,7 +18,7 @@ identified with a name and markers or a function used to identify what
 directory(s) the config should be active for. This enables separate settings
 per-project or per group of projects.
 
-A default configuration for connecting to Teamtype daemons is provided. To
+A default configuration for connecting to TeamTypeV daemons is provided. To
 replace the defaults replace the whole config named 'teamtype'. To provide
 alternate configurations for some projects, add new config tables.
 
@@ -26,7 +26,7 @@ config({name}, {cfg})                                        *teamtype.config()*
     Set or update the configuration for a client.
 
     Examples:
-    • The default config attempts to connect to a default Teamtype instance in
+    • The default config attempts to connect to a default TeamTypeV instance in
       directories that have a `.teamtype` directory: >lua
         teamtype.config("teamtype", {
             cmd = { "teamtype", "client" },
@@ -105,7 +105,7 @@ USAGE                                                           *teamtype-usage*
 ==============================================================================
 STATUS LINE                                               *teamtype-status-line*
 
-Teamtype exposes a `require("teamtype").status()` function, which displays a
+TeamTypeV exposes a `require("teamtype").status()` function, which displays a
 brief summary of connection status and where other people are editing. You can
 add this to your status line by, for example, using a plugin like lualine and
 a lualine configuration snippet like this:

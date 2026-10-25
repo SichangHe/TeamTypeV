@@ -165,13 +165,13 @@ nvim *ARGS: build-test
         --cmd 'runtime plugin/teamtype.lua' \
         {{ maybe-pass(ARGS) }}
 
-# This task will build (if necessary) and run the Teamtype CLI via the development version from this repository.
+# This task will build (if necessary) and run the TeamTypeV CLI via the development version from this repository.
 # This is especially useful for manual testing and can be used from anywhere by invoking the Justfile externally,
 # e.g. with an alias such as:
 #
 #     alias teamtype='just --justfile ~/path/to/teamtype/Justfile teamtype'
 #
-# Build and run Teamtype for testing (can be used from outside the project).
+# Build and run TeamTypeV for testing (can be used from outside the project).
 [no-cd]
 teamtype *ARGS: build-test
     $TEAMTYPE_BINARY {{ maybe-pass(ARGS) }}
@@ -197,17 +197,17 @@ read-release-url(semver) := shell(gh + f" release view v{{semver}} --json url --
 [script]
 prepare-release-toot semver:
     cat <<- EOF
-    	━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    	Happy to announce the v{{ semver }} release of Teamtype! 🎉
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Happy to announce the v{{ semver }} release of TeamTypeV! 🎉
 
-    	Teamtype enables real-time peer-to-peer collaborative editing of local files using your own text editor.
+    TeamTypeV enables real-time peer-to-peer collaborative editing of local files using your own text editor.
 
-    	Release: {{ read-release-url(semver) }}
+    Release: {{ read-release-url(semver) }}
 
-    	Project: https://github.com/teamtype/teamtype
+    Project: https://github.com/SichangHe/TeamTypeV
 
-    	Highlights:
-    	- 
-    	- 
-    	━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Highlights:
+    -
+    -
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     EOF

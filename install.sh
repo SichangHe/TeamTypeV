@@ -4,13 +4,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Installs the `teamtype` command from this fork's GitHub releases:
-#     curl -fsSL https://raw.githubusercontent.com/SichangHe/teamtype--teamtype/live-multi-editor/install.sh | sh
+#     curl -fsSL https://raw.githubusercontent.com/SichangHe/TeamTypeV/live-multi-editor/install.sh | sh
 # Options, after `sh -s --` when piped:
 #     --dir DIR      install into DIR instead of ~/.local/bin
 #     --release TAG  install release TAG instead of `nightly`
 set -eu
 
-repo=SichangHe/teamtype--teamtype
+repo=SichangHe/TeamTypeV
 dir="$HOME/.local/bin"
 release=nightly
 while [ $# -gt 0 ]; do

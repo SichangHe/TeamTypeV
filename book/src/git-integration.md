@@ -19,7 +19,7 @@ teamtype git commit -m "Update notes"
 
 These commands run on the sharer after your preceding edits arrive there. All participants use the same branches and staging area. A checkout, reset, merge, pull, or stash changes the sharer's files, which synchronize to everyone.
 
-Joiners need no `.git`. Teamtype never synchronizes version-control directories. Both `--sync-vcs` and `--no-sync-vcs` remain accepted as deprecated no-ops.
+Joiners need no `.git`. TeamTypeV never synchronizes version-control directories. Both `--sync-vcs` and `--no-sync-vcs` remain accepted as deprecated no-ops.
 
 Joiners must be trusted. They can change shared files that the sharer later executes, including build scripts and Git hooks configured to use shared files. Forwarding rejects Git global options that change configuration, execution, or repository paths, and clears inherited `GIT_*` variables. This is not a security boundary against a malicious joiner: Git subcommands, repository configuration, and aliases retain the sharer's authority.
 

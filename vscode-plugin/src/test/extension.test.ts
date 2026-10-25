@@ -195,7 +195,7 @@ suite("Extension Test Suite", () => {
 
     suiteSetup(async function () {
         this.timeout(180000)
-        console.log(`Teamtype live work: ${root}`)
+        console.log(`TeamTypeV live work: ${root}`)
         assert.ok(fs.existsSync(bin), `teamtype binary not found: ${bin}`)
         for (const dir of [dirA, dirB, dirC]) {
             fs.mkdirSync(path.join(dir, ".teamtype"), {recursive: true})
@@ -228,8 +228,8 @@ suite("Extension Test Suite", () => {
 
     test("edits sync between VS Code and a second daemon", async function () {
         this.timeout(240000)
-        const extension = vscode.extensions.getExtension("teamtype.teamtype")
-        assert.ok(extension, "Teamtype extension is not installed in the test host")
+        const extension = vscode.extensions.getExtension("SichangHe.teamtype")
+        assert.ok(extension, "TeamTypeV extension is not installed in the test host")
         await extension.activate()
         await waitFor("VS Code uses the daemon filesystem", () =>
             vscode.workspace.textDocuments.some(
@@ -319,14 +319,14 @@ suite("Extension Test Suite", () => {
             const git = (...args: string[]) => run("git", ["-C", localDir, ...args])
             await saveBuffer()
             await git("init", "-b", "main")
-            await git("config", "user.name", "Teamtype Test")
+            await git("config", "user.name", "TeamTypeV Test")
             await git("config", "user.email", "test@example.invalid")
             await git("add", "file.txt")
             await git("commit", "-m", "initial")
             const initial = await bufferText()
             const upstream = path.join(root, `upstream-${editorName}`)
             await run("git", ["clone", localDir, upstream])
-            await run("git", ["-C", upstream, "config", "user.name", "Teamtype Test"])
+            await run("git", ["-C", upstream, "config", "user.name", "TeamTypeV Test"])
             await run("git", ["-C", upstream, "config", "user.email", "test@example.invalid"])
             await git("remote", "add", "upstream", upstream)
 
