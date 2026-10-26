@@ -21,11 +21,10 @@ use crate::wormhole::get_secret_address_from_wormhole;
 
 pub const DOC_FILE: &str = "doc";
 pub const DEFAULT_SOCKET_NAME: &str = "socket";
-pub const CONFIG_DIR: &str = ".teamtype";
+// 🧑 "Treat us as a separate project. We can do it differently to the dot files, etc. too"
+pub const CONFIG_DIR: &str = ".teamtypev";
 pub const CONFIG_FILE: &str = "config";
 pub const BOOKMARK_FILE: &str = "bookmark";
-// TODO: Remove this after a while.
-pub const LEGACY_CONFIG_DIR: &str = ".ethersync";
 
 const EMIT_JOIN_CODE_DEFAULT: bool = true;
 const EMIT_SECRET_ADDRESS_DEFAULT: bool = false;
@@ -50,7 +49,7 @@ pub struct AppConfig {
     pub iroh_dns_domain: Option<String>,
     pub iroh_pkarr_relay: Option<String>,
     pub username: Option<String>,
-    /// A local TCP port that guests can reach with `teamtype tunnel`.
+    /// A local TCP port that guests can reach with `teamtypev tunnel`.
     pub forward_port: Option<u16>,
 }
 
@@ -153,7 +152,7 @@ impl AppConfig {
                 Peer::SecretAddress(secret_address)
             }
             None => {
-                bail!("Missing join code, and no peer=<secret address> in .teamtype/config");
+                bail!("Missing join code, and no peer=<secret address> in .teamtypev/config");
             }
         };
         result.peer = Some(peer);
@@ -167,7 +166,7 @@ impl AppConfig {
 }
 
 pub fn store_peer_in_config(directory: &Path, config_file: &Path, peer: &str) -> Result<()> {
-    info!("Storing peer's address in .teamtype/config.");
+    info!("Storing peer's address in .teamtypev/config.");
 
     let content = format!("peer={peer}\n");
     sandbox::write_file(directory, config_file, content.as_bytes())
@@ -185,11 +184,11 @@ pub fn has_git_remote(path: &Path) -> bool {
 }
 
 #[must_use]
-fn teamtype_directory_should_be_ignored_but_isnt(path: &Path) -> bool {
+fn teamtypev_directory_should_be_ignored_but_isnt(path: &Path) -> bool {
     if let Ok(repo) = find_git_repo(path) {
-        let teamtype_dir = path.join(CONFIG_DIR);
+        let teamtypev_dir = path.join(CONFIG_DIR);
         return !repo
-            .is_path_ignored(teamtype_dir)
+            .is_path_ignored(teamtypev_dir)
             .expect("Should have been able to determine ignore state of path");
     }
     false
@@ -230,7 +229,7 @@ fn get_username_from_config_file(general_section: &Properties) -> Option<String>
         .get("username")
         .map(ToString::to_string)
         .map(|username| {
-            info!("Using the username '{username}' from `.teamtype/config` as username, to display next to the cursors other people see.");
+            info!("Using the username '{username}' from `.teamtypev/config` as username, to display next to the cursors other people see.");
             username
         })
 }
@@ -243,7 +242,7 @@ fn get_username_from_git(base_dir: &Path) -> Option<String> {
             &docstr!(format!
                 /// Using the Git username '{username}' as username, to display next to the cursors other people see.
                 /// TeamTypeV uses the Git username as username by default.
-                /// You can set the configuration value `username` in your `.teamtype/config` to override this username.
+                /// You can set the configuration value `username` in your `.teamtypev/config` to override this username.
                 /// You can also use the flag `--username` when using the `share`/`join` subcommands.
             )
         );
@@ -257,7 +256,7 @@ fn get_username_from_fallback_value() -> String {
         "{}",
         &docstr!(format!
             /// Using the fallback value for username '{username}' as username, to display next to the cursors other people see.
-            /// You can set the configuration value `username` in your `.teamtype/config` to override this username.
+            /// You can set the configuration value `username` in your `.teamtypev/config` to override this username.
             /// You can also use the flag `--username` when using the `share`/`join` subcommands.
         )
     );
@@ -310,11 +309,11 @@ fn find_git_repo(path: &Path) -> Result<Repository, GitError> {
     Repository::discover(path)
 }
 
-fn add_teamtype_to_local_gitignore(directory: &Path) -> Result<()> {
+fn add_teamtypev_to_local_gitignore(directory: &Path) -> Result<()> {
     let mut ignore_file_path = directory.join(CONFIG_DIR);
     ignore_file_path.push(".gitignore");
 
-    // It's very unlikely that .teamtype/.gitignore will already contain something, but let's
+    // It's very unlikely that .teamtypev/.gitignore will already contain something, but let's
     // still append.
     let bytes_in = sandbox::read_file(directory, &ignore_file_path).unwrap_or_default();
     // TODO: use String::from_utf8
@@ -331,10 +330,10 @@ fn add_teamtype_to_local_gitignore(directory: &Path) -> Result<()> {
 }
 
 /// Keeps local TeamTypeV state out of Git on both sharers and joiners.
-pub fn ensure_teamtype_is_ignored(directory: &Path) -> Result<()> {
+pub fn ensure_teamtypev_is_ignored(directory: &Path) -> Result<()> {
     let ignore_file = directory.join(CONFIG_DIR).join(".gitignore");
-    if !ignore_file.exists() || teamtype_directory_should_be_ignored_but_isnt(directory) {
-        add_teamtype_to_local_gitignore(directory)?;
+    if !ignore_file.exists() || teamtypev_directory_should_be_ignored_but_isnt(directory) {
+        add_teamtypev_to_local_gitignore(directory)?;
     }
     Ok(())
 }

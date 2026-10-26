@@ -61,7 +61,7 @@ async function scenario(knownBaseline, cleanReload = false) {
         },
     })
     vm.runInContext(compiled, context)
-    await context.openSharedDocument("teamtype", original, "/")
+    await context.openSharedDocument("teamtypev", original, "/")
     if (cleanReload) {
         assert.equal(sent.find(([method]) => method === "open")[1].content, "base\noutside\n")
         assert.equal(sent.filter(([method]) => method === "edit").length, 0)

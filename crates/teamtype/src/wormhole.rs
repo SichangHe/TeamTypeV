@@ -34,7 +34,7 @@ pub async fn put_secret_address_into_wormhole(address: &str, magic_wormhole_rela
                 &docstr!(format!
                         /// One other person can use this to connect to you:
                         ///
-                        ///    teamtype join {code}
+                        ///    teamtypev join {code}
                         ///
                 )
             );
@@ -68,7 +68,7 @@ pub async fn get_secret_address_from_wormhole(
 fn build_magic_wormhole_config(
     magic_wormhole_relay: Option<String>,
 ) -> AppConfig<transfer::AppVersion> {
-    let mut config = transfer::APP_CONFIG.id(AppID::new("teamtype"));
+    let mut config = transfer::APP_CONFIG.id(AppID::new("teamtypev"));
 
     if let Some(url) = magic_wormhole_relay {
         info!("Using non-default Magic Wormhole relay url {}", url);

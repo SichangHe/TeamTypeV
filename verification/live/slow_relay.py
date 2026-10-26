@@ -65,5 +65,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    _ = os.environ.setdefault("RUST_LOG", "info,teamtype::peer=debug,iroh=debug")
+    _ = os.environ.setdefault("RUST_LOG", "info,teamtypev::peer=debug,iroh=debug")
     asyncio.run(main())

@@ -110,7 +110,7 @@ class Client {
         )
 
         this.connection.onNotification("edit", (edit) => processEditFromDaemon(this, edit))
-        this.connection.onNotification("cursor", processCursorFromDaemon)
+        this.connection.onNotification("cursor", (cursor) => mutex.runExclusive(() => processCursorFromDaemon(cursor)))
 
         // Start the connection
         this.connection.listen()
@@ -245,14 +245,14 @@ function charOffsetToUTF16CodeUnitOffset(charOffset: number, content: string): n
     return utf16Offset
 }
 
-function vsCodeRangeToTeamtypeRange(content: string[], range: vscode.Range): Range {
+function vsCodeRangeToTeamtypevRange(content: string[], range: vscode.Range): Range {
     return {
-        start: vsCodePositionToTeamtypePosition(content, range.start),
-        end: vsCodePositionToTeamtypePosition(content, range.end),
+        start: vsCodePositionToTeamtypevPosition(content, range.start),
+        end: vsCodePositionToTeamtypevPosition(content, range.end),
     }
 }
 
-function vsCodePositionToTeamtypePosition(content: string[], position: vscode.Position): Position {
+function vsCodePositionToTeamtypevPosition(content: string[], position: vscode.Position): Position {
     let lineText = content[position.line]
     return {
         line: position.line,
@@ -260,21 +260,21 @@ function vsCodePositionToTeamtypePosition(content: string[], position: vscode.Po
     }
 }
 
-function teamtypePositionToVSCodePosition(document: vscode.TextDocument, position: Position): vscode.Position {
+function teamtypevPositionToVSCodePosition(document: vscode.TextDocument, position: Position): vscode.Position {
     let lineText = document.lineAt(position.line).text
     return new vscode.Position(position.line, charOffsetToUTF16CodeUnitOffset(position.character, lineText))
 }
 
-function teamtypeRangeToVSCodeRange(document: vscode.TextDocument, range: Range): vscode.Range {
+function teamtypevRangeToVSCodeRange(document: vscode.TextDocument, range: Range): vscode.Range {
     return new vscode.Range(
-        teamtypePositionToVSCodePosition(document, range.start),
-        teamtypePositionToVSCodePosition(document, range.end),
+        teamtypevPositionToVSCodePosition(document, range.start),
+        teamtypevPositionToVSCodePosition(document, range.end),
     )
 }
 
-function teamtypeDeltasToVSCodeTextEdits(document: vscode.TextDocument, deltas: Delta[]): vscode.TextEdit[] {
+function teamtypevDeltasToVSCodeTextEdits(document: vscode.TextDocument, deltas: Delta[]): vscode.TextEdit[] {
     return deltas.map((delta) => {
-        let range = teamtypeRangeToVSCodeRange(document, delta.range)
+        let range = teamtypevRangeToVSCodeRange(document, delta.range)
         return vscode.TextEdit.replace(range, delta.replacement)
     })
 }
@@ -290,7 +290,7 @@ function openCurrentTextDocuments() {
 }
 
 function documentForUri(uri: string): vscode.TextDocument | undefined {
-    return vscode.workspace.textDocuments.find((doc) => doc.uri.scheme === "teamtype" && protocolUri(doc) === uri)
+    return vscode.workspace.textDocuments.find((doc) => doc.uri.scheme === "teamtypev" && protocolUri(doc) === uri)
 }
 
 // Apply given TextEdits to content of the TextDocument, and return the resulting content.
@@ -335,7 +335,7 @@ async function processEditFromDaemon(client: Client, edit: Edit) {
 
             const document = documentForUri(uri)
             if (document) {
-                let textEdits = teamtypeDeltasToVSCodeTextEdits(document, edit.delta)
+                let textEdits = teamtypevDeltasToVSCodeTextEdits(document, edit.delta)
                 const content = contentAfterEdits(document, textEdits)
                 if (content === document.getText()) {
                     revision.daemon += 1
@@ -393,7 +393,7 @@ async function processCursorFromDaemon(cursor: CursorFromDaemon) {
         let selections: vscode.DecorationOptions[] = []
         if (document) {
             selections = cursor.ranges
-                .map((r) => teamtypeRangeToVSCodeRange(document, r))
+                .map((r) => teamtypevRangeToVSCodeRange(document, r))
                 .map(vsCodeRangeToSelection)
                 .map((s) => {
                     return {
@@ -404,17 +404,17 @@ async function processCursorFromDaemon(cursor: CursorFromDaemon) {
         }
         setCursor(cursor.userid, cursor.name || "anonymous", document?.uri ?? vscode.Uri.parse(uri), selections)
     } catch {
-        // If we couldn't convert teamtypeRangeToVSCodeRange, it's probably because
+        // If we couldn't convert teamtypevRangeToVSCodeRange, it's probably because
         // we received the cursor message before integrating the edits, typing at the end of a line.
         // In practice, this isn't a problem, as the cursor decoration is pushed to the back automatically.
-        // TODO: Make the teamtypeRangeToVSCodeRange function still return a proper range?
+        // TODO: Make the teamtypevRangeToVSCodeRange function still return a proper range?
     }
 }
 
 async function applyEdit(client: Client, document: vscode.TextDocument, edit: Edit): Promise<boolean> {
     let edits = []
     for (const delta of edit.delta) {
-        const range = teamtypeRangeToVSCodeRange(document, delta.range)
+        const range = teamtypevRangeToVSCodeRange(document, delta.range)
         let edit = new vscode.TextEdit(range, delta.replacement)
         debug(`Edit applied to document ${decodeURI(document.uri.toString())}`)
         edits.push(edit)
@@ -488,7 +488,7 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
     }
     rememberNativeCleanContent(original)
     const initialContent = nativeCleanContents.get(original)!
-    const sharedUri = original.uri.with({scheme: "teamtype"})
+    const sharedUri = original.uri.with({scheme: "teamtypev"})
     const transferredContent = original.getText()
     const transferredVersion = original.version
     sharedContents.set(sharedUri.toString(), Buffer.from(initialContent, "utf8"))
@@ -595,7 +595,7 @@ function clientsForDocument(document: vscode.TextDocument): Client[] {
 }
 
 function clientTracksDocument(client: Client, document: vscode.TextDocument): boolean {
-    return document.uri.scheme === "teamtype" && Object.keys(client.ot_states).includes(protocolUri(document))
+    return document.uri.scheme === "teamtypev" && Object.keys(client.ot_states).includes(protocolUri(document))
 }
 
 function processUserClose(document: vscode.TextDocument) {
@@ -630,7 +630,7 @@ function processLocalEdit(event: vscode.TextDocumentChangeEvent, lines: string[]
 
             let revision = client.ot_states[uri].revision
 
-            let edits = vsCodeChangeEventToTeamtypeEdits(client, event)
+            let edits = vsCodeChangeEventToTeamtypevEdits(client, event)
 
             for (const theEdit of edits) {
                 // interestingly this seems to block when it can't send
@@ -663,13 +663,13 @@ function processSelection(event: vscode.TextEditorSelectionChangeEvent) {
         let uri = protocolUri(event.textEditor.document)
         let content = client.ot_states[uri].content
         let ranges = event.selections.map((s) => {
-            return vsCodeRangeToTeamtypeRange(content, s)
+            return vsCodeRangeToTeamtypevRange(content, s)
         })
         client.connection.sendNotification(cursorType, {uri, ranges})
     }
 }
 
-function vsCodeChangeEventToTeamtypeEdits(client: Client, event: vscode.TextDocumentChangeEvent): Edit[] {
+function vsCodeChangeEventToTeamtypevEdits(client: Client, event: vscode.TextDocumentChangeEvent): Edit[] {
     let document = event.document
     let uri = protocolUri(document)
 
@@ -681,14 +681,14 @@ function vsCodeChangeEventToTeamtypeEdits(client: Client, event: vscode.TextDocu
         {
             uri,
             revision: revision.daemon,
-            delta: event.contentChanges.map((change) => vsCodeChangeToTeamtypeDelta(content, change)),
+            delta: event.contentChanges.map((change) => vsCodeChangeToTeamtypevDelta(content, change)),
         },
     ]
 }
 
-function vsCodeChangeToTeamtypeDelta(content: string[], change: vscode.TextDocumentContentChangeEvent): Delta {
+function vsCodeChangeToTeamtypevDelta(content: string[], change: vscode.TextDocumentContentChangeEvent): Delta {
     return {
-        range: vsCodeRangeToTeamtypeRange(content, change.range),
+        range: vsCodeRangeToTeamtypevRange(content, change.range),
         replacement: change.text,
     }
 }
@@ -700,16 +700,17 @@ function showCursorNotification() {
 export function activate(context: vscode.ExtensionContext) {
     debug("TeamTypeV extension activated!")
 
-    configurations = vscode.workspace.getConfiguration("teamtype").get<{[key: string]: Configuration}>("configs", {})
+    // 🧑 "Treat us as a separate project."
+    configurations = vscode.workspace.getConfiguration("teamtypev").get<{[key: string]: Configuration}>("configs", {})
 
     context.subscriptions.push(
-        vscode.workspace.registerFileSystemProvider("teamtype", new SharedFileSystem(), {isCaseSensitive: true}),
+        vscode.workspace.registerFileSystemProvider("teamtypev", new SharedFileSystem(), {isCaseSensitive: true}),
         vscode.workspace.onDidChangeTextDocument(processUserEdit),
         vscode.workspace.onDidOpenTextDocument(processUserOpen),
         vscode.workspace.onDidCloseTextDocument(processUserClose),
         vscode.window.onDidChangeTextEditorSelection(processSelection),
         vscode.window.onDidChangeActiveTextEditor(drawCursors),
-        vscode.commands.registerCommand("teamtype.showCursors", showCursorNotification),
+        vscode.commands.registerCommand("teamtypev.showCursors", showCursorNotification),
     )
 
     openCurrentTextDocuments()

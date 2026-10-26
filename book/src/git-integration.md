@@ -11,10 +11,10 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 The sharer owns the Git repository. From a joined directory, run:
 
 ```sh
-teamtype git status
-teamtype git diff
-teamtype git add notes.md
-teamtype git commit -m "Update notes"
+teamtypev git status
+teamtypev git diff
+teamtypev git add notes.md
+teamtypev git commit -m "Update notes"
 ```
 
 These commands run on the sharer after your preceding edits arrive there. All participants use the same branches and staging area. A checkout, reset, merge, pull, or stash changes the sharer's files, which synchronize to everyone.

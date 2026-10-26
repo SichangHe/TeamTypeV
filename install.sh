@@ -3,50 +3,63 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Installs the `teamtype` command from this fork's GitHub releases:
+# Installs the `teamtypev` command from this project's GitHub releases:
 #     curl -fsSL https://raw.githubusercontent.com/SichangHe/TeamTypeV/live-multi-editor/install.sh | sh
 # Options, after `sh -s --` when piped:
 #     --dir DIR      install into DIR instead of ~/.local/bin
 #     --release TAG  install release TAG instead of `nightly`
-#     --editor NAME  set up nvim, emacs, code, or codium; `none` skips setup
+#     --editor NAME  set up nvim, emacs, code, or codium; repeat for more editors
 #     --no-editor    skip the interactive editor menu
-set -eu
+set -efu
 
 repo=SichangHe/TeamTypeV
 dir="$HOME/.local/bin"
 release=nightly
-editor=auto
+editors=
+prompt=1
+# 🧑 "Also, make it s.t. the script allows setting up more than one editors"
+add_editor() {
+    case "$1" in
+    nvim | emacs | code | codium) ;;
+    *) echo "teamtypev install: unknown editor $1" >&2; exit 1 ;;
+    esac
+    case " $editors " in
+    *" $1 "*) ;;
+    *) editors="$editors $1" ;;
+    esac
+}
 while [ $# -gt 0 ]; do
     case "$1" in
     --dir) dir=$2; shift 2 ;;
     --release) release=$2; shift 2 ;;
-    --editor) editor=$2; shift 2 ;;
-    --no-editor) editor=none; shift ;;
+    --editor)
+        prompt=0
+        if [ "$2" = none ]; then editors=; else add_editor "$2"; fi
+        shift 2
+        ;;
+    --no-editor) editors=; prompt=0; shift ;;
     -h | --help)
-        echo "Usage: install.sh [--dir DIR] [--release TAG] [--editor NAME | --no-editor]"
+        echo "Usage: install.sh [--dir DIR] [--release TAG] [--editor NAME ... | --no-editor]"
         echo "Defaults: ~/.local/bin, nightly; editor menu when run in a terminal."
         echo "Editors: nvim, emacs, code (VS Code), codium (VSCodium), none."
+        echo "Repeat --editor for multiple editors; --no-editor or --editor none clears the selection."
         exit 0
         ;;
-    *) echo "teamtype install: unknown option $1" >&2; exit 1 ;;
+    *) echo "teamtypev install: unknown option $1" >&2; exit 1 ;;
     esac
 done
-case "$editor" in
-auto | none | nvim | emacs | code | codium) ;;
-*) echo "teamtype install: unknown editor $editor" >&2; exit 1 ;;
-esac
-
 case "$(uname -s)/$(uname -m)" in
 Linux/x86_64 | Linux/amd64) platform=x86_64-linux-static ;;
 Linux/aarch64 | Linux/arm64) platform=aarch64-linux-static ;;
 Darwin/*) platform=universal-apple-darwin ;;
 *)
-    echo "teamtype install: no prebuilt binary for $(uname -s) $(uname -m)" >&2
+    echo "teamtypev install: no prebuilt binary for $(uname -s) $(uname -m)" >&2
     exit 1
     ;;
 esac
 
-url="https://github.com/$repo/releases/download/$release/teamtype-$platform.tar.gz"
+# 🧑 "Change the binary name etc. so we don't have conflicts with teamtype"
+url="https://github.com/$repo/releases/download/$release/teamtypev-$platform.tar.gz"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 download() {
@@ -57,14 +70,14 @@ download() {
         wget -qO "$2" "$1"
     fi
 }
-download "$url" "$work/teamtype.tar.gz"
-tar -xzf "$work/teamtype.tar.gz" -C "$work" teamtype
+download "$url" "$work/teamtypev.tar.gz"
+tar -xzf "$work/teamtypev.tar.gz" -C "$work" teamtypev
 mkdir -p "$dir"
 dir=$(cd "$dir" && pwd)
-# Replace rather than overwrite, so that a running teamtype keeps its file.
-mv -f "$work/teamtype" "$dir/teamtype"
-chmod 755 "$dir/teamtype"
-echo "Installed $("$dir/teamtype" --version) to $dir/teamtype"
+# Replace rather than overwrite, so that a running teamtypev keeps its file.
+mv -f "$work/teamtypev" "$dir/teamtypev"
+chmod 755 "$dir/teamtypev"
+echo "Installed $("$dir/teamtypev" --version) to $dir/teamtypev"
 
 case ":$PATH:" in
 *":$dir:"*) ;;
@@ -72,40 +85,58 @@ case ":$PATH:" in
 esac
 
 # 🧑 "Maybe the installation script not only installs the binary, but also interactively give editor setup"
-if [ "$editor" = auto ]; then
-    editor=none
+if [ "$prompt" = 1 ]; then
     if [ -t 1 ] && ( : </dev/tty ) 2>/dev/null; then
         exec 3<>/dev/tty
-        printf '\nSet up an editor? [1] Neovim [2] Emacs [3] VS Code [4] VSCodium [Enter] Skip: ' >&3
-        read -r choice <&3 || choice=
-        case "$choice" in
-        1 | nvim) editor=nvim ;;
-        2 | emacs) editor=emacs ;;
-        3 | code) editor=code ;;
-        4 | codium) editor=codium ;;
-        "") ;;
-        *) echo "No editor selected. Rerun with --editor NAME to set one up." ;;
-        esac
+        printf '\nSet up editors (space-separated choices)? [1] Neovim [2] Emacs [3] VS Code [4] VSCodium [Enter] Skip: ' >&3
+        read -r choices <&3 || choices=
+        for choice in $choices; do
+            case "$choice" in
+            1) choice=nvim ;;
+            2) choice=emacs ;;
+            3) choice=code ;;
+            4) choice=codium ;;
+            esac
+            add_editor "$choice"
+        done
         exec 3>&-
     fi
 fi
 
 assets="https://github.com/$repo/releases/download/$release"
+for editor in $editors; do
 case "$editor" in
 nvim)
-    plugin="${XDG_DATA_HOME:-$HOME/.local/share}/${NVIM_APPNAME:-nvim}/site/pack/plugins/start/teamtype"
-    download "$assets/teamtype-nvim.tar.gz" "$work/nvim.tar.gz"
+    plugin="${XDG_DATA_HOME:-$HOME/.local/share}/${NVIM_APPNAME:-nvim}/site/pack/plugins/start/teamtypev"
+    download "$assets/teamtypev-nvim.tar.gz" "$work/nvim.tar.gz"
     mkdir -p "$plugin"
     tar -xzf "$work/nvim.tar.gz" -C "$plugin"
     escaped_dir=$(printf '%s' "$dir" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    printf 'vim.env.PATH = "%s:" .. (vim.env.PATH or "")\n' "$escaped_dir" >"$plugin/plugin/00-teamtype-path.lua"
-    echo "Installed Neovim plugin to $plugin. Restart Neovim and run :TeamtypeInfo."
+    printf 'vim.env.PATH = "%s:" .. (vim.env.PATH or "")\n' "$escaped_dir" >"$plugin/plugin/00-teamtypev-path.lua"
+    config="${XDG_CONFIG_HOME:-$HOME/.config}/${NVIM_APPNAME:-nvim}"
+    escaped_plugin=$(printf '%s' "$plugin" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    spec="return { { dir = \"$escaped_plugin\", name = \"teamtypev\", lazy = false } }"
+    lazy_spec="$config/lua/plugins/teamtypev-installer.lua"
+    if [ -f "$config/lua/config/lazy.lua" ] && grep -Eq "^[[:space:]]*\\{[[:space:]]*import[[:space:]]*=[[:space:]]*['\"]plugins['\"]" "$config/lua/config/lazy.lua"; then
+        if [ ! -e "$lazy_spec" ] || grep -Fqx -- '-- Generated by the TeamTypeV installer.' "$lazy_spec"; then
+            mkdir -p "$config/lua/plugins"
+            printf '%s\n%s\n' '-- Generated by the TeamTypeV installer.' "$spec" >"$lazy_spec"
+            echo "Enabled TeamTypeV in LazyVim through $lazy_spec."
+        else
+            echo "Existing $lazy_spec was preserved. Add this local plugin specification to your lazy.nvim setup:"
+            printf '%s\n' "$spec"
+        fi
+    else
+        echo "If your plugin manager disables native packages, add this eager local plugin specification (lazy.nvim):"
+        printf '%s\n' "$spec"
+    fi
+    echo "Installed Neovim plugin to $plugin. Restart Neovim and run :TeamtypevInfo."
     ;;
 emacs)
-    plugin="$HOME/.local/share/teamtype/emacs"
-    download "$assets/teamtype.el" "$work/teamtype.el"
+    plugin="$HOME/.local/share/teamtypev/emacs"
+    download "$assets/teamtypev.el" "$work/teamtypev.el"
     mkdir -p "$plugin"
-    mv -f "$work/teamtype.el" "$plugin/teamtype.el"
+    mv -f "$work/teamtypev.el" "$plugin/teamtypev.el"
     init="$HOME/.emacs.d/init.el"
     if [ ! -e "$HOME/.emacs" ] && [ ! -e "$HOME/.emacs.d" ] && [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/emacs" ]; then
         init="${XDG_CONFIG_HOME:-$HOME/.config}/emacs/init.el"
@@ -117,7 +148,7 @@ emacs)
     mkdir -p "$(dirname "$init")"
     escaped_plugin=$(printf '%s' "$plugin" | sed 's/\\/\\\\/g; s/"/\\"/g')
     escaped_dir=$(printf '%s' "$dir" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    printf '(add-to-list '\''exec-path "%s")\n(load "%s/teamtype.el")\n' "$escaped_dir" "$escaped_plugin" >"$plugin/setup.el"
+    printf '(add-to-list '\''exec-path "%s")\n(load "%s/teamtypev.el")\n' "$escaped_dir" "$escaped_plugin" >"$plugin/setup.el"
     loader="(load \"$escaped_plugin/setup.el\")"
     if [ -f "${init}c" ]; then
         echo "Installed Emacs plugin, but automatic init setup was skipped: ${init}c is compiled."
@@ -132,16 +163,16 @@ emacs)
     ;;
 code | codium)
     if ! command -v "$editor" >/dev/null 2>&1; then
-        echo "teamtype install: $editor command not found; enable the editor's shell command, then rerun with --editor $editor" >&2
+        echo "teamtypev install: $editor command not found; enable the editor's shell command, then rerun with --editor $editor" >&2
         exit 1
     fi
-    download "$assets/teamtype.vsix" "$work/teamtype.vsix"
-    "$editor" --install-extension "$work/teamtype.vsix" --force
+    download "$assets/teamtypev.vsix" "$work/teamtypev.vsix"
+    "$editor" --install-extension "$work/teamtypev.vsix" --force
     echo "Installed TeamTypeV for $editor. Restart the editor."
-    echo "If the upstream TeamType extension is installed, disable it to avoid duplicate handlers."
-    echo "The editor must find $dir/teamtype: launch it from a terminal with that directory in PATH."
+    echo "The editor must find $dir/teamtypev: launch it from a terminal with that directory in PATH."
     ;;
 esac
-echo "In a project directory, run: teamtype share"
-echo "On another machine, run the teamtype join command printed by the sharer."
+done
+echo "In a project directory, run: teamtypev share"
+echo "On another machine, run the teamtypev join command printed by the sharer."
 echo "Then open files in that directory with your configured editor."

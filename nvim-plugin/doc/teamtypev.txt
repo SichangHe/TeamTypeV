@@ -1,4 +1,4 @@
-*teamtype.txt*  Editor-agnostic collaborative editing                   *teamtype*
+*teamtypev.txt*  Editor-agnostic collaborative editing                   *teamtypev*
 
 This plugin adds real-time collaborative editing functionality to Neovim.
 You can use it for pair programming or note-taking, for example. It is mainly
@@ -6,12 +6,12 @@ meant to be used with TeamTypeV, but can also be configured to work with other
 collaborative software speaking the same protocol.
 
 ==============================================================================
-INSTALLATION                                             *teamtype-installation*
+INSTALLATION                                             *teamtypev-installation*
 
 See |https://github.com/SichangHe/TeamTypeV/blob/live-multi-editor/nvim-plugin/README.md|.
 
 ==============================================================================
-CONFIGURATION                                           *teamtype-configuration*
+CONFIGURATION                                           *teamtypev-configuration*
 
 This plugin allows you to configure multiple collaboration servers. Each is
 identified with a name and markers or a function used to identify what
@@ -19,24 +19,24 @@ directory(s) the config should be active for. This enables separate settings
 per-project or per group of projects.
 
 A default configuration for connecting to TeamTypeV daemons is provided. To
-replace the defaults replace the whole config named 'teamtype'. To provide
+replace the defaults replace the whole config named 'teamtypev'. To provide
 alternate configurations for some projects, add new config tables.
 
-config({name}, {cfg})                                        *teamtype.config()*
+config({name}, {cfg})                                        *teamtypev.config()*
     Set or update the configuration for a client.
 
     Examples:
     • The default config attempts to connect to a default TeamTypeV instance in
-      directories that have a `.teamtype` directory: >lua
-        teamtype.config("teamtype", {
-            cmd = { "teamtype", "client" },
-            root_markers = ".teamtype",
+      directories that have a `.teamtypev` directory: >lua
+        teamtypev.config("teamtypev", {
+            cmd = { "teamtypev", "client" },
+            root_markers = ".teamtypev",
         })
 <
     • An alternative configuration might use a alternative binary like the
       proof-of-concept `teamtype-hedgedoc` command to sync buffers that are
       https URLs. The directory name might not be important: >lua
-        teamtype.config("hedgedoc", {
+        teamtypev.config("hedgedoc", {
             cmd = { "teamtype-hedgedoc" },
             root_dir = function(bufnr, on_dir)
                 local name = vim.api.nvim_buf_get_name(bufnr)
@@ -49,24 +49,24 @@ config({name}, {cfg})                                        *teamtype.config()*
 
     Parameters: ~
       • {name}  (`string`)
-      • {cfg}   A configuration (see |teamtype.Config|)
+      • {cfg}   A configuration (see |teamtypev.Config|)
 
-enable({name}, {enable})                                     *teamtype.enable()*
+enable({name}, {enable})                                     *teamtypev.enable()*
     Connects to the collaboration server when a buffer is opened, based on the
     `root_markers` and `root_dir` fields of the configuration.
 
-    The `"teamtype"` configuration is enabled by default.
+    The `"teamtypev"` configuration is enabled by default.
 
     Examples: >lua
-        teamtype.enable('hedgedoc')
-        teamtype.enable('teamtype', false)
+        teamtypev.enable('hedgedoc')
+        teamtypev.enable('teamtypev', false)
 <
 
     Parameters: ~
       • {name}    (`string`) Name of the client to enable.
       • {enable}  (`boolean`) `true|nil` to enable, `false` to disable.
 
-*teamtype.Config*
+*teamtypev.Config*
     Inspired by |vim.lsp.Config|, but with fewer options.
 
     Fields: ~
@@ -75,7 +75,7 @@ enable({name}, {enable})                                     *teamtype.enable()*
                          collaborative project. The plugin will search upwards
                          (from the buffer file), and stop in the first
                          directory with that marker. Typical values might be
-                         `'.git'` or `'.teamtype'`. Unused if `root_dir` is
+                         `'.git'` or `'.teamtypev'`. Unused if `root_dir` is
                          defined.
       • {root_dir}?      (`fun(bufnr: integer, on_dir:fun(root_dir?:string))`)
                          Called to decide the root of the collaborative
@@ -83,29 +83,29 @@ enable({name}, {enable})                                     *teamtype.enable()*
                          with the root directory if the configuration should
                          be activated. You can use this function to
                          conditionally activate (or skip) collaboration. See
-                         example at `teamtype.config` for an example.
+                         example at `teamtypev.config` for an example.
 
 ==============================================================================
-USAGE                                                           *teamtype-usage*
+USAGE                                                           *teamtypev-usage*
 
-:TeamtypeInfo                                                    *:TeamtypeInfo*
+:TeamtypevInfo                                                    *:TeamtypevInfo*
     Shows the active collaboration clients and cursor positions.
 
-:TeamtypeJumpToCursor                                    *:TeamtypeJumpToCursor*
+:TeamtypevJumpToCursor                                    *:TeamtypevJumpToCursor*
     Jumps to the cursor of another peer. If multiple cursors are present,
     gives you a selection menu.
 
     Tip: Create an easily accessible mapping for this command!
 
-:TeamtypeFollow                                                *:TeamtypeFollow*
+:TeamtypevFollow                                                *:TeamtypevFollow*
     Follows another peer, keeping their cursor in view. If multiple cursors
     are present, gives you a selection menu.
     It will automatically unfollow as soon as a key is pressed.
 
 ==============================================================================
-STATUS LINE                                               *teamtype-status-line*
+STATUS LINE                                               *teamtypev-status-line*
 
-TeamTypeV exposes a `require("teamtype").status()` function, which displays a
+TeamTypeV exposes a `require("teamtypev").status()` function, which displays a
 brief summary of connection status and where other people are editing. You can
 add this to your status line by, for example, using a plugin like lualine and
 a lualine configuration snippet like this:
@@ -114,7 +114,7 @@ a lualine configuration snippet like this:
     lualine_c = {
         {
             function()
-                return require("teamtype").status()
+                return require("teamtypev").status()
             end,
         },
     },
@@ -123,6 +123,6 @@ a lualine configuration snippet like this:
 Lua functions can also be reached using Vim's status line escape codes if your
 status line is configured that way, e.g. to replace the whole status line:
 
-  :set statusline=%!v:lua.require('teamtype').status()
+  :set statusline=%!v:lua.require('teamtypev').status()
 <
  vim:tw=78:ts=8:sw=4:sts=4:et:ft=help:norl:

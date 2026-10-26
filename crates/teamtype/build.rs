@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     instantiate_initial_automerge_doc()?;
     let version = derive_version_details()?;
     // Pass version info for use in CLI's --version flag.
-    println!("cargo::rustc-env=TEAMTYPE_VERSION={version}");
+    println!("cargo::rustc-env=TEAMTYPEV_VERSION={version}");
     // Skip generating extra artifacts if being run via `cargo install --git ...`.
     println!("cargo::rerun-if-env-changed=CARGO_WORKSPACE_DIR");
     if var_os("CARGO_WORKSPACE_DIR").is_some() {
@@ -38,7 +38,7 @@ fn instantiate_initial_automerge_doc() -> Result<()> {
         "cargo::rerun-if-changed={}",
         initial_automerge_doc_path.display()
     );
-    let force_generate = var_os("TEAMTYPE_GENERATE_NEW_INITIAL_AUTOMERGE_DOC").is_some();
+    let force_generate = var_os("TEAMTYPEV_GENERATE_NEW_INITIAL_AUTOMERGE_DOC").is_some();
     // The initial Automerge document state is hard coded and changing it would imply a breaking
     // TeamTypeV release incompatible with old clients. Hence, the document generated here is tracked
     // in our VCS so we can see if it ever needs to be bumped, e.g. to use a new breaking version of

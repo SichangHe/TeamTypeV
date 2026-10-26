@@ -9,44 +9,45 @@
 ;;; Client Management
 
 ;; Registry of active clients. Each client is a plist with:
-;; :root-dir - the root directory containing .teamtype
-;; :process - the teamtype client process
+;; :root-dir - the root directory containing .teamtypev
+;; :process - the teamtypev client process
 ;; :connection - the JSON-RPC connection
 ;; :files - hash table mapping file paths to file state
-(defvar teamtype--clients nil
+;; 🧑 "Treat us as a separate project."
+(defvar teamtypev--clients nil
   "List of active TeamTypeV clients.")
 
 ;;; File State (buffer-local variables)
 
-(defvar-local teamtype--editor-revision 0
+(defvar-local teamtypev--editor-revision 0
   "Number of operations this editor has made to the current buffer.")
 
-(defvar-local teamtype--daemon-revision 0
+(defvar-local teamtypev--daemon-revision 0
   "Number of operations received from the daemon for the current buffer.")
 
-(defvar-local teamtype--client nil
-  "The teamtype client associated with this buffer.")
+(defvar-local teamtypev--client nil
+  "The teamtypev client associated with this buffer.")
 
-(defvar-local teamtype--shared nil
+(defvar-local teamtypev--shared nil
   "Whether native writes are forbidden for this buffer.")
 
-(defvar-local teamtype--ignore-changes nil
+(defvar-local teamtypev--ignore-changes nil
   "When non-nil, buffer changes are ignored and not sent to daemon.")
 
 ;;; Utility Functions
 
-(defun teamtype--find-root (file)
-  "Find the root directory containing .teamtype for FILE."
-  (locate-dominating-file file ".teamtype"))
+(defun teamtypev--find-root (file)
+  "Find the root directory containing .teamtypev for FILE."
+  (locate-dominating-file file ".teamtypev"))
 
-(defun teamtype--line-col-to-pos (line col)
+(defun teamtypev--line-col-to-pos (line col)
   "Convert zero-based LINE and character COL to buffer position."
   (save-excursion
     (goto-char (point-min))
     (forward-line line)
     (+ (line-beginning-position) col)))
 
-(defun teamtype--pos-to-line-col (pos)
+(defun teamtypev--pos-to-line-col (pos)
   "Convert buffer POS to zero-based line and character position.
 Returns a cons (LINE . CHARACTER)."
   (save-excursion
@@ -54,198 +55,198 @@ Returns a cons (LINE . CHARACTER)."
     (cons (- (line-number-at-pos) 1)
           (- pos (line-beginning-position)))))
 
-(defun teamtype--buffer-content ()
+(defun teamtypev--buffer-content ()
   "Get the entire buffer content as a string."
   (buffer-substring-no-properties (point-min) (point-max)))
 
-(defun teamtype--uri-to-path (uri)
+(defun teamtypev--uri-to-path (uri)
   (url-unhex-string
     (substring uri 7))) ; Remove the 'file://' from the URI. TODO: Make more stable?
 
-(defun teamtype--path-to-uri (path)
+(defun teamtypev--path-to-uri (path)
   (url-encode-url
     (concat "file://" path)))
 
 ;;; Client Management
 
-(defun teamtype--find-or-create-client (root-dir)
+(defun teamtypev--find-or-create-client (root-dir)
   "Find or create a TeamTypeV client for ROOT-DIR."
   ;; Look for existing client for this root directory.
   (let ((client (cl-find-if (lambda (c) (string= (plist-get c :root-dir) root-dir))
-                            teamtype--clients)))
+                            teamtypev--clients)))
     (or client
-        (teamtype--create-client root-dir))))
+        (teamtypev--create-client root-dir))))
 
-(defun teamtype--create-client (root-dir)
+(defun teamtypev--create-client (root-dir)
   "Create a new TeamTypeV client for ROOT-DIR."
   (let* ((default-directory root-dir) ; Set working directory for the process.
-         (process-name (format "teamtype-%s" root-dir))
+         (process-name (format "teamtypev-%s" root-dir))
          (process (make-process
                    :name process-name
                    :buffer nil ; Do not append output of this process to any buffer.
-                   :command '("teamtype" "client")
+                   :command '("teamtypev" "client")
                    :connection-type 'pipe
                    :noquery t))
          (connection (make-instance 'jsonrpc-process-connection
                                     :process process
-                                    :notification-dispatcher #'teamtype--handle-notification
+                                    :notification-dispatcher #'teamtypev--handle-notification
                                     :on-shutdown `(lambda (_conn)
-                                                    (teamtype--daemon-lost ,root-dir))))
+                                                    (teamtypev--daemon-lost ,root-dir))))
          (client (list :root-dir root-dir
                        :process process
                        :connection connection
                        :files (make-hash-table :test 'equal))))
-    (push client teamtype--clients)
+    (push client teamtypev--clients)
     (message "Connected to TeamTypeV daemon in %s" root-dir)
     client))
 
-(defun teamtype--daemon-lost (root-dir)
+(defun teamtypev--daemon-lost (root-dir)
   "Tell the user the daemon for ROOT-DIR is gone and stop edits that would not be shared."
-  (setq teamtype--clients
-        (cl-remove-if (lambda (c) (string= (plist-get c :root-dir) root-dir)) teamtype--clients))
+  (setq teamtypev--clients
+        (cl-remove-if (lambda (c) (string= (plist-get c :root-dir) root-dir)) teamtypev--clients))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
-      (when (and teamtype--client (string= (plist-get teamtype--client :root-dir) root-dir))
-        (setq-local teamtype--client nil)
+      (when (and teamtypev--client (string= (plist-get teamtypev--client :root-dir) root-dir))
+        (setq-local teamtypev--client nil)
         (setq buffer-read-only t))))
   (message "Connection to TeamTypeV daemon in %s lost. Restart the daemon, then reopen the files." root-dir))
 
 ;;; File Operations
 
-(defun teamtype--file-opened ()
+(defun teamtypev--file-opened ()
   "Handle opening a file in a TeamTypeV-enabled directory."
   (when buffer-file-name
-    (let ((root-dir (teamtype--find-root buffer-file-name)))
+    (let ((root-dir (teamtypev--find-root buffer-file-name)))
       (when root-dir
-        (let ((client (teamtype--find-or-create-client root-dir)))
-          (teamtype--open-file client buffer-file-name))))))
+        (let ((client (teamtypev--find-or-create-client root-dir)))
+          (teamtypev--open-file client buffer-file-name))))))
 
-(cl-defun teamtype--open-file (client filepath)
+(cl-defun teamtypev--open-file (client filepath)
   "Open FILEPATH with CLIENT."
   (unless (memq (coding-system-base buffer-file-coding-system) '(utf-8 undecided))
-    (cl-return-from teamtype--open-file nil))
+    (cl-return-from teamtypev--open-file nil))
   (condition-case err
       (jsonrpc-request (plist-get client :connection) 'daemonWriter '(:check t))
     (error
      (message "TeamTypeV needs a daemon with daemon-owned saves: %S" err)
-     (cl-return-from teamtype--open-file nil)))
+     (cl-return-from teamtypev--open-file nil)))
   ;; Lock files (`.#name`) in the shared directory would be synced as files.
   (setq-local create-lockfiles nil)
   (setq-local backup-inhibited t)
   (auto-save-mode -1)
   (when (bound-and-true-p auto-revert-mode) (auto-revert-mode -1))
-  (setq-local teamtype--client client)
-  (setq-local teamtype--editor-revision 0)
-  (setq-local teamtype--daemon-revision 0)
+  (setq-local teamtypev--client client)
+  (setq-local teamtypev--editor-revision 0)
+  (setq-local teamtypev--daemon-revision 0)
 
-  (let* ((uri (teamtype--path-to-uri filepath))
-         (content (teamtype--buffer-content))
+  (let* ((uri (teamtypev--path-to-uri filepath))
+         (content (teamtypev--buffer-content))
          (connection (plist-get client :connection))
          (process (plist-get client :process)))
 
     ;; Requests must not block: a blocking `jsonrpc-request' returns at the response and leaves
     ;; an edit notification that follows it unread until the daemon sends more data.
-    (teamtype--track-changes)
+    (teamtypev--track-changes)
     (jsonrpc-async-request
      connection 'open `(:uri ,uri :content ,content :daemonWrites t)
      ;; This file is dynamically bound, so the callbacks get `filepath' by backquote.
      :success-fn `(lambda (_result)
                    (when-let ((buffer (find-buffer-visiting ,filepath)))
-                     (with-current-buffer buffer (setq-local teamtype--shared t)))
+                     (with-current-buffer buffer (setq-local teamtypev--shared t)))
                    (message "TeamTypeV: tracking %s" ,filepath))
      :error-fn `(lambda (err)
                   (message "TeamTypeV error opening file: %S" err)
                   (when-let ((buffer (find-buffer-visiting ,filepath)))
                     (with-current-buffer buffer
-                      (setq-local teamtype--client nil)))))))
+                      (setq-local teamtypev--client nil)))))))
 
-(defun teamtype--close-file ()
+(defun teamtypev--close-file ()
   "Close the current file in TeamTypeV."
-  (when (and teamtype--client buffer-file-name)
-    (let* ((uri (teamtype--path-to-uri buffer-file-name))
-           (connection (plist-get teamtype--client :connection)))
+  (when (and teamtypev--client buffer-file-name)
+    (let* ((uri (teamtypev--path-to-uri buffer-file-name))
+           (connection (plist-get teamtypev--client :connection)))
       (jsonrpc-notify connection 'close `(:uri ,uri))
-      (setq-local teamtype--client nil))))
+      (setq-local teamtypev--client nil))))
 
 ;;; Change Tracking
 
-(defvar-local teamtype--start-pos nil)
-(defvar-local teamtype--end-pos nil)
+(defvar-local teamtypev--start-pos nil)
+(defvar-local teamtypev--end-pos nil)
 
-(defun teamtype--before-change (beg end)
+(defun teamtypev--before-change (beg end)
   "Store the changed region."
-  (unless teamtype--ignore-changes
-    (setq-local teamtype--start-pos (teamtype--pos-to-line-col beg))
-    (setq-local teamtype--end-pos (teamtype--pos-to-line-col end))))
+  (unless teamtypev--ignore-changes
+    (setq-local teamtypev--start-pos (teamtypev--pos-to-line-col beg))
+    (setq-local teamtypev--end-pos (teamtypev--pos-to-line-col end))))
 
-(defun teamtype--after-change (beg end _len)
+(defun teamtypev--after-change (beg end _len)
   "Send the change to the daemon after a buffer modification."
-  (unless teamtype--ignore-changes
-    (when teamtype--client
+  (unless teamtypev--ignore-changes
+    (when teamtypev--client
       (let* ((new-text (buffer-substring-no-properties beg end))
-             (uri (teamtype--path-to-uri buffer-file-name))
-             (delta `[(:range (:start (:line ,(car teamtype--start-pos)
-                                       :character ,(cdr teamtype--start-pos))
-                               :end (:line ,(car teamtype--end-pos)
-                                       :character ,(cdr teamtype--end-pos)))
+             (uri (teamtypev--path-to-uri buffer-file-name))
+             (delta `[(:range (:start (:line ,(car teamtypev--start-pos)
+                                       :character ,(cdr teamtypev--start-pos))
+                               :end (:line ,(car teamtypev--end-pos)
+                                       :character ,(cdr teamtypev--end-pos)))
                        :replacement ,new-text)])
-             (connection (plist-get teamtype--client :connection)))
+             (connection (plist-get teamtypev--client :connection)))
 
-        (setq-local teamtype--editor-revision (1+ teamtype--editor-revision))
+        (setq-local teamtypev--editor-revision (1+ teamtypev--editor-revision))
 
         (jsonrpc-async-request
          connection 'edit
-         `(:uri ,uri :revision ,teamtype--daemon-revision :delta ,delta)
+         `(:uri ,uri :revision ,teamtypev--daemon-revision :delta ,delta)
          ;; The default success callback fails on the daemon's string result.
          :success-fn #'ignore
          :error-fn (lambda (err) (message "TeamTypeV edit rejected: %S" err)))))))
 
-(defun teamtype--track-changes ()
+(defun teamtypev--track-changes ()
   "Start tracking changes for the current buffer."
-  (add-hook 'before-change-functions #'teamtype--before-change nil t)
-  (add-hook 'after-change-functions #'teamtype--after-change nil t))
+  (add-hook 'before-change-functions #'teamtypev--before-change nil t)
+  (add-hook 'after-change-functions #'teamtypev--after-change nil t))
 
 ;; 🧑 "their save just tells teamtype to write"
-(defun teamtype--save ()
+(defun teamtypev--save ()
   "Ask the daemon to save this shared buffer without writing it from Emacs."
-  (when (or teamtype--shared teamtype--client)
-    (unless teamtype--client (user-error "TeamTypeV daemon is disconnected"))
+  (when (or teamtypev--shared teamtypev--client)
+    (unless teamtypev--client (user-error "TeamTypeV daemon is disconnected"))
     (jsonrpc-request
-     (plist-get teamtype--client :connection) 'save
-     `(:uri ,(teamtype--path-to-uri buffer-file-name)))
+     (plist-get teamtypev--client :connection) 'save
+     `(:uri ,(teamtypev--path-to-uri buffer-file-name)))
     (set-visited-file-modtime)
     t))
 
 ;;; Protocol Message Handlers
 
-(defun teamtype--handle-notification (_conn method params)
+(defun teamtypev--handle-notification (_conn method params)
   "Handle JSON-RPC notifications from daemon."
   (cond
    ((string= method "edit")
-    (teamtype--handle-edit-notification params))
+    (teamtypev--handle-edit-notification params))
    (t
-    (message "Unknown teamtype notification: %s" method))))
+    (message "Unknown teamtypev notification: %s" method))))
 
-(defun teamtype--handle-edit-notification (params)
+(defun teamtypev--handle-edit-notification (params)
   "Handle an 'edit' notification from the daemon."
   (let* ((uri (plist-get params :uri))
          (revision (plist-get params :revision))
          (delta (plist-get params :delta))
-         (filepath (teamtype--uri-to-path uri))
+         (filepath (teamtypev--uri-to-path uri))
          (buffer (find-buffer-visiting filepath)))
 
     (when buffer
       (with-current-buffer buffer
         ;; Only apply if revision matches our editor revision
-        (when (= revision teamtype--editor-revision)
-          (teamtype--apply-delta delta)
-          (setq-local teamtype--daemon-revision (1+ teamtype--daemon-revision)))))))
+        (when (= revision teamtypev--editor-revision)
+          (teamtypev--apply-delta delta)
+          (setq-local teamtypev--daemon-revision (1+ teamtypev--daemon-revision)))))))
 
-(defun teamtype--apply-delta (delta)
+(defun teamtypev--apply-delta (delta)
   "Apply DELTA to the current buffer.
 Edits are sorted by position (descending) before applying, so that
 later edits don't invalidate positions of earlier edits."
-  (setq-local teamtype--ignore-changes t)
+  (setq-local teamtypev--ignore-changes t)
   ;; An error while applying must not leave local edits ignored for good.
   (unwind-protect
       (save-excursion
@@ -260,8 +261,8 @@ later edits don't invalidate positions of earlier edits."
                                 (start-char (plist-get start-info :character))
                                 (end-line (plist-get end-info :line))
                                 (end-char (plist-get end-info :character))
-                                (beg (teamtype--line-col-to-pos start-line start-char))
-                                (end (teamtype--line-col-to-pos end-line end-char)))
+                                (beg (teamtypev--line-col-to-pos start-line start-char))
+                                (end (teamtypev--line-col-to-pos end-line end-char)))
                            (list beg end replacement)))
                        (append delta nil)))) ; Convert vector to list.
           ;; Sort by start position descending, then by end position descending.
@@ -279,37 +280,37 @@ later edits don't invalidate positions of earlier edits."
               (delete-region beg end)
               (goto-char beg)
               (insert replacement)))))
-    (setq-local teamtype--ignore-changes nil)))
+    (setq-local teamtypev--ignore-changes nil)))
 
 ;;; User Interface Modifications
 
-(defun teamtype--verify-file-modtime (original &optional buffer)
+(defun teamtypev--verify-file-modtime (original &optional buffer)
   "Let the daemon reconcile disk changes for shared BUFFER before a save."
   (with-current-buffer (or buffer (current-buffer))
-    (if (or teamtype--client teamtype--shared)
+    (if (or teamtypev--client teamtypev--shared)
         t
       (funcall original buffer))))
 
-(defun teamtype--prevent-prompt-when-file-changes-on-disk ()
+(defun teamtypev--prevent-prompt-when-file-changes-on-disk ()
   "Disables the supersession check, which is coming up because the daemon writes to disk."
-  (defun teamtype--suppress-supersession-check (original-fn &rest args)
-  "Suppress supersession checks for teamtype-controlled buffers."
-  (if teamtype--client
+  (defun teamtypev--suppress-supersession-check (original-fn &rest args)
+  "Suppress supersession checks for teamtypev-controlled buffers."
+  (if teamtypev--client
       nil ; Return nil = don't prompt, proceed with edit.
       (apply original-fn args)))
 
   (advice-add 'ask-user-about-supersession-threat :around
-              #'teamtype--suppress-supersession-check))
+              #'teamtypev--suppress-supersession-check))
 
 ;;; Setup
 
-(defun teamtype--setup ()
+(defun teamtypev--setup ()
   "Set up TeamTypeV for the current Emacs session."
-  (add-hook 'find-file-hook #'teamtype--file-opened)
-  (add-hook 'kill-buffer-hook #'teamtype--close-file)
-  (add-hook 'write-contents-functions #'teamtype--save)
-  (advice-add 'verify-visited-file-modtime :around #'teamtype--verify-file-modtime)
-  (teamtype--prevent-prompt-when-file-changes-on-disk))
-(teamtype--setup)
+  (add-hook 'find-file-hook #'teamtypev--file-opened)
+  (add-hook 'kill-buffer-hook #'teamtypev--close-file)
+  (add-hook 'write-contents-functions #'teamtypev--save)
+  (advice-add 'verify-visited-file-modtime :around #'teamtypev--verify-file-modtime)
+  (teamtypev--prevent-prompt-when-file-changes-on-disk))
+(teamtypev--setup)
 
-(provide 'teamtype)
+(provide 'teamtypev)

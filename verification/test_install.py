@@ -30,7 +30,7 @@ class InstallTests(unittest.TestCase):
     env: dict[str, str]
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(prefix="teamtype-install-")
+        self.temp = tempfile.TemporaryDirectory(prefix="teamtypev-install-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.bin = self.root / "bin"
@@ -63,18 +63,18 @@ class InstallTests(unittest.TestCase):
             "uname",
             'case "$1" in -s) echo "$TEST_OS";; -m) echo "$TEST_ARCH";; *) exit 2;; esac\n',
         )
-        payload = b'#!/bin/sh\necho "teamtype test-version"\n'
+        payload = b'#!/bin/sh\necho "teamtypev test-version"\n'
         with tarfile.open(self.root / "release.tar.gz", "w:gz") as archive:
-            member = tarfile.TarInfo("teamtype")
+            member = tarfile.TarInfo("teamtypev")
             member.size = len(payload)
             member.mode = 0o644
             archive.addfile(member, io.BytesIO(payload))
         self.downloader("curl")
-        _ = (self.root / "teamtype.el").write_text("(provide 'teamtype)\n")
-        _ = (self.root / "teamtype.vsix").write_bytes(b"local extension payload")
-        with tarfile.open(self.root / "teamtype-nvim.tar.gz", "w:gz") as archive:
-            payload = b"vim.g.teamtype_test_loaded = true\n"
-            member = tarfile.TarInfo("plugin/teamtype.lua")
+        _ = (self.root / "teamtypev.el").write_text("(provide 'teamtypev)\n")
+        _ = (self.root / "teamtypev.vsix").write_bytes(b"local extension payload")
+        with tarfile.open(self.root / "teamtypev-nvim.tar.gz", "w:gz") as archive:
+            payload = b"vim.g.teamtypev_test_loaded = true\n"
+            member = tarfile.TarInfo("plugin/teamtypev.lua")
             member.size = len(payload)
             archive.addfile(member, io.BytesIO(payload))
 
@@ -94,9 +94,9 @@ class InstallTests(unittest.TestCase):
             destination = '"$2"'
         body += """printf "%s\\n" "$url" > "$TEST_ROOT/url"
 case "$url" in
-*/teamtype.el) asset=teamtype.el ;;
-*/teamtype.vsix) asset=teamtype.vsix ;;
-*/teamtype-nvim.tar.gz) asset=teamtype-nvim.tar.gz ;;
+*/teamtypev.el) asset=teamtypev.el ;;
+*/teamtypev.vsix) asset=teamtypev.vsix ;;
+*/teamtypev-nvim.tar.gz) asset=teamtypev-nvim.tar.gz ;;
 *) asset=release.tar.gz ;;
 esac
 """
@@ -117,10 +117,12 @@ esac
         self, result: subprocess.CompletedProcess[str], directory: Path
     ) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
-        executable = directory / "teamtype"
+        executable = directory / "teamtypev"
         self.assertTrue(executable.is_file())
         self.assertEqual(executable.stat().st_mode & 0o777, 0o755)
-        self.assertIn(f"Installed teamtype test-version to {executable}", result.stdout)
+        self.assertIn(
+            f"Installed teamtypev test-version to {executable}", result.stdout
+        )
         self.assertEqual(list(self.root.glob("tmp.*")), [])
 
     def test_default_directory_release_and_platform_aliases(self) -> None:
@@ -138,7 +140,7 @@ esac
                 self.assert_installed(self.run_install(), directory)
                 self.assertEqual(
                     (self.root / "url").read_text().strip(),
-                    f"https://github.com/SichangHe/TeamTypeV/releases/download/nightly/teamtype-{platform}.tar.gz",
+                    f"https://github.com/SichangHe/TeamTypeV/releases/download/nightly/teamtypev-{platform}.tar.gz",
                 )
 
     def test_custom_directory_and_release_preserve_spaces(self) -> None:
@@ -188,7 +190,7 @@ esac
     def test_unattended_default_skips_editor_setup(self) -> None:
         result = self.run_install()
         self.assert_installed(result, self.root / "home/.local/bin")
-        self.assertNotIn("Set up an editor?", result.stdout)
+        self.assertNotIn("Set up editors", result.stdout)
         self.assertFalse((self.root / "home/.local/share").exists())
 
     def test_unknown_editor_is_rejected_before_download(self) -> None:
@@ -205,10 +207,10 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         plugin = (
             self.root
-            / "data dir/custom-nvim/site/pack/plugins/start/teamtype/plugin/teamtype.lua"
+            / "data dir/custom-nvim/site/pack/plugins/start/teamtypev/plugin/teamtypev.lua"
         )
-        self.assertIn("teamtype_test_loaded", plugin.read_text())
-        self.assertIn("/custom/teamtype-nvim.tar.gz", (self.root / "url").read_text())
+        self.assertIn("teamtypev_test_loaded", plugin.read_text())
+        self.assertIn("/custom/teamtypev-nvim.tar.gz", (self.root / "url").read_text())
 
     def test_emacs_preserves_init_and_does_not_duplicate_loader(self) -> None:
         home = self.root / 'home with "quotes"'
@@ -226,10 +228,102 @@ esac
         self.assertTrue(init.read_text().startswith(original))
         self.assertEqual(init.read_text().count("setup.el"), 1)
         self.assertIn(r"\"quotes\"", init.read_text())
-        setup = home / ".local/share/teamtype/emacs/setup.el"
+        setup = home / ".local/share/teamtypev/emacs/setup.el"
         self.assertIn("add-to-list 'exec-path", setup.read_text())
         self.assertIn("bin directory", setup.read_text())
-        self.assertTrue(setup.with_name("teamtype.el").exists())
+        self.assertTrue(setup.with_name("teamtypev.el").exists())
+
+    def test_lazyvim_preserves_custom_spec_and_prints_manual_setup(self) -> None:
+        config = self.root / "config/custom-nvim"
+        self.env.update(XDG_CONFIG_HOME=str(config.parent), NVIM_APPNAME=config.name)
+        (config / "lua/config").mkdir(parents=True)
+        _ = (config / "lua/config/lazy.lua").write_text('{ import = "plugins" },\n')
+        spec = config / "lua/plugins/teamtypev-installer.lua"
+        spec.parent.mkdir()
+        original = 'return { { "my/custom-plugin" } }\n'
+        _ = spec.write_text(original)
+        result = self.run_install("--editor", "nvim")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(spec.read_text(), original)
+        self.assertIn("was preserved", result.stdout)
+        self.assertIn('name = "teamtypev", lazy = false', result.stdout)
+
+    def test_lazyvim_creates_distinct_eager_spec_and_updates_it_on_rerun(self) -> None:
+        config = self.root / 'config with "quotes"/custom-nvim'
+        self.env.update(XDG_CONFIG_HOME=str(config.parent), NVIM_APPNAME=config.name)
+        (config / "lua/config").mkdir(parents=True)
+        _ = (config / "lua/config/lazy.lua").write_text("  { import = 'plugins' },\n")
+        upstream = config / "lua/plugins/teamtype.lua"
+        upstream.parent.mkdir()
+        _ = upstream.write_text('return { "teamtype/teamtype-nvim" }\n')
+        for _ in range(2):
+            result = self.run_install("--editor", "nvim")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        spec = (upstream.parent / "teamtypev-installer.lua").read_text()
+        self.assertIn('name = "teamtypev", lazy = false', spec)
+        self.assertEqual(spec.count("return"), 1)
+        self.assertIn("custom-nvim/site/pack/plugins/start/teamtypev", spec)
+        self.assertEqual(upstream.read_text(), 'return { "teamtype/teamtype-nvim" }\n')
+
+    def test_real_lazy_nvim_loads_installed_plugin_with_native_packages_disabled(
+        self,
+    ) -> None:
+        lazy_path = os.environ.get("TEAMTYPEV_TEST_LAZY_NVIM")
+        nvim = shutil.which("nvim", path=os.environ["PATH"])
+        if not lazy_path or not nvim:
+            self.skipTest(
+                "set TEAMTYPEV_TEST_LAZY_NVIM to a lazy.nvim checkout and install nvim"
+            )
+        config = self.root / "config/nvim"
+        (config / "lua/config").mkdir(parents=True)
+        _ = (config / "init.lua").write_text('require("config.lazy")\n')
+        _ = (
+            config / "lua/config/lazy.lua"
+        ).write_text("""vim.opt.rtp:prepend(vim.env.TEAMTYPEV_TEST_LAZY_NVIM)
+require("lazy").setup({
+  spec = {
+    { import = "plugins" },
+  },
+  install = { missing = false },
+  checker = { enabled = false },
+  change_detection = { enabled = false },
+})
+""")
+        self.env.update(XDG_CONFIG_HOME=str(config.parent), NVIM_APPNAME="nvim")
+        with tarfile.open(self.root / "teamtypev-nvim.tar.gz", "w:gz") as archive:
+            archive.add(INSTALLER.parent / "nvim-plugin", arcname=".")
+        result = self.run_install("--editor", "nvim")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        check = self.root / "check.lua"
+        _ = check.write_text("""assert(not vim.o.loadplugins)
+assert(vim.fn.exists(":TeamtypevInfo") == 2)
+assert(package.loaded["teamtypev"])
+assert(vim.fn.executable("teamtypev") == 1)
+vim.cmd("qa!")
+""")
+        result = subprocess.run(
+            [
+                nvim,
+                "--headless",
+                "-c",
+                'lua local ok, err = pcall(dofile, vim.env.TEAMTYPEV_TEST_CHECK); if not ok then print(err); vim.cmd("cquit 1") end',
+            ],
+            env={
+                **self.env,
+                "PATH": os.environ["PATH"],
+                "TEAMTYPEV_TEST_LAZY_NVIM": lazy_path,
+                "TEAMTYPEV_TEST_CHECK": str(check),
+                "XDG_DATA_HOME": str(self.root / "home/.local/share"),
+                "XDG_STATE_HOME": str(self.root / "state"),
+                "XDG_CACHE_HOME": str(self.root / "cache"),
+            },
+            capture_output=True,
+            cwd=self.root,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_emacs_xdg_init(self) -> None:
         config = self.root / "config/emacs"
@@ -292,16 +386,69 @@ printf '%s\\n' "$0" > "$TEST_ROOT/editor"
                 self.assertEqual(
                     (self.root / "editor").read_text().strip(), str(self.bin / editor)
                 )
-                self.assertIn("/nightly/teamtype.vsix", (self.root / "url").read_text())
+                self.assertIn(
+                    "/nightly/teamtypev.vsix", (self.root / "url").read_text()
+                )
 
     def test_missing_code_command_explains_recovery(self) -> None:
         result = self.run_install("--editor", "code")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("rerun with --editor code", result.stderr)
-        self.assertTrue((self.root / "home/.local/bin/teamtype").exists())
+        self.assertTrue((self.root / "home/.local/bin/teamtypev").exists())
+
+    def test_multiple_editors_preserve_upstream_installations(self) -> None:
+        home = self.root / "home"
+        existing = {
+            ".local/bin/teamtype": "upstream binary",
+            ".local/share/teamtype/emacs/teamtype.el": "upstream Emacs plugin",
+            ".local/share/nvim/site/pack/plugins/start/teamtype/plugin/teamtype.lua": "upstream Neovim plugin",
+            ".emacs.d/init.el": '(load "~/.local/share/teamtype/emacs/teamtype.el")\n',
+        }
+        for relative, content in existing.items():
+            path = home / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _ = path.write_text(content)
+        for editor in ("code", "codium"):
+            self.script(editor, 'printf "%s\\n" "$0" >> "$TEST_ROOT/editors"\n')
+        result = self.run_install(
+            "--editor",
+            "nvim",
+            "--editor",
+            "emacs",
+            "--editor",
+            "code",
+            "--editor",
+            "codium",
+            "--editor",
+            "code",
+        )
+        self.assert_installed(result, home / ".local/bin")
+        for relative, content in existing.items():
+            self.assertTrue((home / relative).read_text().startswith(content))
+        self.assertIn(
+            "teamtypev/emacs/setup.el", (home / ".emacs.d/init.el").read_text()
+        )
+        self.assertTrue(
+            (
+                home
+                / ".local/share/nvim/site/pack/plugins/start/teamtypev/plugin/teamtypev.lua"
+            ).exists()
+        )
+        self.assertEqual(
+            (self.root / "editors").read_text().splitlines(),
+            [str(self.bin / "code"), str(self.bin / "codium")],
+        )
+        self.assertNotIn("disable it", result.stdout)
+
+    def test_no_editor_clears_explicit_selections(self) -> None:
+        result = self.run_install(
+            "--editor", "emacs", "--editor", "nvim", "--no-editor"
+        )
+        self.assert_installed(result, self.root / "home/.local/bin")
+        self.assertFalse((self.root / "home/.local/share").exists())
 
     def test_piped_script_prompts_on_terminal_and_can_skip(self) -> None:
-        for choice, args in (("2", []), ("", []), ("", ["--no-editor"])):
+        for choice, args in (("1 2", []), ("2", []), ("", []), ("", ["--no-editor"])):
             with self.subTest(choice=choice, args=args):
                 master, slave = pty.openpty()
 
@@ -342,8 +489,10 @@ printf '%s\\n' "$0" > "$TEST_ROOT/editor"
                                 break
                         self.assertEqual(process.wait(timeout=1), 0, output.decode())
                         self.assertEqual(answered, not args)
-                        if choice == "2":
+                        if "2" in choice:
                             self.assertIn(b"Installed Emacs plugin", output)
+                        if "1" in choice:
+                            self.assertIn(b"Installed Neovim plugin", output)
                     finally:
                         if process.poll() is None:
                             process.kill()

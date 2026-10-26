@@ -10,12 +10,12 @@ suite("Native tab handoff", () => {
     for (const outside of ["", "outside\n"]) {
         test(`transfers dirty native text without a native save or close prompt${outside ? " and preserves outside additions" : ""}`, async function () {
             this.timeout(30000)
-            const root = fs.mkdtempSync(path.join(os.tmpdir(), "teamtype-handoff-"))
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), "teamtypev-handoff-"))
             const file = path.join(root, "note.txt")
-            const bin = process.env.TEAMTYPE_BINARY ?? path.resolve(__dirname, "../../../target/debug/teamtype")
+            const bin = process.env.TEAMTYPEV_BINARY ?? path.resolve(__dirname, "../../../target/debug/teamtypev")
             process.env.PATH = `${path.dirname(bin)}${path.delimiter}${process.env.PATH}`
             fs.writeFileSync(file, "base\n")
-            const extension = vscode.extensions.getExtension("SichangHe.teamtype")!
+            const extension = vscode.extensions.getExtension("SichangHe.teamtypev")!
             await extension.activate()
             const native = await vscode.workspace.openTextDocument(file)
             await vscode.window.showTextDocument(native)
@@ -24,8 +24,8 @@ suite("Native tab handoff", () => {
             assert.ok(await vscode.workspace.applyEdit(localEdit))
             assert.ok(native.isDirty)
             if (outside) fs.writeFileSync(file, `base\n${outside}`)
-            fs.mkdirSync(path.join(root, ".teamtype"))
-            const log = fs.openSync(path.join(root, ".teamtype", "handoff.log"), "w")
+            fs.mkdirSync(path.join(root, ".teamtypev"))
+            const log = fs.openSync(path.join(root, ".teamtypev", "handoff.log"), "w")
             const daemon = cp.spawn(bin, ["share", "--no-join-code"], {cwd: root, stdio: ["ignore", log, log]})
             fs.closeSync(log)
             let nativeSaves = 0
@@ -40,11 +40,11 @@ suite("Native tab handoff", () => {
                 }
             }
             try {
-                await waitFor(() => fs.existsSync(path.join(root, ".teamtype", "socket")))
+                await waitFor(() => fs.existsSync(path.join(root, ".teamtypev", "socket")))
                 let timer: ReturnType<typeof setTimeout> | undefined
                 try {
                     await Promise.race([
-                        openSharedDocument("teamtype", native, root),
+                        openSharedDocument("teamtypev", native, root),
                         new Promise((_, reject) => {
                             timer = setTimeout(
                                 () => reject(new Error("native handoff blocked on a close/save prompt")),
@@ -56,7 +56,7 @@ suite("Native tab handoff", () => {
                     if (timer) clearTimeout(timer)
                 }
                 const shared = vscode.workspace.textDocuments.find(
-                    (document) => document.uri.scheme === "teamtype" && document.uri.fsPath === file,
+                    (document) => document.uri.scheme === "teamtypev" && document.uri.fsPath === file,
                 )!
                 assert.ok(shared)
                 await waitFor(

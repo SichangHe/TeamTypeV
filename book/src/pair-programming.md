@@ -30,7 +30,7 @@ Make sure you're both inside the project directory on the command line.
 To start the session, run:
 
 ```bash
-teamtype share
+teamtypev share
 ```
 
 This will print, among other initialization information, a [join code](connection-making.md#join-codes), which looks like `3-exhausted-bananas`.
@@ -42,7 +42,7 @@ You can share this with one other person, to allow them to connect.
 To join a session, run a command like this:
 
 ```bash
-teamtype join 3-exhausted-bananas
+teamtypev join 3-exhausted-bananas
 ```
 
 This should show you a message like "Connected to peer: ...".
@@ -65,5 +65,5 @@ This is because when you're using TeamTypeV in parallel with Git fetches, updati
 
 If you don't have a Git remote, TeamTypeV uses the [offline support](offline-support.md) feature.
 When you re-start TeamTypeV, it will scan for changes you've made in the meantime, and try to send them to the other peer.
-If you don't want this, you can delete the CRDT state in `.teamtype/doc` as a joining peer, to receive the history from your peer.
+If you don't want this, you can delete the CRDT state in `.teamtypev/doc` as a joining peer, to receive the history from your peer.
 The hosting peer doesn't need to do that, it will simply update their state to the latest file content and share that with others.

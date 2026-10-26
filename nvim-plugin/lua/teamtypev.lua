@@ -3,11 +3,11 @@
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 
-local changetracker = require("teamtype.changetracker")
-local connection = require("teamtype.connection")
-local cursor = require("teamtype.cursor")
-local debug = require("teamtype.logging").debug
-local helpers = require("teamtype.helpers")
+local changetracker = require("teamtypev.changetracker")
+local connection = require("teamtypev.connection")
+local cursor = require("teamtypev.cursor")
+local debug = require("teamtypev.logging").debug
+local helpers = require("teamtypev.helpers")
 
 local M = {}
 
@@ -97,7 +97,7 @@ local function ensure_autoread_is_off()
     end
 end
 
--- In teamtype-enabled buffers, "writing" is no longer a concept. We also want to avoid error messages
+-- In teamtypev-enabled buffers, "writing" is no longer a concept. We also want to avoid error messages
 -- when the file has changed on disk, so make all writing operations a no-op.
 local function disable_writing()
     local buf = vim.api.nvim_get_current_buf()
@@ -176,7 +176,7 @@ local function find_or_create_client(config_name, root_dir)
                 print(
                     "Could not connect to TeamTypeV daemon. Did you start it (in "
                         .. root_dir
-                        .. ")? To stop trying, remove the .teamtype/ directory."
+                        .. ")? To stop trying, remove the .teamtypev/ directory."
                 )
             end
 
@@ -326,13 +326,6 @@ local function print_info()
     print(result)
 end
 
-local function legacy_command(f)
-    return function()
-        print("You are using a deprecated user command Ethersync*. Please use the corresponding TeamTypeV* instead.")
-        f()
-    end
-end
-
 local function activate_plugin()
     vim.api.nvim_create_autocmd({ "BufRead" }, { callback = on_buffer_open })
     vim.api.nvim_create_autocmd({ "BufNewFile" }, { callback = on_buffer_open })
@@ -342,15 +335,10 @@ local function activate_plugin()
     -- it should not attempt to reload it. Related to issue #176.
     vim.api.nvim_create_autocmd("FileChangedShell", { callback = function() end })
 
-    vim.api.nvim_create_user_command("TeamtypeInfo", print_info, {})
-    vim.api.nvim_create_user_command("TeamtypeJumpToCursor", cursor.jump_to_cursor, {})
-    vim.api.nvim_create_user_command("TeamtypeFollow", cursor.follow_cursor, {})
+    vim.api.nvim_create_user_command("TeamtypevInfo", print_info, {})
+    vim.api.nvim_create_user_command("TeamtypevJumpToCursor", cursor.jump_to_cursor, {})
+    vim.api.nvim_create_user_command("TeamtypevFollow", cursor.follow_cursor, {})
 
-    -- Support the old commands for a while, as they might be residing in user configurations.
-    -- TODO: Remove this after a while.
-    vim.api.nvim_create_user_command("EthersyncInfo", legacy_command(print_info), {})
-    vim.api.nvim_create_user_command("EthersyncJumpToCursor", legacy_command(cursor.jump_to_cursor), {})
-    vim.api.nvim_create_user_command("EthersyncFollow", legacy_command(cursor.follow_cursor), {})
 end
 
 activate_plugin()

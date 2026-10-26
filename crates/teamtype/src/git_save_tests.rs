@@ -61,7 +61,7 @@ async fn test_editor(
 async fn forwarded_git_retains_typing_and_rejects_saves_until_writer_stops() -> Result<()> {
     for cancel in [false, true] {
         let root = tempfile::tempdir()?;
-        std::fs::create_dir(root.path().join(".teamtype"))?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
         let repository = git2::Repository::init(root.path())?;
         repository.config()?.set_str(
             "alias.paused-writer",
@@ -223,7 +223,7 @@ async fn test_forwarded_git(handle: &DocumentActorHandle, args: &[&str]) -> Resu
 #[tokio::test]
 async fn checkout_refuses_saved_typing_but_explicit_restore_deletes_it() -> Result<()> {
     let root = tempfile::tempdir()?;
-    std::fs::create_dir(root.path().join(".teamtype"))?;
+    std::fs::create_dir(root.path().join(".teamtypev"))?;
     let repository = git2::Repository::init(root.path())?;
     repository.set_head("refs/heads/base")?;
     repository.config()?.set_str("user.name", "Test")?;
@@ -332,7 +332,7 @@ fn test_edit_delta(before: &str, after: &str) -> serde_json::Value {
 #[tokio::test]
 async fn forwarded_git_waits_for_background_writers_before_reconciling() -> Result<()> {
     let root = tempfile::tempdir()?;
-    std::fs::create_dir(root.path().join(".teamtype"))?;
+    std::fs::create_dir(root.path().join(".teamtypev"))?;
     let repository = git2::Repository::init(root.path())?;
     repository.config()?.set_str(
         "alias.background-writer",

@@ -1,5 +1,5 @@
 {
-    "name": "teamtype",
+    "name": "teamtypev",
     "displayName": "TeamTypeV",
     "version": "0.8.2",
     "publisher": "SichangHe",
@@ -15,14 +15,14 @@
     "contributes": {
         "commands": [
             {
-                "command": "teamtype.showCursors",
+                "command": "teamtypev.showCursors",
                 "title": "TeamTypeV: List other cursor positions"
             }
         ],
         "configuration": {
             "title": "TeamTypeV",
             "properties": {
-                "teamtype.configs": {
+                "teamtypev.configs": {
                     "type": "object",
                     "description": "Map of configurations",
                     "additionalProperties": {
@@ -49,13 +49,13 @@
                         ]
                     },
                     "default": {
-                        "teamtype": {
+                        "teamtypev": {
                             "cmd": [
-                                "teamtype",
+                                "teamtypev",
                                 "client"
                             ],
                             "rootMarkers": [
-                                ".teamtype"
+                                ".teamtypev"
                             ]
                         }
                     }

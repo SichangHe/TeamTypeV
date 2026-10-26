@@ -10,7 +10,7 @@ This directory contains end-to-end integration tests for TeamTypeV.
 They assume that your `PATH` contains:
 
 - An `nvim` with installed TeamTypeV plugin, and
-- a `teamtype` binary (for connecting via `teamtype client`).
+- a `teamtypev` binary (for connecting via `teamtypev client`).
 
 To run all e2e tests except the fuzzer, run:
 
@@ -25,7 +25,7 @@ cargo test --test fuzzer
 ```
 
 <!-- authored by agents -->
-After `cargo build -p teamtype`, the real-daemon regression tests also run from the repository root:
+After `cargo build -p teamtypev`, the real-daemon regression tests also run from the repository root:
 
 ```bash
 bash verification/live/git_forward.sh

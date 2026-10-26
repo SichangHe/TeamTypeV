@@ -54,9 +54,9 @@ jobs:
       - name: Compile e2e fuzzer
         run: cargo test --locked --no-default-features --no-run --test fuzzer
       - name: Run default unit tests
-        run: cargo test --locked --no-default-features -p teamtype
+        run: cargo test --locked --no-default-features -p teamtypev
       - name: Run CLI tests
-        run: cargo test --locked -p teamtype --bin teamtype --test agent_commands
+        run: cargo test --locked -p teamtypev --bin teamtypev --test agent_commands
       - name: Run default e2e tests
         run: cargo test --locked --no-default-features -p e2e-tests
       - if: ${{ matrix.nvim-version == 'v0.11.2' }}

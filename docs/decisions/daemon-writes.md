@@ -13,7 +13,7 @@ shared text has one writer: the daemon
   - Git flushes propagate write errors before starting Git
 
 editor buffers
-- VS Code uses a `teamtype:` filesystem provider
+- VS Code uses a `teamtypev:` filesystem provider
   - protocol messages still use `file:` URIs
   - native saves call the daemon and preserve VS Code's saved/undo state
   - unshared files and non-UTF-8 files retain normal file buffers
@@ -45,6 +45,6 @@ outside changes
 - an external Git operation that unlinks before creating can race daemon recreation and fail with `File exists`
 
 verification
-- the VS Code suite also runs native Emacs with `TEAMTYPE_EMACS_BINARY`
+- the VS Code suite also runs native Emacs with `TEAMTYPEV_EMACS_BINARY`
 - both editors exercise outside writes, Git checkout, Git pull, typing, and saves
 - Rust regressions cover a disk edit before watcher delivery and concurrent unflushed shared text

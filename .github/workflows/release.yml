@@ -45,8 +45,29 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_STRIP: symbols
         with:
-          bin: teamtype
+          bin: teamtypev
           include: README.md,LICENSE.md
           archive: ${{ matrix.archive }}
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-editor-assets:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode-plugin/package-lock.json
+      - name: Package editor plugins
+        run: |
+          tar -czf teamtypev-nvim.tar.gz -C nvim-plugin .
+          cd vscode-plugin
+          npm ci
+          npx --yes @vscode/vsce@3.6.2 package --out ../teamtypev.vsix
+      - name: Upload editor plugins
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" teamtypev-nvim.tar.gz emacs-plugin/teamtypev.el teamtypev.vsix --clobber

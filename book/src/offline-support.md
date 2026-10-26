@@ -35,11 +35,11 @@ After TeamTypeV has been restarted, its CRDT content will exactly match the file
 
 ## Starting from scratch
 
-TeamTypeV saves its CRDT state to `.teamtype/doc`.
+TeamTypeV saves its CRDT state to `.teamtypev/doc`.
 If you ever want to discard that state, you can delete that file.
 You might want to do this, for example, if you have previously paired on a project with person A, but now you want to *join* a shared session hosted by unrelated person B.
 Because B's document history has nothing to do with the one you currently have, syncing them will not work.
-So by deleting `.teamtype/doc`, you can "start from scratch", and join B.
+So by deleting `.teamtypev/doc`, you can "start from scratch", and join B.
 
 ## What do you mean by "more or less reasonable" syncing?
 

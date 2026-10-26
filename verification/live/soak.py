@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import final
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = Path(os.environ.get("SOAK_BINARY", ROOT / "target/release/teamtype"))
+BINARY = Path(os.environ.get("SOAK_BINARY", ROOT / "target/release/teamtypev"))
 
 
 @final
@@ -42,7 +42,7 @@ class Soak:
         self.failures: list[dict[str, object]] = []
         self.checks: list[dict[str, object]] = []
         self.events = work / "events.jsonl"
-        self.env = dict(os.environ, TEAMTYPE_BINARY=str(BINARY))
+        self.env = dict(os.environ, TEAMTYPEV_BINARY=str(BINARY))
         self.tasks: list[asyncio.Task[None]] = []
 
     def event(self, kind: str, **data: object) -> None:
@@ -91,7 +91,7 @@ class Soak:
 
     async def start_daemon(self, peer: str) -> None:
         if self.relay:
-            config = self.work / peer / ".teamtype/config"
+            config = self.work / peer / ".teamtypev/config"
             existing = config.read_text() if config.exists() else ""
             _ = config.write_text(existing + f"iroh_relay={self.relay}\n")
         (self.work / f"{peer}.log").touch()
@@ -123,7 +123,7 @@ class Soak:
     async def setup(self) -> None:
         (self.work / "resolv.conf").write_text("nameserver 10.0.2.3\n")
         for p in self.peers:
-            (self.work / p / ".teamtype").mkdir(parents=True)
+            (self.work / p / ".teamtypev").mkdir(parents=True)
             holder = await self.spawn(["unshare", "-rmn", "sh", "-c",
                 'mount --bind "$1" /etc/resolv.conf && exec sleep infinity',
                 "sh", str(self.work / "resolv.conf")], f"{p}.netns.log")
@@ -139,7 +139,7 @@ class Soak:
                 raise RuntimeError(output)
         (self.work / "a/shared.txt").write_text("seed\n" + "".join(f"anchor-{p}\n" for p in self.peers))
         if self.seed_from:
-            (self.work / "a/.teamtype/doc").write_bytes((self.seed_from / ".teamtype/doc").read_bytes())
+            (self.work / "a/.teamtypev/doc").write_bytes((self.seed_from / ".teamtypev/doc").read_bytes())
             (self.work / "a/shared.txt").write_bytes((self.seed_from / "shared.txt").read_bytes())
         await self.start_daemon("a")
         def address():
@@ -148,7 +148,7 @@ class Soak:
         match = address()
         assert match is not None
         for p in self.peers[1:]:
-            (self.work / p / ".teamtype/config").write_text(match.group() + "\n")
+            (self.work / p / ".teamtypev/config").write_text(match.group() + "\n")
             await self.start_daemon(p)
         await self.wait_for(lambda: len(self.contents()) == len(self.peers) and len(set(self.contents())) == 1)
         await self.spawn(["nvim", "--headless", "--clean", "-n", "--listen", str(self.work / "a.nvim"),

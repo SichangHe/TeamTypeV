@@ -25,7 +25,7 @@ pub fn initialize() -> Result<()> {
 
     if simplified_logging {
         let subscriber = FmtSubscriber::builder()
-            .with_env_filter(EnvFilter::new("teamtype=info,fuzzer=info"))
+            .with_env_filter(EnvFilter::new("teamtypev=info,fuzzer=info"))
             .with_ansi(true) // Let the rest of the builder understand we are colorized.
             .event_format(ColoredLine)
             .finish();

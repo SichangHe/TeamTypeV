@@ -22,7 +22,7 @@ function Connection:send_request(method, params, result_callback, err_callback)
 
     self.connection.request(method, params, function(err, result)
         if err then
-            local error_msg = "[teamtype] Error for '" .. method .. "': " .. err.message
+            local error_msg = "[teamtypev] Error for '" .. method .. "': " .. err.message
             if err.data and err.data ~= "" then
                 error_msg = error_msg .. " (" .. err.data .. ")"
             end

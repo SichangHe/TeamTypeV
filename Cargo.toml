@@ -36,7 +36,7 @@ tracing = "0.1"
 version = "0.3"
 default-features = false
 
-[workspace.dependencies.teamtype]
+[workspace.dependencies.teamtypev]
 path = "crates/teamtype"
 
 # The fuzzer in the e2e-tests crate will time out without optimizations enabled.

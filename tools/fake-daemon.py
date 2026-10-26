@@ -11,7 +11,7 @@ import socket
 import os, os.path
 import json
 
-socket_path = "/tmp/teamtype-test/.teamtype/socket"
+socket_path = "/tmp/teamtypev-test/.teamtypev/socket"
 
 # Returns the next JSON-RPC object.
 def read_line(conn):

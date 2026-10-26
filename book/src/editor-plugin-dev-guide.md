@@ -22,8 +22,8 @@ The daemon will send other people's changes and cursor positions back to the edi
 To make this as easy as possible for your plugin, we're using the same protocol as the [Language Server Protocol](https://microsoft.github.io/language-server-protocol/overviews/lsp/overview/): [JSON-RPC](https://www.jsonrpc.org/specification).
 So if your editor plugin system allows connecting to an LSP, you'll hopefully can re-use the component opening a JSON-RPC connection.
 
-The editor plugin will need to spawn the command `teamtype client` (which is our helper tool to connect to a running TeamTypeV daemon), and speak JSON-RPC (with Content-Length headers) with the standard input/output of that process.
-Think of `teamtype client` as the LSP Server when looking at it from the editor's perspective.
+The editor plugin will need to spawn the command `teamtypev client` (which is our helper tool to connect to a running TeamTypeV daemon), and speak JSON-RPC (with Content-Length headers) with the standard input/output of that process.
+Think of `teamtypev client` as the LSP Server when looking at it from the editor's perspective.
 
 ## File ownership
 
@@ -45,7 +45,7 @@ For each open file, editors store two integers:
 
 ## How the editor recognizes TeamTypeV-enabled directories
 
-Similar how Git repositories have a `.git` directory at the top level, TeamTypeV-enabled directories have an `.teamtype` directory at the top level.
+Similar how Git repositories have a `.git` directory at the top level, TeamTypeV-enabled directories have an `.teamtypev` directory at the top level.
 The editor must only send messages for files inside TeamTypeV-enabled directories.
 
 ## The daemon-editor protocol
@@ -133,12 +133,12 @@ These should be sent as notifications, there is no need to reply to them.
 To send messages to the daemon manually, you can try the following.
 Assuming you can start the daemon in a testing directory as described in the [README](https://github.com/SichangHe/TeamTypeV#share-or-join), now we add some debugging output:
 ```bash
-RUST_LOG=teamtype=debug teamtype share playground
-# Note for below: You will see some output like "Listening on UNIX socket: <dir>/.teamtype/socket"
+RUST_LOG=teamtypev=debug teamtypev --directory playground share
+# Note for below: You will see some output like "Listening on UNIX socket: <dir>/.teamtypev/socket"
 ```
 You can then start the client, in another terminal, but in the same directory:
 ```bash
-teamtype client
+teamtypev client
 ```
 This will already produce an output in the daemon which indicates that an Editor connected.
 This happens because the client connects to the daemon's socket.
@@ -154,7 +154,7 @@ python tools/dummy-jsonrpc.py playground/file
 You can send it to the daemon like this:
 
 ```bash
-python tools/dummy-jsonrpc.py playground/file | teamtype client
+python tools/dummy-jsonrpc.py playground/file | teamtypev client
 ```
 
 ### Seeing what an existing TeamTypeV plugin sends
@@ -163,7 +163,7 @@ On the other hand, not running any daemon, you can see what the plugin "wants" t
 In the demon console (stop it), we now just plainly listen on the socket for incoming data:
 ```bash
 # nc can only bind to existing sockets, so we'll drop potentially existing ones
-rm <dir>/.teamtype/socket; nc -lk -U <dir>/.teamtype/socket
+rm <dir>/.teamtypev/socket; nc -lk -U <dir>/.teamtypev/socket
 ```
 
 In the client console, start nvim on a file, move the cursor and edit something:
@@ -181,7 +181,7 @@ Do do that on a single machine, follow these steps:
 2. Create a new, empty directory for the second daemon.
 3. Start the second daemon:
     - The directory should be the additional directory you created.
-    - Use `teamtype join <join code>`.
+    - Use `teamtypev join <join code>`.
 4. Connect an editor to the first daemon by opening a file in the first directory.
 5. Connect an editor to the second daemon.
     - Example: `nvim directory2/file`

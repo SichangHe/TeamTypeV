@@ -23,7 +23,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = Path(
-    os.environ.get("TEAMTYPE_BINARY", ROOT / "target/debug/teamtype")
+    os.environ.get("TEAMTYPEV_BINARY", ROOT / "target/debug/teamtypev")
 ).resolve()
 
 
@@ -45,7 +45,7 @@ def eventually(check):
 class TerminalGit(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.work = Path(tempfile.mkdtemp(prefix="teamtype-terminal-"))
+        cls.work = Path(tempfile.mkdtemp(prefix="teamtypev-terminal-"))
         cls.host = cls.work / "host"
         cls.join = cls.work / "join ' quoted \\ path"
         cls.processes = []
@@ -53,7 +53,7 @@ class TerminalGit(unittest.TestCase):
         cls.preserve_logs = False
         cls.addClassCleanup(cls.cleanup)
         for directory in (cls.host, cls.join):
-            (directory / ".teamtype").mkdir(parents=True)
+            (directory / ".teamtypev").mkdir(parents=True)
         run("git", "init", "-qb", "master", cwd=cls.host)
         run("git", "config", "user.name", "Test", cwd=cls.host)
         run("git", "config", "user.email", "test@example.test", cwd=cls.host)
@@ -64,7 +64,7 @@ class TerminalGit(unittest.TestCase):
         host_log = cls.work / "host.log"
         eventually(lambda: re.search(r"peer=\S+", host_log.read_text()))
         address = re.search(r"peer=\S+", host_log.read_text())[0]
-        (cls.join / ".teamtype/config").write_text(address + "\n")
+        (cls.join / ".teamtypev/config").write_text(address + "\n")
         cls.start(cls.join, "join")
         eventually(lambda: (cls.join / "file").exists())
         cls.editor = cls.work / "editor"
@@ -111,7 +111,7 @@ class TerminalGit(unittest.TestCase):
         for log in cls.logs:
             log.close()
         if cls.preserve_logs:
-            saved = Path(tempfile.mkdtemp(prefix="teamtype-terminal-failure-"))
+            saved = Path(tempfile.mkdtemp(prefix="teamtypev-terminal-failure-"))
             for name in ("host.log", "join.log"):
                 shutil.copyfile(cls.work / name, saved / name)
             print(f"Daemon logs preserved in {saved}")
@@ -125,8 +125,8 @@ class TerminalGit(unittest.TestCase):
                 )
                 environment = dict(
                     os.environ,
-                    ACTIVATE=str(self.join / ".teamtype/activate"),
-                    SHIM=str(self.join / ".teamtype/bin/git"),
+                    ACTIVATE=str(self.join / ".teamtypev/activate"),
+                    SHIM=str(self.join / ".teamtypev/bin/git"),
                 )
                 if shell == "fish":
                     script = """
@@ -196,7 +196,7 @@ exit 0
             os.environ["TERM"] = "xterm-256color"
             if os.environ.get("TERMINAL_DIRECT"):
                 os.execv(str(BINARY), [str(BINARY), "git", *args])
-            script = "source .teamtype/activate; exec git " + shlex.join(args)
+            script = "source .teamtypev/activate; exec git " + shlex.join(args)
             os.execvp("bash", ["bash", "--noprofile", "--norc", "-c", script])
         output = bytearray()
         os.close(ready_read)

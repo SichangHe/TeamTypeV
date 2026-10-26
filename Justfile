@@ -18,7 +18,7 @@ reuse := require('reuse')
 stylua := require('stylua')
 typos := require('typos')
 
-export TEAMTYPE_BINARY := justfile_directory() + "/target/debug/teamtype"
+export TEAMTYPEV_BINARY := justfile_directory() + "/target/debug/teamtypev"
 
 # By default Just will re-use the user's $SHELL. In order to make use of script
 # rules and more advanced shell features we need a more predictable runtime
@@ -155,26 +155,26 @@ perfect: check lint test fuzz
 # This is especially useful for manual testing and can be used from anywhere by invoking the Justfile externally,
 # e.g. with an alias such as:
 #
-#     alias nvim='just --justfile ~/path/to/teamtype/Justfile nvim'
+#     alias nvim='just --justfile ~/path/to/teamtypev/Justfile nvim'
 #
 # Run Neovim with the plug-in for testing (can be used from outside the project).
 [no-cd]
 nvim *ARGS: build-test
     {{ nvim }} --clean \
         --cmd {{ quote("let &runtimepath=\"" + justfile_directory() + "/nvim-plugin,\" . &runtimepath") }} \
-        --cmd 'runtime plugin/teamtype.lua' \
+        --cmd 'runtime plugin/teamtypev.lua' \
         {{ maybe-pass(ARGS) }}
 
 # This task will build (if necessary) and run the TeamTypeV CLI via the development version from this repository.
 # This is especially useful for manual testing and can be used from anywhere by invoking the Justfile externally,
 # e.g. with an alias such as:
 #
-#     alias teamtype='just --justfile ~/path/to/teamtype/Justfile teamtype'
+#     alias teamtypev='just --justfile ~/path/to/teamtypev/Justfile teamtypev'
 #
 # Build and run TeamTypeV for testing (can be used from outside the project).
 [no-cd]
-teamtype *ARGS: build-test
-    $TEAMTYPE_BINARY {{ maybe-pass(ARGS) }}
+teamtypev *ARGS: build-test
+    $TEAMTYPEV_BINARY {{ maybe-pass(ARGS) }}
 
 # Get an early look at what the changelog draft would look like for a release.
 [group('release')]

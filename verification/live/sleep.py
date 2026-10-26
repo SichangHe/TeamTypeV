@@ -14,8 +14,8 @@ import time
 from typing import TextIO
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = Path(os.environ.get("TEAMTYPE_BINARY", str(ROOT / "target/release/teamtype")))
-os.environ["TEAMTYPE_BINARY"] = str(BINARY)
+BINARY = Path(os.environ.get("TEAMTYPEV_BINARY", str(ROOT / "target/release/teamtypev")))
+os.environ["TEAMTYPEV_BINARY"] = str(BINARY)
 
 
 def run(*args: str) -> str:
@@ -77,7 +77,7 @@ def trial(out: Path, mode: str, duration_s: int, repeat: int) -> str:
 
     try:
         for p in "abc":
-            (work / p / ".teamtype").mkdir(parents=True)
+            (work / p / ".teamtypev").mkdir(parents=True)
         (work / "a/shared.txt").write_text("seed\n")
         daemons["a"] = start(
             [str(BINARY), "share", "--no-join-code", "--show-secret-address"],
@@ -89,7 +89,7 @@ def trial(out: Path, mode: str, duration_s: int, repeat: int) -> str:
         assert match is not None
         address = match.group()
         for p in "bc":
-            (work / p / ".teamtype/config").write_text(address + "\n")
+            (work / p / ".teamtypev/config").write_text(address + "\n")
             if p == "c" and mode == "network":
                 (work / "resolv.conf").write_text("nameserver 10.0.2.3\n")
                 keeper = start(
@@ -225,7 +225,7 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--work", type=Path)
     args = parser.parse_args()
-    out = args.work or Path(tempfile.mkdtemp(prefix="teamtype-sleep-"))
+    out = args.work or Path(tempfile.mkdtemp(prefix="teamtypev-sleep-"))
     out.mkdir(parents=True, exist_ok=True)
     print(out, flush=True)
     cases = [

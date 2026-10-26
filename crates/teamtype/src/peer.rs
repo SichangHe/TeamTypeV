@@ -260,19 +260,19 @@ impl ConnectionManager {
         Ok(builder.bind().await?)
     }
 
-    /// A joiner whose `.teamtype` was copied from another directory would share that directory's
+    /// A joiner whose `.teamtypev` was copied from another directory would share that directory's
     /// identity, and the two would keep replacing each other's connection. So a joiner's key is
     /// tied to its directory, and a copied one is replaced.
     fn forget_copied_key(base_dir: &Path) {
-        let teamtype_dir = base_dir.join(".teamtype");
-        let key_dir_file = teamtype_dir.join("key-dir");
+        let teamtypev_dir = base_dir.join(".teamtypev");
+        let key_dir_file = teamtypev_dir.join("key-dir");
         let this_dir = fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
         let this_dir = this_dir.display().to_string();
         let key_dir = fs::read_to_string(&key_dir_file).ok();
         if key_dir.as_deref() != Some(this_dir.as_str()) {
-            if teamtype_dir.join("key").exists() {
-                info!("This directory's .teamtype/key was made elsewhere; making a new one.");
-                let _ = fs::remove_file(teamtype_dir.join("key"));
+            if teamtypev_dir.join("key").exists() {
+                info!("This directory's .teamtypev/key was made elsewhere; making a new one.");
+                let _ = fs::remove_file(teamtypev_dir.join("key"));
             }
             if let Err(err) = fs::write(&key_dir_file, &this_dir) {
                 warn!("Failed to write {}: {err}", key_dir_file.display());
@@ -281,7 +281,7 @@ impl ConnectionManager {
     }
 
     fn get_keypair(base_dir: &Path) -> (SecretKey, SecretKey) {
-        let keyfile = base_dir.join(".teamtype").join("key");
+        let keyfile = base_dir.join(".teamtypev").join("key");
         if keyfile.exists() {
             let metadata =
                 fs::metadata(&keyfile).expect("Expected to have access to metadata of the keyfile");
@@ -295,7 +295,7 @@ impl ConnectionManager {
 
             assert!(
                 metadata.len() == 64,
-                "Your keyfile is not 64 bytes long. This is a sign that it was created by a TeamTypeV version older than 0.7.0, which is not compatible. Please remove .teamtype/key, and try again."
+                "Your keyfile is not 64 bytes long. This is a sign that it was created by a TeamTypeV version older than 0.7.0, which is not compatible. Please remove .teamtypev/key, and try again."
             );
 
             debug!("Re-using existing keypair.");
@@ -468,7 +468,7 @@ impl EndpointActor {
                     Err(err) => {
                         if format!("{err:#}").contains("known protocol") {
                             warn!(
-                                "The peer runs a teamtype version that cannot sync with yours; install the same build on both sides."
+                                "The peer runs a teamtypev version that cannot sync with yours; install the same build on both sides."
                             );
                         }
                         if let Some(response_tx) = response_tx {
@@ -532,7 +532,7 @@ impl EndpointActor {
         Ok(())
     }
 
-    /// Two processes with the same `.teamtype/key`, for example in a copied `.teamtype`
+    /// Two processes with the same `.teamtypev/key`, for example in a copied `.teamtypev`
     /// directory, keep replacing each other's connection.
     fn warn_if_flapping(&mut self, peer_id: PublicKey) {
         let now = std::time::Instant::now();
@@ -541,7 +541,7 @@ impl EndpointActor {
         times.push(now);
         if times.len() == 10 {
             warn!(
-                "Peer {peer_id} connected 10 times in a minute. Two teamtype processes probably use the same .teamtype/key, for example in a copied .teamtype directory, and keep replacing each other; delete .teamtype/key in all but one."
+                "Peer {peer_id} connected 10 times in a minute. Two teamtypev processes probably use the same .teamtypev/key, for example in a copied .teamtypev directory, and keep replacing each other; delete .teamtypev/key in all but one."
             );
         }
     }
@@ -576,7 +576,7 @@ impl EndpointActor {
                 losses.push(now);
                 if losses.len() == 10 {
                     warn!(
-                        "The connection dropped 10 times in a minute. Another teamtype process probably uses this directory's .teamtype/key, for example in a copied .teamtype directory, and keeps replacing this connection; delete .teamtype/key in the copy."
+                        "The connection dropped 10 times in a minute. Another teamtypev process probably uses this directory's .teamtypev/key, for example in a copied .teamtypev directory, and keeps replacing this connection; delete .teamtypev/key in the copy."
                     );
                 }
             }
@@ -823,7 +823,7 @@ impl PeerMessageStream {
 
         let mut bytes = vec![0; byte_count as usize];
         Self::read_exact(receive, &mut bytes).await?;
-        from_bytes(&bytes).context("Could not read the peer's message; the peer probably runs a different teamtype version")
+        from_bytes(&bytes).context("Could not read the peer's message; the peer probably runs a different teamtypev version")
     }
 
     /// Times out only when bytes stop arriving, allowing large sync messages to make progress.
@@ -898,7 +898,7 @@ mod recovery_tests {
     #[tokio::test]
     async fn tunnel_survives_blocked_relay_without_sync_peers() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        fs::create_dir(dir.path().join(".teamtype"))?;
+        fs::create_dir(dir.path().join(".teamtypev"))?;
         let config = AppConfig {
             base_dir: dir.path().to_path_buf(),
             iroh_relay: Some("http://127.0.0.1:9".to_owned()),
@@ -1033,7 +1033,7 @@ mod tests {
         let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
         let peer_id = SecretKey::generate().public();
         let directory = tempfile::tempdir()?;
-        fs::create_dir(directory.path().join(".teamtype"))?;
+        fs::create_dir(directory.path().join(".teamtypev"))?;
         let config = AppConfig {
             base_dir: directory.path().into(),
             ..AppConfig::default()
@@ -1157,7 +1157,7 @@ mod tests {
                 .bind()
                 .await?;
             let directory = tempfile::tempdir()?;
-            fs::create_dir(directory.path().join(".teamtype"))?;
+            fs::create_dir(directory.path().join(".teamtypev"))?;
             let config = AppConfig {
                 base_dir: directory.path().into(),
                 ..AppConfig::default()

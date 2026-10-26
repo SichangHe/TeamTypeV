@@ -17,7 +17,7 @@ class NightlyTests(unittest.TestCase):
         creation = textwrap.dedent(
             workflow.split("        run: |\n", 1)[1].split("\n  upload-assets:", 1)[0]
         )
-        with tempfile.TemporaryDirectory(prefix="teamtype-nightly-") as directory:
+        with tempfile.TemporaryDirectory(prefix="teamtypev-nightly-") as directory:
             simulation = r"""
                 set -eu
                 export GITHUB_RUN_ID=123 GITHUB_SHA=abcdef

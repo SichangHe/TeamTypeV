@@ -4,8 +4,8 @@
 # Real-daemon regressions. CASE selects one case; defaults to all. Prints only failures.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-TEAMTYPE_BINARY=${TEAMTYPE_BINARY:-$root/target/debug/teamtype}
-work=$(mktemp -d "${TMPDIR:-/tmp}/teamtype-git-regressions.XXXXXX")
+TEAMTYPEV_BINARY=${TEAMTYPEV_BINARY:-$root/target/debug/teamtypev}
+work=$(mktemp -d "${TMPDIR:-/tmp}/teamtypev-git-regressions.XXXXXX")
 pids=()
 success=
 cleanup() {
@@ -23,14 +23,14 @@ eventually() {
     return 1
 }
 in_dir() { local dir=$1; shift; (cd "$work/$dir" && "$@"); }
-remote() { in_dir b "$TEAMTYPE_BINARY" git "$@" </dev/null; }
+remote() { in_dir b "$TEAMTYPEV_BINARY" git "$@" </dev/null; }
 has_text() { [ "$(cat "$work/$1/f.txt" 2>/dev/null)" = "$2" ]; }
 start() {
     local dir=$1; shift
-    (cd "$work/$dir" && exec "$TEAMTYPE_BINARY" "$@" </dev/null >>"$work/$dir.log" 2>&1) &
+    (cd "$work/$dir" && exec "$TEAMTYPEV_BINARY" "$@" </dev/null >>"$work/$dir.log" 2>&1) &
     pids+=("$!")
 }
-mkdir -p "$work/a/.teamtype" "$work/b/.teamtype"
+mkdir -p "$work/a/.teamtypev" "$work/b/.teamtypev"
 in_dir a git init -qb master
 in_dir a git config user.name Test
 in_dir a git config user.email test@example.test
@@ -47,25 +47,25 @@ if [ "${CASE:-all}" = portable ]; then
 fi
 start a share --no-join-code --show-secret-address
 eventually grep -aq 'peer=' "$work/a.log" || fail 'no sharer address'
-grep -aoE 'peer=[^ ]+' "$work/a.log" >"$work/b/.teamtype/config"
+grep -aoE 'peer=[^ ]+' "$work/a.log" >"$work/b/.teamtypev/config"
 start b join
 eventually has_text b initial || fail 'no initial sync'
 eventually test -f "$work/b/ignored.txt" || fail 'tracked ignored file not shared'
 if [[ ${CASE:-all} = open || ${CASE:-all} = all ]]; then
     mkfifo "$work/open-input"
     exec 8<>"$work/open-input"
-    timeout 10s bash -c 'cd "$1" && exec "$2" git status --porcelain' _ "$work/b" "$TEAMTYPE_BINARY" <&8 >"$work/open.out" ||
+    timeout 10s bash -c 'cd "$1" && exec "$2" git status --porcelain' _ "$work/b" "$TEAMTYPEV_BINARY" <&8 >"$work/open.out" ||
         fail 'Git status waited for stdin EOF'
     in_dir a git config alias.read-first '!head -c 6'
     printf before >&8
-    timeout 10s bash -c 'cd "$1" && exec "$2" git read-first' _ "$work/b" "$TEAMTYPE_BINARY" <&8 >"$work/first.out" ||
+    timeout 10s bash -c 'cd "$1" && exec "$2" git read-first' _ "$work/b" "$TEAMTYPEV_BINARY" <&8 >"$work/first.out" ||
         fail 'Git did not receive stdin before EOF'
     [ "$(cat "$work/first.out")" = before ] || fail 'streamed stdin differs'
     exec 8>&-
 fi
 if [[ ${CASE:-all} = silent || ${CASE:-all} = all ]]; then
     in_dir a git config alias.silent '!sleep 185'
-    timeout 200s bash -c 'cd "$1" && exec "$2" git silent' _ "$work/b" "$TEAMTYPE_BINARY" </dev/null >"$work/silent.out" 2>"$work/silent.err" ||
+    timeout 200s bash -c 'cd "$1" && exec "$2" git silent' _ "$work/b" "$TEAMTYPEV_BINARY" </dev/null >"$work/silent.out" 2>"$work/silent.err" ||
         fail 'silent Git command was cancelled'
 fi
 case ${CASE:-all} in
@@ -74,7 +74,7 @@ case ${CASE:-all} in
         ;;
     stdin|all)
         { sleep 0.4; printf 'before'; sleep 0.4; printf 'after'; } |
-            in_dir b "$TEAMTYPE_BINARY" git hash-object --stdin >"$work/hash"
+            in_dir b "$TEAMTYPEV_BINARY" git hash-object --stdin >"$work/hash"
         expected=$(printf beforeafter | in_dir a git hash-object --stdin)
         [ "$(cat "$work/hash")" = "$expected" ] || fail 'slow stdin was truncated'
         ;;
@@ -86,7 +86,7 @@ if [[ ${CASE:-all} = ignored || ${CASE:-all} = all ]]; then
 fi
 if [[ ${CASE:-all} = large || ${CASE:-all} = all ]]; then
     dd if=/dev/zero of="$work/input" bs=1048576 count=80 status=none
-    in_dir b "$TEAMTYPE_BINARY" git hash-object --stdin <"$work/input" >"$work/hash" 2>"$work/input.err" &
+    in_dir b "$TEAMTYPEV_BINARY" git hash-object --stdin <"$work/input" >"$work/hash" 2>"$work/input.err" &
     upload=$!
     pids+=("$upload")
     printf 'during stdin\n' >"$work/a/f.txt"
@@ -100,11 +100,11 @@ if [[ ${CASE:-all} = queue || ${CASE:-all} = all ]]; then
     blob=$(in_dir a git hash-object -w --stdin <"$work/input")
     mkfifo "$work/stalled"
     exec 9<>"$work/stalled"
-    (cd "$work/b" && exec "$TEAMTYPE_BINARY" git cat-file blob "$blob" </dev/null >&9 2>"$work/stalled.err") &
+    (cd "$work/b" && exec "$TEAMTYPEV_BINARY" git cat-file blob "$blob" </dev/null >&9 2>"$work/stalled.err") &
     stalled=$!
     pids+=("$stalled")
     sleep 2
-    (cd "$work/a" && exec "$TEAMTYPE_BINARY" git status --porcelain </dev/null >"$work/queued.out" 2>"$work/queued.err") &
+    (cd "$work/a" && exec "$TEAMTYPEV_BINARY" git status --porcelain </dev/null >"$work/queued.out" 2>"$work/queued.err") &
     queued=$!
     pids+=("$queued")
     eventually grep -q 'queued behind: cat-file' "$work/queued.err" || fail 'waiting client got no queue explanation'

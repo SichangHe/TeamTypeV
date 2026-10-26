@@ -6,7 +6,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 [package]
-name = "teamtype"
+name = "teamtypev"
 description = "TeamTypeV: collaborative editing of local text files."
 version.workspace = true
 authors.workspace = true
@@ -28,11 +28,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "teamtype"
+name = "teamtypev"
 required-features = ["cli"]
 
 [lib]
-name = "teamtype"
+name = "teamtypev"
 crate-type = ["rlib", "cdylib"]
 
 [features]

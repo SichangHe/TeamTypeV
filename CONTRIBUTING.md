@@ -24,7 +24,7 @@ You will need Rust's `cargo` tool.
     cargo build --locked --release
     ```
 
-3. This will create a binary called `target/release/teamtype`, that needs to be added/moved to your shell's `$PATH`.
+3. This will create a binary called `target/release/teamtypev`, that needs to be added/moved to your shell's `$PATH`.
 
 ## REUSE policy
 

@@ -15,8 +15,8 @@ use anyhow::bail;
 use anyhow::{Context, Result};
 use clap::{CommandFactory as _, FromArgMatches as _};
 use microxdg::XdgApp;
-use teamtype::jsonrpc_forwarder::{JSONRPCForwarder, UnixJSONRPCForwarder};
-use teamtype::{
+use teamtypev::jsonrpc_forwarder::{JSONRPCForwarder, UnixJSONRPCForwarder};
+use teamtypev::{
     config::{self, AppConfig},
     daemon::Daemon,
     logging, sandbox,
@@ -30,18 +30,11 @@ use self::cli::{Cli, Commands, ShareJoinFlags};
 mod agent_edit;
 mod cli;
 
-fn has_ethersync_directory(dir: &Path) -> bool {
-    let ethersync_dir = dir.join(config::LEGACY_CONFIG_DIR);
+fn has_teamtypev_directory(dir: &Path) -> bool {
+    let teamtypev_dir = dir.join(config::CONFIG_DIR);
     // Using the sandbox method here is technically unnecessary,
     // but we want to really run all path operations through the sandbox module.
-    sandbox::exists(dir, &ethersync_dir).expect("Failed to check") && ethersync_dir.is_dir()
-}
-
-fn has_teamtype_directory(dir: &Path) -> bool {
-    let teamtype_dir = dir.join(config::CONFIG_DIR);
-    // Using the sandbox method here is technically unnecessary,
-    // but we want to really run all path operations through the sandbox module.
-    sandbox::exists(dir, &teamtype_dir).expect("Failed to check") && teamtype_dir.is_dir()
+    sandbox::exists(dir, &teamtypev_dir).expect("Failed to check") && teamtypev_dir.is_dir()
 }
 
 #[tokio::main]
@@ -52,7 +45,7 @@ async fn main() -> Result<()> {
         exit(1);
     }));
 
-    let version = option_env!("TEAMTYPE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    let version = option_env!("TEAMTYPEV_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     let arg_matches = Cli::command().version(version).get_matches();
     let cli = match Cli::from_arg_matches(&arg_matches) {
         Ok(cli) => cli,
@@ -66,18 +59,18 @@ async fn main() -> Result<()> {
         port,
     } = &cli.command
     {
-        return teamtype::peer::run_tunnel(secret_address, *port).await;
+        return teamtypev::peer::run_tunnel(secret_address, *port).await;
     }
 
     if let Commands::Git { args } = &cli.command {
-        let code = teamtype::git_forward::client(cli.directory.as_deref(), args.clone()).await?;
+        let code = teamtypev::git_forward::client(cli.directory.as_deref(), args.clone()).await?;
         exit(code);
     }
 
     let temporary_directory = get_temporary_directory(&cli)?;
     let directory = get_directory(temporary_directory.as_ref(), &cli)?;
-    setup_teamtype_directory(&directory, temporary_directory.as_ref())
-        .context("Failed to find .teamtype/ directory")?;
+    setup_teamtypev_directory(&directory, temporary_directory.as_ref())
+        .context("Failed to find .teamtypev/ directory")?;
 
     // TODO: If the result of this joined future handles were to go out of scope and hence be
     // dropped, *some* but not all parts of the daemon would shut down. Notably the local socket
@@ -144,7 +137,7 @@ async fn run_daemon(app_config: AppConfig, init_doc: bool) -> Result<Daemon> {
     // joiners can tell whether theirs belongs to it; see `peer::sync`.
     let persist = true;
 
-    config::ensure_teamtype_is_ignored(&app_config.base_dir)?;
+    config::ensure_teamtypev_is_ignored(&app_config.base_dir)?;
 
     debug!("Starting TeamTypeV on {}.", app_config.base_dir.display());
 
@@ -324,7 +317,7 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
 }
 
 fn get_app_cache_dir() -> Result<PathBuf> {
-    let xdg = XdgApp::new("teamtype")?;
+    let xdg = XdgApp::new("teamtypev")?;
     let app_cache_dir = xdg.app_cache()?;
     let app_cache_dir_parent = app_cache_dir.parent().with_context(|| {
         format!(
@@ -355,38 +348,19 @@ fn get_directory(temporary_directory: Option<&TempDir>, cli: &Cli) -> Result<Pat
     Ok(directory)
 }
 
-fn setup_teamtype_directory(directory: &Path, temporary_directory: Option<&TempDir>) -> Result<()> {
-    if has_ethersync_directory(directory) {
-        let old_directory = directory.join(config::LEGACY_CONFIG_DIR);
-
-        warn!(
-            "You have an '{}/' directory, back from when the project was called \"Ethersync\" until October 2025.",
-            &old_directory.display()
-        );
-
-        if prompt_bool(&format!(
-            "Do you want to rename {}/ to {}/?",
-            config::LEGACY_CONFIG_DIR,
-            config::CONFIG_DIR,
-        ))? {
-            let new_directory = directory.join(config::CONFIG_DIR);
-            sandbox::rename_file(directory, &old_directory, &new_directory)?;
-        } else {
-            bail!(
-                "Aborting launch. Rename or remove the {} directory yourself to continue.",
-                config::LEGACY_CONFIG_DIR
-            );
-        }
-    }
-    if !has_teamtype_directory(directory) {
-        let teamtype_dir = directory.join(config::CONFIG_DIR);
+fn setup_teamtypev_directory(
+    directory: &Path,
+    temporary_directory: Option<&TempDir>,
+) -> Result<()> {
+    if !has_teamtypev_directory(directory) {
+        let teamtypev_dir = directory.join(config::CONFIG_DIR);
         let directory_is_temporary_directory = temporary_directory.is_some();
         if directory_is_temporary_directory {
             info!(
                 "'{}' is the temporary directory that is used as a TeamTypeV directory.",
                 &directory.display()
             );
-            sandbox::create_dir(directory, &teamtype_dir)?;
+            sandbox::create_dir(directory, &teamtypev_dir)?;
         } else {
             warn!(
                 "'{}' hasn't been used as a TeamTypeV directory before.",
@@ -397,10 +371,10 @@ fn setup_teamtype_directory(directory: &Path, temporary_directory: Option<&TempD
                 "Do you want to enable live collaboration here? (This will create an {}/ directory.)",
                 config::CONFIG_DIR
             ))? {
-                sandbox::create_dir(directory, &teamtype_dir)?;
+                sandbox::create_dir(directory, &teamtypev_dir)?;
                 info!("Created! Resuming launch.");
             } else {
-                bail!("Aborting launch. TeamTypeV needs a .teamtype/ directory to function");
+                bail!("Aborting launch. TeamTypeV needs a .teamtypev/ directory to function");
             }
         }
     }
@@ -459,6 +433,38 @@ mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
+    #[test]
+    fn independent_state_leaves_upstream_directories_untouched() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        for name in [".teamtype", ".ethersync"] {
+            std::fs::create_dir(directory.path().join(name))?;
+            std::fs::write(
+                directory.path().join(name).join("key"),
+                b"upstream identity",
+            )?;
+        }
+        setup_teamtypev_directory(directory.path(), Some(&directory))?;
+        assert!(directory.path().join(".teamtypev").is_dir());
+        for name in [".teamtype", ".ethersync"] {
+            assert_eq!(
+                std::fs::read(directory.path().join(name).join("key"))?,
+                b"upstream identity"
+            );
+        }
+        let config = AppConfig {
+            base_dir: directory.path().to_path_buf(),
+            ..AppConfig::default()
+        };
+        assert!(sandbox::enumerate_non_ignored_files(&config).is_empty());
+        std::fs::write(directory.path().join(".teamtypeignore"), "visible.txt\n")?;
+        std::fs::write(directory.path().join("visible.txt"), "shared")?;
+        assert_eq!(
+            sandbox::enumerate_non_ignored_files(&config),
+            vec![directory.path().join("visible.txt")]
+        );
+        Ok(())
+    }
+
     /// Runs the real stdin prompt in a separate test process so parallel tests cannot consume it.
     fn check_overwrite(
         directory: &Path,
@@ -468,8 +474,8 @@ mod tests {
     ) -> Result<()> {
         let mut child = Command::new(env::current_exe()?)
             .args(["--exact", "tests::overwrite_prompt_child", "--nocapture"])
-            .env("TEAMTYPE_TEST_OVERWRITE_DIR", directory)
-            .env("TEAMTYPE_TEST_OVERWRITE_RESULT", expected)
+            .env("TEAMTYPEV_TEST_OVERWRITE_DIR", directory)
+            .env("TEAMTYPEV_TEST_OVERWRITE_RESULT", expected)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -494,10 +500,10 @@ mod tests {
 
     #[test]
     fn overwrite_prompt_child() -> Result<()> {
-        let Some(directory) = env::var_os("TEAMTYPE_TEST_OVERWRITE_DIR") else {
+        let Some(directory) = env::var_os("TEAMTYPEV_TEST_OVERWRITE_DIR") else {
             return Ok(());
         };
-        let expected = env::var("TEAMTYPE_TEST_OVERWRITE_RESULT")?;
+        let expected = env::var("TEAMTYPEV_TEST_OVERWRITE_RESULT")?;
         let result = confirm_overwrite(Path::new(&directory));
         if expected == "ok" {
             result?;

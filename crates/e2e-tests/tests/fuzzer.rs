@@ -12,10 +12,10 @@ use e2e_tests::actors::{Actor, Neovim};
 use futures::future::join_all;
 use pretty_assertions::assert_eq;
 use rand::RngExt;
-use teamtype::config::{self, AppConfig};
-use teamtype::daemon::{Daemon, TEST_FILE_PATH};
-use teamtype::logging;
-use teamtype::sandbox;
+use teamtypev::config::{self, AppConfig};
+use teamtypev::daemon::{Daemon, TEST_FILE_PATH};
+use teamtypev::logging;
+use teamtypev::sandbox;
 use tempfile::{TempDir, tempdir};
 use tokio::time::{Duration, sleep, timeout};
 use tracing::{error, info};
@@ -35,8 +35,8 @@ fn initialize_directory() -> (TempDir, PathBuf, PathBuf) {
         .path()
         .canonicalize()
         .expect("Unable to resolve canonical name for temp dir");
-    let teamtype_dir = dir_path.join(".teamtype");
-    sandbox::create_dir(&dir_path, &teamtype_dir).expect("Failed to create .teamtype directory");
+    let teamtypev_dir = dir_path.join(".teamtypev");
+    sandbox::create_dir(&dir_path, &teamtypev_dir).expect("Failed to create .teamtypev directory");
 
     let file = dir_path.join(TEST_FILE_PATH);
     sandbox::write_file(&dir_path, &file, b"").expect("Failed to create file in temp directory");
@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
     // the handle goes out of scope. We don't *use* the handle but we do need to keep it in scope.
     let (_handle1, dir1, file1) = initialize_directory();
     let (_handle2, dir2, file2) = initialize_directory();
+    std::fs::remove_file(&file2)?;
 
     // Set up the actors.
     let mut app_config = AppConfig::default();

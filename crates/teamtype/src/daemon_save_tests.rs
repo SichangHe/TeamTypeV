@@ -149,20 +149,20 @@ async fn failed_save_returns_error_and_can_be_retried() -> Result<()> {
     actor.persist = true;
     let _ = actor.persist();
     actor.crdt_doc.update_text("unsaved typing", &path);
-    std::fs::remove_dir_all(dir.path().join(".teamtype"))?;
-    std::fs::write(dir.path().join(".teamtype"), b"occupied")?;
+    std::fs::remove_dir_all(dir.path().join(".teamtypev"))?;
+    std::fs::write(dir.path().join(".teamtypev"), b"occupied")?;
     let save = EditorProtocolMessageFromEditor::Save { uri };
     assert!(actor.react_to_message_from_editor(1, &save).await.is_err());
     assert!(actor.flush_git_files().is_err());
     actor.assert_file_content(&path, "unsaved typing");
     assert_eq!(std::fs::read(dir.path().join("file1"))?, b"content1");
-    std::fs::remove_file(dir.path().join(".teamtype"))?;
+    std::fs::remove_file(dir.path().join(".teamtypev"))?;
     actor
         .react_to_message_from_editor(1, &save)
         .await
         .expect("retry save");
     assert_eq!(std::fs::read(dir.path().join("file1"))?, b"unsaved typing");
-    let recovered = Document::load(&std::fs::read(dir.path().join(".teamtype/doc"))?);
+    let recovered = Document::load(&std::fs::read(dir.path().join(".teamtypev/doc"))?);
     assert_eq!(
         recovered.current_file_content(&path),
         actor.current_file_content(&path)

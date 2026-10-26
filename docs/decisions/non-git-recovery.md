@@ -2,9 +2,9 @@
 (authored by agents unless marked 🧑)
 
 crash recovery
-- compare files listed in `.teamtype/open-files` with persisted history before scanning disk
+- compare files listed in `.teamtypev/open-files` with persisted history before scanning disk
 - never restore them from history; keep the version on disk and warn when it differs
-  - the following disk scan shares the kept version like any edit made while teamtype was down
+  - the following disk scan shares the kept version like any edit made while teamtypev was down
   - an unreadable recovery list only produces a warning
 
 agent baselines
@@ -15,7 +15,7 @@ agent baselines
 - require a single-component agent name and relative source paths without parent components
   - sandbox source reads inside the project
   - reject symlink snapshot roots, agent directories, and destinations
-- store JSON path/text records under `.teamtype/agent-snapshots-v2/AGENT/BLAKE3`
+- store JSON path/text records under `.teamtypev/agent-snapshots-v2/AGENT/BLAKE3`
   - bounded filenames support long source paths and file/directory layout changes
   - verify the stored path before replacing a record
   - private directories and atomic replacement with mode 0600 prevent public copies and partial records

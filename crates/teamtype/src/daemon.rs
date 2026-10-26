@@ -54,6 +54,7 @@ use crate::wormhole::put_secret_address_into_wormhole;
 /// One failed address lookup must not end a join: a live three-daemon trial lost a joiner that way.
 const INITIAL_CONNECT_ATTEMPTS: usize = 5;
 /// Identifies the sharer's history; set when the sharer starts a new one.
+/// This CRDT key is not a disk path; keeping it preserves existing fork histories.
 const HISTORY_ID: &str = ".teamtype/history";
 const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
@@ -170,9 +171,9 @@ impl DocumentActor {
         is_host: bool,
         persist: bool,
     ) -> Self {
-        // If there is a persisted version in base_dir/.teamtype/doc, load it.
-        // TODO: Pull out ".teamtype" string into a constant.
-        let persistence_file = app_config.base_dir.join(".teamtype/doc");
+        // If there is a persisted version in base_dir/.teamtypev/doc, load it.
+        // TODO: Pull out ".teamtypev" string into a constant.
+        let persistence_file = app_config.base_dir.join(".teamtypev/doc");
         let persistence_file_exists = sandbox::exists(&app_config.base_dir, &persistence_file)
             .expect("Could not check for the existence of the persistence file");
 
@@ -468,7 +469,7 @@ impl DocumentActor {
     /// restarts with a document at least as new as its files. With files newer than the document,
     /// the daemon shared their text again and a live trial showed duplicated lines for everyone.
     fn persist(&mut self) -> Result<()> {
-        let persistence_file = self.app_config.base_dir.join(".teamtype/doc");
+        let persistence_file = self.app_config.base_dir.join(".teamtypev/doc");
         let result = if self.save_fully {
             debug!("Persisting CRDT document fully.");
             let bytes = self.crdt_doc.save();
@@ -484,7 +485,7 @@ impl DocumentActor {
     }
 
     fn open_files_list(&self) -> PathBuf {
-        self.app_config.base_dir.join(".teamtype/open-files")
+        self.app_config.base_dir.join(".teamtypev/open-files")
     }
 
     fn save_files_open_in_editors(&self) {
@@ -522,7 +523,7 @@ impl DocumentActor {
     /// Never writes shared text over disk saves; differing versions require manual reconciliation.
     /// After a crash, files that were open in editors may hold saves newer than the persisted
     /// history. Never restore them from history: the disk version is kept, and the scan that
-    /// follows shares it like any other edit made while teamtype was down.
+    /// follows shares it like any other edit made while teamtypev was down.
     fn check_files_left_open(&self) {
         let bytes = match sandbox::read_file(&self.app_config.base_dir, &self.open_files_list()) {
             Ok(bytes) => bytes,
@@ -554,8 +555,8 @@ impl DocumentActor {
             );
             if !saved.is_ok_and(|saved| saved == shared) {
                 warn!(
-                    "{line} was open in an editor when teamtype last stopped and differs from \
-                     teamtype's history; keeping the version on disk."
+                    "{line} was open in an editor when teamtypev last stopped and differs from \
+                     teamtypev's history; keeping the version on disk."
                 );
             }
         }
@@ -1495,7 +1496,7 @@ impl Daemon {
             info!(
                 "{}",
                 &docstr!(format!
-                    /// Others can connect by putting the following secret address in their .teamtype/config:
+                    /// Others can connect by putting the following secret address in their .teamtypev/config:
                     ///
                     ///     peer={address}
                     ///
@@ -1515,7 +1516,7 @@ impl Daemon {
                 }
                 if format!("{err:#}").contains("known protocol") {
                     return Err(err.context(
-                        "The sharer runs a teamtype version that cannot sync with yours; install the same build on both sides",
+                        "The sharer runs a teamtypev version that cannot sync with yours; install the same build on both sides",
                     ));
                 }
                 warn!("Could not connect to specified peer, retrying: {err:#}");

@@ -13,7 +13,7 @@ TeamTypeV provides collaborative editing of local files, editor integration, and
 
 TeamTypeV is independently maintained and derived from [Teamtype](https://github.com/teamtype/teamtype), previously called Ethersync. The original authors built the peer-to-peer collaboration engine, editor protocol, and plugins on which this project depends. Please report TeamTypeV problems [here](https://github.com/SichangHe/TeamTypeV/issues), rather than to the upstream maintainers.
 
-The `teamtype` command, `.teamtype` configuration directory, and editor command identifiers retain their existing names for compatibility. Install TeamTypeV from this repository: packages named `teamtype` in public package managers belong to upstream.
+TeamTypeV uses the `teamtypev` command, `.teamtypev` state directory, `.teamtypevignore` files, and its own editor plugins. Upstream Teamtype can remain installed with its separate names. Install TeamTypeV from this repository; packages named `teamtype` in public package managers belong to upstream. Existing fork users should follow the [manual upgrade instructions](book/src/upgrading.md).
 
 ## Installation
 
@@ -23,11 +23,11 @@ Install the latest nightly build into `~/.local/bin` on Linux or macOS. In a ter
 curl -fsSL https://raw.githubusercontent.com/SichangHe/TeamTypeV/live-multi-editor/install.sh | sh
 ```
 
-To choose directly, replace `sh` with `sh -s -- --editor emacs`, `sh -s -- --editor code` (VS Code), `sh -s -- --editor codium`, or `sh -s -- --editor nvim`. Rerun for another editor. Use `sh -s -- --no-editor` to install only the executable.
+To choose directly, replace `sh` with `sh -s -- --editor emacs`, `sh -s -- --editor code` (VS Code), `sh -s -- --editor codium`, or `sh -s -- --editor nvim`. Select several with repeated options, such as `sh -s -- --editor emacs --editor code`, or enter space-separated choices in the menu. Use `sh -s -- --no-editor` to install only the executable.
 
 Add `--dir DIR` to install elsewhere, or `--release TAG` for another release, after `sh -s --`. Ensure the installation directory is in your `PATH`, then restart your editor.
 
-To build from source, clone this repository, check out `live-multi-editor`, and run `cargo build --locked --release`. The executable is `target/release/teamtype`.
+To build from source, clone this repository, check out `live-multi-editor`, and run `cargo build --locked --release`. The executable is `target/release/teamtypev`.
 
 ## Share or join
 
@@ -36,13 +36,13 @@ For a first session, follow the [getting-started guide](book/src/getting-started
 In the directory to share:
 
 ```bash
-teamtype share
+teamtypev share
 ```
 
 In a separate directory, join using the code printed by the sharer:
 
 ```bash
-teamtype join CODE
+teamtypev join CODE
 ```
 
 Joining replaces local directory contents with the sharer's contents; use an empty directory. Keep backups of important work.
@@ -53,9 +53,9 @@ Use the plugins shipped in this repository: [Neovim](nvim-plugin/README.md), [VS
 
 ## Git in a shared directory
 
-The sharer keeps the Git repository. Joiners run `teamtype git status`, `teamtype git add FILE`, and `teamtype git commit -m "MESSAGE"`; commands wait for their preceding edits and execute on the sharer. Checkout and other file changes synchronize to everyone. Joiners need no `.git`.
+The sharer keeps the Git repository. Joiners run `teamtypev git status`, `teamtypev git add FILE`, and `teamtypev git commit -m "MESSAGE"`; commands wait for their preceding edits and execute on the sharer. Checkout and other file changes synchronize to everyone. Joiners need no `.git`.
 
-For ordinary `git`, run `source .teamtype/activate` in bash or zsh, or `source .teamtype/activate.fish` in fish, before starting your editor. Run `deactivate` to restore your PATH. Terminal commands support interactive editors, `add -p`, pagers, and colors using the sharer's programs and configuration. Tools that read `.git` directly still need a local repository. Both VCS synchronization flags are deprecated no-ops. See [Git setup and limits](book/src/git-integration-synchronized.md), including automatic activation with direnv.
+For ordinary `git`, run `source .teamtypev/activate` in bash or zsh, or `source .teamtypev/activate.fish` in fish, before starting your editor. Run `deactivate` to restore your PATH. Terminal commands support interactive editors, `add -p`, pagers, and colors using the sharer's programs and configuration. Tools that read `.git` directly still need a local repository. Both VCS synchronization flags are deprecated no-ops. See [Git setup and limits](book/src/git-integration-synchronized.md), including automatic activation with direnv.
 
 ## Documentation and checks
 

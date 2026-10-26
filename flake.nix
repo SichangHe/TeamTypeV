@@ -98,8 +98,8 @@
             overlays = [ (import inputs.rust-overlay) ];
           };
 
-          packages.teamtype = rustPackage [ ];
-          packages.default = self'.packages.teamtype;
+          packages.teamtypev = rustPackage [ ];
+          packages.default = self'.packages.teamtypev;
           devShells.default = mkDevShell;
           formatter = pkgs.nixfmt;
         };

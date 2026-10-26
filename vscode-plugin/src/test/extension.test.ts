@@ -9,6 +9,7 @@ import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 import * as vscode from "vscode"
+import {getCursorInfo} from "../cursor"
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -39,13 +40,13 @@ const EMACS_DRIVER = `
 /**
  * Live trial with three people in one session: VS Code on the sharing daemon in `a`, a headless
  * Neovim on a joining daemon in `b`, and an Emacs (docker image `silex/emacs:29`) on a joining
- * daemon in `c`. Uses `TEAMTYPE_BINARY`, or else the repo's `target/debug/teamtype`.
+ * daemon in `c`. Uses `TEAMTYPEV_BINARY`, or else the repo's `target/debug/teamtypev`.
  * Needs `nvim` and `docker`.
  */
 suite("Extension Test Suite", () => {
     const repo = path.resolve(__dirname, "../../..")
-    const bin = process.env.TEAMTYPE_BINARY ?? path.join(repo, "target/debug/teamtype")
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "teamtype-vscode-"))
+    const bin = process.env.TEAMTYPEV_BINARY ?? path.join(repo, "target/debug/teamtypev")
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "teamtypev-vscode-"))
     const [dirA, dirB, dirC] = ["a", "b", "c"].map((name) => path.join(root, name))
     const [fileA, fileB, fileC] = [dirA, dirB, dirC].map((dir) => path.join(dir, "file.txt"))
     const children: cp.ChildProcess[] = []
@@ -69,7 +70,7 @@ suite("Extension Test Suite", () => {
             cp.execFile(command, args, (error, stdout) => (error ? reject(error) : resolve(stdout))),
         )
     const nvimExpr = (expr: string) => run("nvim", ["--server", nvimSocket, "--remote-expr", expr])
-    const emacsContainer = () => `teamtype-emacs-${process.pid}-${nEmacsStarts}`
+    const emacsContainer = () => `teamtypev-emacs-${process.pid}-${nEmacsStarts}`
     const startEmacs = async () => {
         nEmacsStarts++
         nEmacsCommands = 0
@@ -91,19 +92,19 @@ suite("Extension Test Suite", () => {
             "-e",
             `DIR=${emacsDir}`,
         ]
-        args.push("-v", `${bin}:/usr/local/bin/teamtype:ro`, "-v", `${root}:${root}`)
+        args.push("-v", `${bin}:/usr/local/bin/teamtypev:ro`, "-v", `${root}:${root}`)
         args.push("-v", `${path.join(repo, "emacs-plugin")}:/plugin:ro`, EMACS_IMAGE)
-        args.push("emacs", "--batch", "-L", "/plugin", "-l", "teamtype", "-l", path.join(emacsDir, "driver.el"))
-        if (process.env.TEAMTYPE_EMACS_BINARY) {
+        args.push("emacs", "--batch", "-L", "/plugin", "-l", "teamtypev", "-l", path.join(emacsDir, "driver.el"))
+        if (process.env.TEAMTYPEV_EMACS_BINARY) {
             emacsProcess = cp.spawn(
-                process.env.TEAMTYPE_EMACS_BINARY,
+                process.env.TEAMTYPEV_EMACS_BINARY,
                 [
                     "--batch",
                     "-Q",
                     "-L",
                     path.join(repo, "emacs-plugin"),
                     "-l",
-                    "teamtype",
+                    "teamtypev",
                     "-l",
                     path.join(emacsDir, "driver.el"),
                 ],
@@ -113,7 +114,7 @@ suite("Extension Test Suite", () => {
         } else {
             children.push(cp.spawn("docker", args, {stdio: ["ignore", fd, fd]}))
         }
-        await waitFor("Emacs tracks the file", async () => (await emacsEval("(and teamtype--client t)")) === "t")
+        await waitFor("Emacs tracks the file", async () => (await emacsEval("(and teamtypev--client t)")) === "t")
     }
     const stopEmacs = () => (emacsProcess ? stopChild(emacsProcess) : run("docker", ["rm", "-f", emacsContainer()]))
     const stopChild = (child: cp.ChildProcess) => {
@@ -179,7 +180,7 @@ suite("Extension Test Suite", () => {
                 texts = [
                     doc.getText(),
                     await nvimExpr(
-                        'luaeval(\'table.concat(require("teamtype.changetracker").get_all_lines_respecting_eol(0), "\\n")\')',
+                        'luaeval(\'table.concat(require("teamtypev.changetracker").get_all_lines_respecting_eol(0), "\\n")\')',
                     ),
                     await emacsEval("(buffer-string)"),
                 ]
@@ -196,9 +197,9 @@ suite("Extension Test Suite", () => {
     suiteSetup(async function () {
         this.timeout(180000)
         console.log(`TeamTypeV live work: ${root}`)
-        assert.ok(fs.existsSync(bin), `teamtype binary not found: ${bin}`)
+        assert.ok(fs.existsSync(bin), `teamtypev binary not found: ${bin}`)
         for (const dir of [dirA, dirB, dirC]) {
-            fs.mkdirSync(path.join(dir, ".teamtype"), {recursive: true})
+            fs.mkdirSync(path.join(dir, ".teamtypev"), {recursive: true})
         }
         fs.writeFileSync(path.join(dirA, "file.txt"), "seed\n")
         spawnDaemon(dirA, ["share", "--no-join-code", "--show-secret-address"])
@@ -208,12 +209,12 @@ suite("Extension Test Suite", () => {
             return addr !== undefined
         })
         for (const dir of [dirB, dirC]) {
-            fs.writeFileSync(path.join(dir, ".teamtype", "config"), addr + "\n")
+            fs.writeFileSync(path.join(dir, ".teamtypev", "config"), addr + "\n")
         }
         spawnDaemon(dirB, ["join"])
         daemonC = spawnDaemon(dirC, ["join"])
         await waitFor("joining daemons receive file.txt", () => fs.existsSync(fileB) && fs.existsSync(fileC))
-        // The extension spawns plain `teamtype client`.
+        // The extension spawns plain `teamtypev client`.
         process.env.PATH = `${path.dirname(bin)}${path.delimiter}${process.env.PATH}`
         doc = await vscode.workspace.openTextDocument(path.join(dirA, "file.txt"))
         editor = await vscode.window.showTextDocument(doc)
@@ -223,24 +224,24 @@ suite("Extension Test Suite", () => {
         this.timeout(30000)
         if (nEmacsStarts) await stopEmacs().catch(() => undefined)
         await Promise.all(children.map(stopChild))
-        if (!process.env.TEAMTYPE_KEEP_TEST_WORK) fs.rmSync(root, {recursive: true, force: true})
+        if (!process.env.TEAMTYPEV_KEEP_TEST_WORK) fs.rmSync(root, {recursive: true, force: true})
     })
 
     test("edits sync between VS Code and a second daemon", async function () {
         this.timeout(240000)
-        const extension = vscode.extensions.getExtension("SichangHe.teamtype")
+        const extension = vscode.extensions.getExtension("SichangHe.teamtypev")
         assert.ok(extension, "TeamTypeV extension is not installed in the test host")
         await extension.activate()
         await waitFor("VS Code uses the daemon filesystem", () =>
             vscode.workspace.textDocuments.some(
-                (candidate) => candidate.uri.scheme === "teamtype" && candidate.uri.path === fileA,
+                (candidate) => candidate.uri.scheme === "teamtypev" && candidate.uri.path === fileA,
             ),
         )
         doc = vscode.workspace.textDocuments.find(
-            (candidate) => candidate.uri.scheme === "teamtype" && candidate.uri.path === fileA,
+            (candidate) => candidate.uri.scheme === "teamtypev" && candidate.uri.path === fileA,
         )!
         editor = await vscode.window.showTextDocument(doc)
-        assert.ok((await vscode.commands.getCommands(true)).includes("teamtype.showCursors"))
+        assert.ok((await vscode.commands.getCommands(true)).includes("teamtypev.showCursors"))
         const readB = () => fs.readFileSync(fileB, "utf8")
 
         // (1) VS Code -> daemon B's file on disk. Retry typing until the client has opened the file.
@@ -259,12 +260,12 @@ suite("Extension Test Suite", () => {
     })
 
     test("VS Code, Neovim, and Emacs type at once", async function () {
-        if (process.env.TEAMTYPE_SKIP_EMACS) this.skip()
+        if (process.env.TEAMTYPEV_SKIP_EMACS) this.skip()
         this.timeout(300000)
         const nvimArgs = ["--headless", "--clean", "-n", "--listen", nvimSocket]
         nvimArgs.push("--cmd", `set runtimepath^=${path.join(repo, "nvim-plugin")}`, "file.txt")
         children.push(
-            cp.spawn("nvim", nvimArgs, {cwd: dirB, stdio: "ignore", env: {...process.env, TEAMTYPE_BINARY: bin}}),
+            cp.spawn("nvim", nvimArgs, {cwd: dirB, stdio: "ignore", env: {...process.env, TEAMTYPEV_BINARY: bin}}),
         )
         await waitFor("Neovim starts", () => fs.existsSync(nvimSocket))
         await startEmacs()
@@ -272,6 +273,53 @@ suite("Extension Test Suite", () => {
 
         await Promise.all([typeLines.vscode("v"), typeLines.nvim("n"), typeLines.emacs("e")])
         await editorsAgreeWith("every editor holds every typed line", /^[vne]-\d+$/gm, 3 * N_ROUNDS)
+    })
+
+    test("Neovim insert mode exchanges text and remote cursors with VS Code", async function () {
+        if (process.env.TEAMTYPEV_SKIP_EMACS) this.skip()
+        this.timeout(90000)
+        await nvimExpr("nvim_input('Goheld-insert-text')")
+        try {
+            await waitFor("Neovim enters insert mode", async () => (await nvimExpr("mode()")) === "i")
+            await waitFor("insert-mode text reaches VS Code before Escape", () =>
+                doc.getText().includes("held-insert-text"),
+            )
+            assert.strictEqual(await nvimExpr("mode()"), "i")
+
+            assert.ok(await editor.edit((edit) => edit.insert(new vscode.Position(0, 0), "remote-during-insert\n")))
+            await waitFor(
+                "VS Code text reaches Neovim during insert mode",
+                async () => (await nvimExpr("getline(1)")) === "remote-during-insert",
+            )
+            assert.strictEqual(await nvimExpr("mode()"), "i")
+
+            await nvimExpr('nvim_input("\\<CR>insert-cursor-line")')
+            await waitFor("new insert-mode text reaches VS Code", () => doc.getText().includes("insert-cursor-line"))
+            const cursorLine = await nvimExpr("line('.')")
+            try {
+                await waitFor(
+                    "Neovim insert-mode cursor reaches VS Code",
+                    () => getCursorInfo().includes(`${doc.uri}:${cursorLine}`),
+                    10000,
+                )
+            } catch (error) {
+                throw new Error(`${error}; expected ${doc.uri}:${cursorLine}; actual ${getCursorInfo()}`)
+            }
+            assert.strictEqual(await nvimExpr("mode()"), "i")
+
+            editor.selection = new vscode.Selection(0, 5, 0, 5)
+            await waitFor("VS Code cursor reaches Neovim during insert mode", async () => {
+                const marks = JSON.parse(
+                    await nvimExpr(
+                        "luaeval('vim.json.encode(vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_get_namespaces().TeamTypeV, 0, -1, {}))')",
+                    ),
+                ) as number[][]
+                return marks.some((mark) => mark[1] === 0 && mark[2] === 5)
+            })
+            assert.strictEqual(await nvimExpr("mode()"), "i")
+        } finally {
+            await nvimExpr('nvim_input("\\<Esc>")')
+        }
     })
 
     test("shared saves retain undo and unshared files retain native saves", async function () {
@@ -307,7 +355,7 @@ suite("Extension Test Suite", () => {
 
     for (const editorName of ["VS Code", "Emacs"])
         test(`outside writes, checkout, and pull survive typing and saves in an open ${editorName} buffer`, async function () {
-            if (editorName === "Emacs" && process.env.TEAMTYPE_SKIP_EMACS) this.skip()
+            if (editorName === "Emacs" && process.env.TEAMTYPEV_SKIP_EMACS) this.skip()
             this.timeout(180000)
             const localDir = editorName === "Emacs" ? dirC : dirA
             const localFile = path.join(localDir, "file.txt")
@@ -419,15 +467,15 @@ suite("Extension Test Suite", () => {
             await run("git", ["-C", upstream, "commit", "-m", "pull text"])
             fs.writeFileSync(
                 path.join(localDir, ".git", "hooks", "post-merge"),
-                "#!/bin/sh\ntouch .teamtype/pull-started\nwhile [ ! -f .teamtype/typing-started ]; do sleep 0.01; done\n",
+                "#!/bin/sh\ntouch .teamtypev/pull-started\nwhile [ ! -f .teamtypev/typing-started ]; do sleep 0.01; done\n",
                 {mode: 0o755},
             )
             const pull = git("pull", "--ff-only", "upstream", "main")
             await waitFor("pull passes its dirty-worktree check", () =>
-                fs.existsSync(path.join(localDir, ".teamtype", "pull-started")),
+                fs.existsSync(path.join(localDir, ".teamtypev", "pull-started")),
             )
             const pullTyping = typingAndSaving(`pull-typing${suffix}`)
-            fs.writeFileSync(path.join(localDir, ".teamtype", "typing-started"), "")
+            fs.writeFileSync(path.join(localDir, ".teamtypev", "typing-started"), "")
             await pull
             await pullTyping
             await checkLines(`pull-typing${suffix}`, `pull-line${suffix}`)
@@ -435,25 +483,25 @@ suite("Extension Test Suite", () => {
         })
 
     test("the Emacs person drops out and returns while the others type", async function () {
-        if (process.env.TEAMTYPE_SKIP_EMACS) this.skip()
+        if (process.env.TEAMTYPEV_SKIP_EMACS) this.skip()
         this.timeout(300000)
         const others = Promise.all([typeLines.vscode("away-v"), typeLines.nvim("away-n")])
         await sleep(300)
         await stopEmacs()
         daemonC.kill()
         await waitFor("daemon C stops", () => daemonC.exitCode !== null || daemonC.signalCode !== null)
-        fs.rmSync(path.join(dirC, ".teamtype", "socket"), {force: true})
+        fs.rmSync(path.join(dirC, ".teamtypev", "socket"), {force: true})
         await others
 
         daemonC = spawnDaemon(dirC, ["join"])
-        await waitFor("daemon C returns", () => fs.existsSync(path.join(dirC, ".teamtype", "socket")))
+        await waitFor("daemon C returns", () => fs.existsSync(path.join(dirC, ".teamtypev", "socket")))
         await startEmacs()
         await typeLines.emacs("back-e")
         await editorsAgreeWith("lines typed during the absence reach everyone once", /^away-[vn]-\d+$/gm, 2 * N_ROUNDS)
         await editorsAgreeWith("lines typed after the return reach everyone", /^back-e-\d+$/gm, N_ROUNDS)
     })
     test("an agent edits while Neovim and Emacs type and VS Code watches", async function () {
-        if (process.env.TEAMTYPE_SKIP_EMACS) this.skip()
+        if (process.env.TEAMTYPEV_SKIP_EMACS) this.skip()
         this.timeout(300000)
         const typing = Promise.all([typeLines.nvim("agent-n"), typeLines.emacs("agent-e")])
         // The agent reads the file from disk, and rereads and retries when it changed under it, as

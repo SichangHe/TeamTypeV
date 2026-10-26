@@ -15,8 +15,8 @@ For example, this is a suitable configuration block for Lazy:
 
 ```lua
     return {
-        dir = os.getenv("HOME") .. "/path/to/teamtype/nvim-plugin",
-        keys = { { "<leader>j", "<cmd>TeamtypeJumpToCursor<cr>" } },
+        dir = os.getenv("HOME") .. "/path/to/teamtypev/nvim-plugin",
+        keys = { { "<leader>j", "<cmd>TeamtypevJumpToCursor<cr>" } },
         lazy = false,
     }
 ```

@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 pub use nvim_rs::{compat::tokio::Compat, create::tokio::new_child_cmd, rpc::handler::Dummy};
 use rand::RngExt;
-use teamtype::daemon::Daemon;
-use teamtype::{document, sandbox};
+use teamtypev::daemon::Daemon;
+use teamtypev::{document, sandbox};
 use tempfile::{TempDir, tempdir};
 use tokio::process::{ChildStdin, Command};
 
@@ -20,7 +20,7 @@ use crate::socket::MockSocket;
 
 // This is the bin artifact Cargo is building for us so we can test the actual code at the time of
 // testing, not something that may be mix-matched from the system path.
-pub const TEAMTYPE_DEBUG_BINARY: &str = env!("TEAMTYPE_DEBUG_BINARY");
+pub const TEAMTYPEV_DEBUG_BINARY: &str = env!("TEAMTYPEV_DEBUG_BINARY");
 
 // TODO: Consider renaming this, to avoid confusion with tokio "actors".
 #[async_trait]
@@ -42,8 +42,8 @@ impl Neovim {
     /// Will panic if Neovim cannot be started or if the file cannot be opened.
     pub async fn new(file_path: Option<PathBuf>) -> Self {
         assert!(
-            fs::exists(TEAMTYPE_DEBUG_BINARY).unwrap(),
-            "Before running e2e tests you must build {TEAMTYPE_DEBUG_BINARY}"
+            fs::exists(TEAMTYPEV_DEBUG_BINARY).unwrap(),
+            "Before running e2e tests you must build {TEAMTYPEV_DEBUG_BINARY}"
         );
         let handler = Dummy::new();
         let mut cmd = Command::new("nvim");
@@ -61,10 +61,10 @@ impl Neovim {
         ));
         // Load the Neovim plugin into the instance.
         cmd.arg("-c").arg(format!(
-            "source {workspace_root}/nvim-plugin/plugin/teamtype.lua"
+            "source {workspace_root}/nvim-plugin/plugin/teamtypev.lua"
         ));
         // Use binary built for *this* test run, not the system path one
-        cmd.env("TEAMTYPE_BINARY", TEAMTYPE_DEBUG_BINARY);
+        cmd.env("TEAMTYPEV_BINARY", TEAMTYPEV_DEBUG_BINARY);
         let (nvim, _, _) = new_child_cmd(&mut cmd, handler).await.unwrap();
 
         // We canonicalize the path here, because on macOS, TempDir gives us paths in /var/, which
@@ -198,16 +198,16 @@ fn rand_usize_inclusive(start: usize, end: usize) -> usize {
 
 impl Neovim {
     // The caller should store the TempDir, so that it is not garbage collected.
-    pub async fn new_teamtype_enabled(
+    pub async fn new_teamtypev_enabled(
         initial_content: &str,
     ) -> (Self, PathBuf, MockSocket, TempDir) {
         let dir = tempdir().expect("Failed to create temp directory");
         let dir_path = dir.path();
-        let teamtype_dir = dir_path.join(".teamtype");
+        let teamtypev_dir = dir_path.join(".teamtypev");
         let file_path = dir_path.join("test");
-        let socket_path = teamtype_dir.clone().join("socket");
+        let socket_path = teamtypev_dir.clone().join("socket");
 
-        sandbox::create_dir(dir_path, &teamtype_dir).unwrap();
+        sandbox::create_dir(dir_path, &teamtypev_dir).unwrap();
 
         sandbox::write_file(dir_path, &file_path, initial_content.as_bytes())
             .expect("Failed to write initial file content");

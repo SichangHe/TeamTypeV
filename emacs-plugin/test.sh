@@ -6,19 +6,19 @@
 # Live trial: a real Emacs (docker image `silex/emacs:29`) on a joining daemon and a headless
 # Neovim on the sharing daemon type into one file at once; both buffers must end up equal and
 # hold every typed line; then Emacs must report its daemon being killed.
-# Usage: emacs-plugin/test.sh [path/to/teamtype]
+# Usage: emacs-plugin/test.sh [path/to/teamtypev]
 # Prints only failures; exit status 0 means every check passed.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
-export TEAMTYPE_BINARY
-TEAMTYPE_BINARY=$(realpath "${1:-$here/../target/debug/teamtype}")
+export TEAMTYPEV_BINARY
+TEAMTYPEV_BINARY=$(realpath "${1:-$here/../target/debug/teamtypev}")
 n_rounds=${N_ROUNDS:-20}
-work=$(mktemp -d "${TMPDIR:-/tmp}/teamtype-emacs.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/teamtypev-emacs.XXXXXX")
 pids=()
 cleanup() {
     status=$?
     kill "${pids[@]}" 2>/dev/null
-    docker rm -f "teamtype-emacs-$$" >/dev/null 2>&1
+    docker rm -f "teamtypev-emacs-$$" >/dev/null 2>&1
     wait 2>/dev/null
     [ "$status" -eq 0 ] && rm -rf "$work" || echo "kept $work" >&2
 }
@@ -43,13 +43,13 @@ buffers_agree() {
     [ "$(nvim_expr 'join(getline(1, "$"), "\n")')" = "$(cat "$work/emacs.buffer")" ]
 }
 
-mkdir -p "$work"/{a,b}/.teamtype
+mkdir -p "$work"/{a,b}/.teamtypev
 echo seed >"$work/a/file.txt"
-(cd "$work/a" && exec "$TEAMTYPE_BINARY" share --no-join-code --show-secret-address >"$work/a.log" 2>&1) &
+(cd "$work/a" && exec "$TEAMTYPEV_BINARY" share --no-join-code --show-secret-address >"$work/a.log" 2>&1) &
 pids+=($!)
 eventually grep -q 'peer=' "$work/a.log" || fail "sharing daemon printed no secret address"
-grep -oE 'peer=[^ ]+' "$work/a.log" >"$work/b/.teamtype/config"
-(cd "$work/b" && exec "$TEAMTYPE_BINARY" join >"$work/b.log" 2>&1) &
+grep -oE 'peer=[^ ]+' "$work/a.log" >"$work/b/.teamtypev/config"
+(cd "$work/b" && exec "$TEAMTYPEV_BINARY" join >"$work/b.log" 2>&1) &
 pids+=($!)
 eventually grep -qs seed "$work/b/file.txt" || fail "joining daemon did not receive the file"
 (cd "$work/a" && exec nvim --headless --clean -n --listen "$work/a.nvim" \
@@ -65,7 +65,7 @@ cat >"$work/driver.el" <<'EOF'
     (funcall pred)))
 (defun n-typed-lines () (how-many "^[ae]-[0-9]+$" (point-min) (point-max)))
 (find-file (work-file "b/file.txt"))
-(unless (wait-for (lambda () (and teamtype--client (string-match-p "seed" (buffer-string)))) 20)
+(unless (wait-for (lambda () (and teamtypev--client (string-match-p "seed" (buffer-string)))) 20)
   (message "DRIVER: buffer is not tracked") (kill-emacs 2))
 (write-region "" nil (work-file "ready"))
 (wait-for (lambda () (file-exists-p (work-file "go"))) 60)
@@ -85,10 +85,10 @@ cat >"$work/driver.el" <<'EOF'
 EOF
 # Emacs runs as the invoking user; the work directory keeps its path because the daemon
 # rejects files outside its shared directory.
-docker run --rm --name "teamtype-emacs-$$" --user "$(id -u):$(id -g)" -e HOME=/tmp \
-    -e WORK="$work" -e N_ROUNDS="$n_rounds" -v "$TEAMTYPE_BINARY:/usr/local/bin/teamtype:ro" \
+docker run --rm --name "teamtypev-emacs-$$" --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -e WORK="$work" -e N_ROUNDS="$n_rounds" -v "$TEAMTYPEV_BINARY:/usr/local/bin/teamtypev:ro" \
     -v "$work:$work" -v "$here:/plugin:ro" silex/emacs:29 \
-    emacs --batch -L /plugin -l teamtype -l "$work/driver.el" >"$work/emacs.log" 2>&1 &
+    emacs --batch -L /plugin -l teamtypev -l "$work/driver.el" >"$work/emacs.log" 2>&1 &
 emacs_pid=$!
 
 eventually test -e "$work/ready" || fail "Emacs did not open the shared file"

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use serde_json::Value as JSONValue;
-use teamtype::sandbox;
+use teamtypev::sandbox;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, split},
     net::UnixListener,

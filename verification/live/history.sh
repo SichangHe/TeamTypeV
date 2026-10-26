@@ -5,12 +5,12 @@
 #
 # Live trial: a joiner whose history differs from the sharer's refuses to merge, and joining again
 # takes the sharer's files. Also checks that a restarted sharer keeps its history.
-# Needs a built `teamtype` (`cargo build -p teamtype`).
+# Needs a built `teamtypev` (`cargo build -p teamtypev`).
 # Prints only failures; exit status 0 means every check passed.
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
-TEAMTYPE_BINARY=${TEAMTYPE_BINARY:-$root/target/debug/teamtype}
-work=$(mktemp -d "${TMPDIR:-/tmp}/teamtype-history.XXXXXX")
+TEAMTYPEV_BINARY=${TEAMTYPEV_BINARY:-$root/target/debug/teamtypev}
+work=$(mktemp -d "${TMPDIR:-/tmp}/teamtypev-history.XXXXXX")
 pids=()
 n_failures=0
 cleanup() {
@@ -33,14 +33,14 @@ eventually() {
 start() {
     local dir=$1
     shift
-    (cd "$work/$dir" && exec "$TEAMTYPE_BINARY" "$@" </dev/null >>"$work/$dir.log" 2>&1) &
+    (cd "$work/$dir" && exec "$TEAMTYPEV_BINARY" "$@" </dev/null >>"$work/$dir.log" 2>&1) &
     last_pid=$!
     pids+=("$last_pid")
 }
 stop() { kill "$1" && wait "$1" 2>/dev/null; }
 b_has() { [ "$(cat "$work/b/f.txt" 2>/dev/null)" = "$1" ]; }
 
-mkdir -p "$work/a/.teamtype" "$work/b/.teamtype"
+mkdir -p "$work/a/.teamtypev" "$work/b/.teamtypev"
 echo one >"$work/a/f.txt"
 start a share --no-join-code --show-secret-address
 sharer=$last_pid
@@ -48,7 +48,7 @@ eventually grep -aq 'peer=' "$work/a.log" || {
     fail "sharing daemon printed no secret address"
     exit 1
 }
-grep -aoE 'peer=[^ ]+' "$work/a.log" >"$work/b/.teamtype/config"
+grep -aoE 'peer=[^ ]+' "$work/a.log" >"$work/b/.teamtypev/config"
 start b join
 joiner=$last_pid
 eventually b_has one || fail "the joiner did not receive the file"
@@ -78,7 +78,7 @@ grep -aq 'started a new history' "$work/b.log" || fail "the joiner did not say w
 b_has stale || fail "the refusing joiner overwrote its own file"
 start b join
 eventually grep -aq 'Overwrite them?' "$work/b.log" || fail "joining again did not ask before overwriting"
-(cd "$work/b" && echo y | exec "$TEAMTYPE_BINARY" join >>"$work/b.log" 2>&1) &
+(cd "$work/b" && echo y | exec "$TEAMTYPEV_BINARY" join >>"$work/b.log" 2>&1) &
 pids+=($!)
 eventually b_has three || fail "joining again did not take the sharer's file"
 

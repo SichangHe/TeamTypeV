@@ -58,7 +58,7 @@ pub fn replace_file(
     let path = check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
     let parent = path.parent().context("File has no parent")?;
     create_dir_all(absolute_base_dir, parent)?;
-    let metadata_dir = absolute_base_dir.join(".teamtype");
+    let metadata_dir = absolute_base_dir.join(".teamtypev");
     create_dir_all(absolute_base_dir, &metadata_dir)?;
     let mut staged = tempfile::NamedTempFile::new_in(&metadata_dir)?;
     staged.write_all(content)?;
@@ -159,10 +159,22 @@ pub fn exists(absolute_base_dir: &Path, absolute_file_path: &Path) -> Result<boo
 }
 
 pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
-    let ignored_things = [".teamtype", ".git", ".bzr", ".hg", ".jj", ".pijul", ".svn"];
+    let ignored_things = [
+        ".teamtypev",
+        ".teamtype",
+        ".teamtypeignore",
+        ".ethersync",
+        ".ethersyncignore",
+        ".git",
+        ".bzr",
+        ".hg",
+        ".jj",
+        ".pijul",
+        ".svn",
+    ];
 
     let walk = WalkBuilder::new(&app_config.base_dir)
-        .add_custom_ignore_filename(".teamtypeignore")
+        .add_custom_ignore_filename(".teamtypevignore")
         .standard_filters(true)
         .hidden(false)
         .require_git(false)
@@ -192,7 +204,7 @@ pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
     // 🧑 "fix the ignore issue": a file that Git tracks must reach the peers, or their Git
     // sees it as deleted.
     let known: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
-    let config_dir = app_config.base_dir.join(".teamtype");
+    let config_dir = app_config.base_dir.join(".teamtypev");
     files.extend(
         (if app_config.is_host() {
             crate::config::git_tracked_files(&app_config.base_dir)
@@ -283,7 +295,7 @@ mod tests {
     #[test]
     fn replacement_failure_preserves_original_bytes() -> Result<()> {
         let dir = tempdir()?;
-        fs::write(dir.path().join(".teamtype"), b"occupied")?;
+        fs::write(dir.path().join(".teamtypev"), b"occupied")?;
         let path = dir.path().join("file.txt");
         fs::write(&path, b"original")?;
         assert!(replace_file(dir.path(), &path, b"shared").is_err());
@@ -423,12 +435,12 @@ mod tests {
     }
 
     #[test]
-    fn obeys_teamtypeignore() {
+    fn obeys_teamtypevignore() {
         let dir = temp_dir_setup();
         let project_dir = dir.path().join("project");
-        let teamtypeignore = project_dir.join(".teamtypeignore");
+        let teamtypevignore = project_dir.join(".teamtypevignore");
 
-        fs::write(&teamtypeignore, b"a\n").expect("Failed to write .teamtypeignore");
+        fs::write(&teamtypevignore, b"a\n").expect("Failed to write .teamtypevignore");
 
         let app_config = AppConfig {
             base_dir: project_dir.clone(),
@@ -444,7 +456,7 @@ mod tests {
             "b should be not ignored"
         );
 
-        fs::write(&teamtypeignore, b"a\ndir\n").expect("Failed to write .teamtypeignore");
+        fs::write(&teamtypevignore, b"a\ndir\n").expect("Failed to write .teamtypevignore");
 
         assert!(
             ignored(&app_config, &project_dir.join("dir/b")).unwrap(),

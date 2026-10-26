@@ -33,13 +33,13 @@ This will start the relay on port 4000 by default.
 
 Run
 
-    teamtype share --magic-wormhole-relay ws://localhost:4000/v1
+    teamtypev share --magic-wormhole-relay ws://localhost:4000/v1
 
 and
 
-    teamtype join --magic-wormhole-relay ws://localhost:4000/v1 <join code>
+    teamtypev join --magic-wormhole-relay ws://localhost:4000/v1 <join code>
 
-or set the `magic_wormhole_relay` parameter in `.teamtype/config`.
+or set the `magic_wormhole_relay` parameter in `.teamtypev/config`.
 
 ## Iroh Pkarr relay + DNS server
 
@@ -74,13 +74,13 @@ so that only domains under `irohdns.example` are resolved using your local serve
 
 Run
 
-    teamtype share --iroh-pkarr-relay http://localhost:8080/pkarr
+    teamtypev share --iroh-pkarr-relay http://localhost:8080/pkarr
 
 and
 
-    teamtype join --iroh-dns-domain irohdns.example <join code>
+    teamtypev join --iroh-dns-domain irohdns.example <join code>
 
-or set the `iroh_pkarr_relay` and `iroh_dns_domain` parameters in `.teamtype/config`.
+or set the `iroh_pkarr_relay` and `iroh_dns_domain` parameters in `.teamtypev/config`.
 
 It doesn't hurt to use both flags on both the sharing and the joining peer.
 
@@ -102,10 +102,10 @@ This will start the relay on port 3340 by default.
 
 Run
 
-    teamtype share --iroh-relay http://localhost:3340
+    teamtypev share --iroh-relay http://localhost:3340
 
 and
 
-    teamtype join --iroh-relay http://localhost:3340 <join code>
+    teamtypev join --iroh-relay http://localhost:3340 <join code>
 
-or set the `iroh_relay` parameter in `.teamtype/config`.
+or set the `iroh_relay` parameter in `.teamtypev/config`.

@@ -4,7 +4,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 
 local sync = require("vim.lsp.sync")
-local lsp_util = require("teamtype.lsp_util")
+local lsp_util = require("teamtypev.lsp_util")
 
 local M = {}
 
@@ -32,7 +32,7 @@ local function is_empty(diff)
 end
 
 -- Convert an LSP TextDocumentContentChangeEvent to a TeamTypeV delta.
-local function lsp_diff_to_teamtype_delta(diff)
+local function lsp_diff_to_teamtypev_delta(diff)
     return {
         {
             range = diff.range,
@@ -42,7 +42,7 @@ local function lsp_diff_to_teamtype_delta(diff)
 end
 
 -- Convert a TeamTypeV delta to a list of LSP `TextEdit`s.
-local function teamtype_delta_to_lsp_text_edits(delta)
+local function teamtypev_delta_to_lsp_text_edits(delta)
     local text_edits = {}
     for _, replacement in ipairs(delta) do
         local text_edit = {
@@ -125,12 +125,12 @@ local function fix_diff(diff, prev_lines, curr_lines)
                     diff.range["end"].character = vim.fn.strchars(prev_lines[diff.range["end"].line + 1])
                 else
                     vim.api.nvim_err_writeln(
-                        "[teamtype] We don't know how to handle this case for a deletion after the last visible line. Please file a bug."
+                        "[teamtypev] We don't know how to handle this case for a deletion after the last visible line. Please file a bug."
                     )
                 end
             else
                 vim.api.nvim_err_writeln(
-                    "[teamtype] We think a delta ending inside the line after the visible ones cannot happen. Please file a bug."
+                    "[teamtypev] We think a delta ending inside the line after the visible ones cannot happen. Please file a bug."
                 )
             end
         end
@@ -230,7 +230,7 @@ function M.track_changes(buffer, initial_lines, callback)
             return
         end
 
-        local delta = lsp_diff_to_teamtype_delta(diff)
+        local delta = lsp_diff_to_teamtypev_delta(diff)
         callback(delta)
     end
 
@@ -245,7 +245,7 @@ function M.track_changes(buffer, initial_lines, callback)
             new_last_line
         )
             -- First, clear the "modified" option, so that the buffer is not displayed as dirty.
-            -- Being modified doesn't have meaning for teamtype-enabled files.
+            -- Being modified doesn't have meaning for teamtypev-enabled files.
             vim.api.nvim_buf_set_option(buffer, "modified", false)
 
             -- Line counts that we get called with are zero-based.
@@ -261,7 +261,7 @@ function M.track_changes(buffer, initial_lines, callback)
 end
 
 function M.apply_delta(buffer, delta)
-    local text_edits = teamtype_delta_to_lsp_text_edits(delta)
+    local text_edits = teamtypev_delta_to_lsp_text_edits(delta)
 
     ignore_edits = true
     lsp_util.apply_text_edits(text_edits, buffer, "utf-32")

@@ -3,7 +3,7 @@
 
 commands
 - `cargo build --profile test`
-  - existing Neovim tests require `target/debug/teamtype` and Neovim
+  - existing Neovim tests require `target/debug/teamtypev` and Neovim
 - `cargo test --workspace`
 - `cargo clippy --all-targets`
 - `cargo fmt --all -- --check`

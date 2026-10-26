@@ -31,7 +31,7 @@ Clone TeamTypeV and link its bundled plugin into Neovim's package directory:
 ```
 git clone --branch live-multi-editor https://github.com/SichangHe/TeamTypeV "$HOME/TeamTypeV"
 mkdir -p "$HOME/.local/share/nvim/site/pack/plugins/start"
-ln -s "$HOME/TeamTypeV/nvim-plugin" "$HOME/.local/share/nvim/site/pack/plugins/start/teamtype"
+ln -s "$HOME/TeamTypeV/nvim-plugin" "$HOME/.local/share/nvim/site/pack/plugins/start/teamtypev"
 ```
 
 ### Plugin managers
@@ -40,16 +40,29 @@ Point your plugin manager at the `nvim-plugin` directory in your TeamTypeV check
 
 #### Lazy
 
+Lazy.nvim disables Neovim's automatic package loading. For a standard LazyVim
+configuration importing `plugins` from `lua/config/lazy.lua`, the installer adds
+an eager local spec in `lua/plugins/teamtypev-installer.lua` and keeps existing
+upstream specs. For manual setup, save this as `lua/plugins/teamtypev.lua`:
+
 ```lua
-{
-  dir = vim.fn.expand("~/TeamTypeV/nvim-plugin"),
-  keys = {
-    { "<leader>ej", "<cmd>TeamtypeJumpToCursor<cr>" },
-    { "<leader>ef", "<cmd>TeamtypeFollow<cr>" },
+return {
+  {
+    name = "teamtypev",
+    dir = vim.fn.stdpath("data") .. "/site/pack/plugins/start/teamtypev",
+    keys = {
+      { "<leader>ej", "<cmd>TeamtypevJumpToCursor<cr>" },
+      { "<leader>ef", "<cmd>TeamtypevFollow<cr>" },
+    },
+    lazy = false,
   },
-  lazy = false,
 }
 ```
+
+For another Lazy.nvim setup, add the inner table to your plugin specs. For a
+checkout-based installation, replace `dir` with your checkout's `nvim-plugin`
+directory. Keep any upstream TeamType spec for `.teamtype` projects; TeamTypeV
+uses its own modules, commands, and `.teamtypev` roots.
 
 #### pckr.nvim
 
@@ -57,22 +70,22 @@ Point your plugin manager at the `nvim-plugin` directory in your TeamTypeV check
 {
   vim.fn.expand("~/TeamTypeV/nvim-plugin"),
   config = function()
-    vim.keymap.set("n", "<leader>ej", "<cmd>TeamtypeJumpToCursor<cr>")
-    vim.keymap.set("n", "<leader>ef", "<cmd>TeamtypeFollow<cr>")
+    vim.keymap.set("n", "<leader>ej", "<cmd>TeamtypevJumpToCursor<cr>")
+    vim.keymap.set("n", "<leader>ef", "<cmd>TeamtypevFollow<cr>")
   end
 }
 ```
 
 ## Confirm the installation
 
-To confirm that the plugin is installed, try running the `:TeamtypeInfo` command in Neovim.
-It should show the message "Not connected to TeamTypeV daemon."
+To confirm that the plugin is installed, try running the `:TeamtypevInfo` command in Neovim.
+Without an active session, it should show "Not connected to any TeamTypeV daemon."
 
 ## Tips
 
-- Create mappings for the `:TeamtypeJumpToCursor` and `:TeamtypeFollow` command, see above configurations for examples.
-- Add the output of `require("teamtype").status()` to your status bar, see the [help file](doc/teamtype.txt) for an example.
+- Create mappings for the `:TeamtypevJumpToCursor` and `:TeamtypevFollow` command, see above configurations for examples.
+- Add the output of `require("teamtypev").status()` to your status bar, see the [help file](doc/teamtypev.txt) for an example.
 
 ## Configuration
 
-See the [help file](doc/teamtype.txt) for details on configuring this plugin.
+See the [help file](doc/teamtypev.txt) for details on configuring this plugin.

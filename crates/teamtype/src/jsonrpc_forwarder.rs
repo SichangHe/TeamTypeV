@@ -32,7 +32,7 @@ use super::editor::strip_current_dir;
 
 // TODO: Put these defaults to a module accessible by config.rs as well.
 pub const DEFAULT_SOCKET_NAME: &str = "socket";
-pub const CONFIG_DIR: &str = ".teamtype";
+pub const CONFIG_DIR: &str = ".teamtypev";
 
 #[async_trait]
 pub trait JSONRPCForwarder<

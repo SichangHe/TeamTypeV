@@ -7,7 +7,7 @@
 use e2e_tests::actors::*;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
-use teamtype::{
+use teamtypev::{
     editor_protocol::{
         EditorProtocolMessageFromEditor, EditorProtocolMessageToEditor, IncomingMessage,
         OutgoingMessage,
@@ -19,26 +19,26 @@ use tokio::time::{Duration, timeout};
 #[tokio::test]
 async fn plugin_loaded() {
     let nvim = Neovim::new(None).await.nvim;
-    nvim.command("TeamtypeInfo")
+    nvim.command("TeamtypevInfo")
         .await
-        .expect("Failed to run TeamtypeInfo");
+        .expect("Failed to run TeamtypevInfo");
 }
 
 #[tokio::test]
-async fn teamtype_executable_from_nvim() {
+async fn teamtypev_executable_from_nvim() {
     let nvim = Neovim::new(None).await.nvim;
     assert_eq!(
-        nvim.command_output(format!("echomsg executable('{TEAMTYPE_DEBUG_BINARY}')").as_str())
+        nvim.command_output(format!("echomsg executable('{TEAMTYPEV_DEBUG_BINARY}')").as_str())
             .await
             .expect("Failed to run executable() in Neovim"),
         "1",
-        "Failed to run teamtype executable from Neovim"
+        "Failed to run teamtypev executable from Neovim"
     );
 }
 
 #[tokio::test]
 async fn nvim_sends_something_to_socket() {
-    let (nvim, _file_path, mut socket, _dir) = Neovim::new_teamtype_enabled("hi").await;
+    let (nvim, _file_path, mut socket, _dir) = Neovim::new_teamtypev_enabled("hi").await;
     dbg!(nvim.content().await);
     timeout(Duration::from_secs(1), async {
         socket.acknowledge_open().await;
@@ -49,7 +49,7 @@ async fn nvim_sends_something_to_socket() {
 
 #[tokio::test]
 async fn nvim_refuses_sharing_with_a_daemon_without_writer_support() {
-    let (nvim, _, mut socket, _dir) = Neovim::new_teamtype_enabled("hi").await;
+    let (nvim, _, mut socket, _dir) = Neovim::new_teamtypev_enabled("hi").await;
     let request = timeout(Duration::from_secs(5), socket.recv())
         .await
         .expect("capability request");
@@ -69,7 +69,7 @@ async fn assert_nvim_deltas_yield_content(
     deltas: Vec<EditorTextOp>,
     expected_content: &str,
 ) {
-    let (nvim, file_path, mut socket, _dir) = Neovim::new_teamtype_enabled(initial_content).await;
+    let (nvim, file_path, mut socket, _dir) = Neovim::new_teamtypev_enabled(initial_content).await;
     socket.acknowledge_open().await;
 
     for op in &deltas {
@@ -145,7 +145,7 @@ async fn assert_nvim_input_yields_replacements(
     mut expected_replacements: Vec<EditorTextOp>,
 ) {
     timeout(Duration::from_secs(5), async {
-                let (nvim, _file_path, mut socket, _dir) = Neovim::new_teamtype_enabled(initial_content).await;
+                let (nvim, _file_path, mut socket, _dir) = Neovim::new_teamtypev_enabled(initial_content).await;
                 socket.acknowledge_open().await;
 
                 {

@@ -10,4 +10,4 @@ target-dir = "target"
 
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true }
-TEAMTYPE_DEBUG_BINARY = { value = "target/debug/teamtype", relative = true }
+TEAMTYPEV_DEBUG_BINARY = { value = "target/debug/teamtypev", relative = true }

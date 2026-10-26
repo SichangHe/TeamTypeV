@@ -20,7 +20,7 @@ If you can, please give us steps to reproduce the behavior:
 A clear and concise description of what you expected to happen.
 
 **Versions:**
-- `teamtype --version`:
+- `teamtypev --version`:
 - Which text editor are you using to collaborate, and which version?
 - Which version of the editor plugin are you using?
 

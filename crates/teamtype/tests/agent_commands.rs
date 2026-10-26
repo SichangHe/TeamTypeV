@@ -11,21 +11,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn spawn_editor_listener(socket: &Path, document: teamtype::daemon::DocumentActorHandle) {
+fn spawn_editor_listener(socket: &Path, document: teamtypev::daemon::DocumentActorHandle) {
     static SOCKET_SETUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = SOCKET_SETUP.lock().expect("socket setup lock");
-    teamtype::editor::spawn_socket_listener(socket, document).expect("editor listener");
+    teamtypev::editor::spawn_socket_listener(socket, document).expect("editor listener");
 }
 
 fn agent(directory: &Path, args: &[&str]) -> Output {
-    std::fs::create_dir_all(directory.join(".teamtype")).expect("project metadata directory");
+    std::fs::create_dir_all(directory.join(".teamtypev")).expect("project metadata directory");
     let mut child = Command::new("sh")
-        .args(["-c", "umask 022; exec \"$@\"", "teamtype-test"])
-        .arg(env!("CARGO_BIN_EXE_teamtype"))
+        .args(["-c", "umask 022; exec \"$@\"", "teamtypev-test"])
+        .arg(env!("CARGO_BIN_EXE_teamtypev"))
         .arg("--directory")
         .arg(directory)
         .args(args)
-        .env_remove("TEAMTYPE_AGENT")
+        .env_remove("TEAMTYPEV_AGENT")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -70,7 +70,7 @@ fn successful(output: Output) -> String {
 #[test]
 fn overlapping_edits_are_rejected() {
     let dir = tempfile::tempdir().expect("project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata");
     std::fs::write(dir.path().join("note.txt"), "aaa").expect("source");
     let output = agent(
         dir.path(),
@@ -95,10 +95,10 @@ fn overlapping_edits_are_rejected() {
 #[test]
 fn unsafe_snapshot_arguments_are_rejected() {
     let dir = tempfile::tempdir().expect("project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata");
     std::fs::write(dir.path().join("note.txt"), "aaa").expect("source");
     std::fs::write(dir.path().join("config"), "project\n").expect("project config");
-    std::fs::write(dir.path().join(".teamtype/config"), "username=keep\n").expect("config");
+    std::fs::write(dir.path().join(".teamtypev/config"), "username=keep\n").expect("config");
     for args in [
         vec!["agent-read", "--agent", "..", "--file", "config"],
         vec!["agent-read", "--file", "../config"],
@@ -118,7 +118,7 @@ fn unsafe_snapshot_arguments_are_rejected() {
         assert!(!agent(dir.path(), &args).status.success(), "{args:?}");
     }
     assert_eq!(
-        std::fs::read_to_string(dir.path().join(".teamtype/config")).expect("config"),
+        std::fs::read_to_string(dir.path().join(".teamtypev/config")).expect("config"),
         "username=keep\n"
     );
     assert_eq!(
@@ -182,7 +182,7 @@ fn standalone_snapshots_are_private_even_with_public_metadata_directory() {
         }
     }
     let dir = tempfile::tempdir().expect("project");
-    let metadata = dir.path().join(".teamtype");
+    let metadata = dir.path().join(".teamtypev");
     std::fs::create_dir(&metadata).expect("metadata");
     std::fs::set_permissions(&metadata, std::fs::Permissions::from_mode(0o755))
         .expect("public metadata");
@@ -197,11 +197,11 @@ fn standalone_snapshots_are_private_even_with_public_metadata_directory() {
 #[test]
 fn blocked_read_snapshots_only_the_bytes_printed() {
     let dir = tempfile::tempdir().expect("project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata");
     let file = dir.path().join("note.txt");
     let original = "original".repeat(100_000) + "\n";
     std::fs::write(&file, &original).expect("large source");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_teamtype"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_teamtypev"))
         .arg("--directory")
         .arg(dir.path())
         .args(["agent-read", "--file", "note.txt"])
@@ -224,17 +224,17 @@ fn blocked_read_snapshots_only_the_bytes_printed() {
 #[test]
 fn crash_recovery_keeps_offline_saves_and_starts() {
     let dir = tempfile::tempdir().expect("project");
-    let metadata = dir.path().join(".teamtype");
+    let metadata = dir.path().join(".teamtypev");
     std::fs::create_dir(&metadata).expect("metadata");
-    let mut doc = teamtype::document::Document::default();
+    let mut doc = teamtypev::document::Document::default();
     doc.set_file(
-        teamtype::document::Content::String("shared before crash\n".into()),
-        &teamtype::path::RelativePath::new("note.txt"),
+        teamtypev::document::Content::String("shared before crash\n".into()),
+        &teamtypev::path::RelativePath::new("note.txt"),
     );
     std::fs::write(metadata.join("doc"), doc.save()).expect("persisted document");
     std::fs::write(metadata.join("open-files"), "note.txt\n").expect("crash marker");
     std::fs::write(dir.path().join("note.txt"), "offline save\n").expect("new saved text");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_teamtype"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_teamtypev"))
         .arg("--directory")
         .arg(dir.path())
         .args(["share", "--no-join-code"])
@@ -264,12 +264,12 @@ fn crash_recovery_keeps_offline_saves_and_starts() {
 #[tokio::test]
 async fn crash_recovery_allows_matching_saved_text_without_rewriting_it() {
     let dir = tempfile::tempdir().expect("project");
-    let metadata = dir.path().join(".teamtype");
+    let metadata = dir.path().join(".teamtypev");
     std::fs::create_dir(&metadata).expect("metadata");
-    let mut doc = teamtype::document::Document::default();
+    let mut doc = teamtypev::document::Document::default();
     doc.set_file(
-        teamtype::document::Content::String("shared\n".into()),
-        &teamtype::path::RelativePath::new("note.txt"),
+        teamtypev::document::Content::String("shared\n".into()),
+        &teamtypev::path::RelativePath::new("note.txt"),
     );
     std::fs::write(metadata.join("doc"), doc.save()).expect("persisted history");
     std::fs::write(metadata.join("open-files"), "note.txt\n").expect("recovery list");
@@ -278,11 +278,11 @@ async fn crash_recovery_allows_matching_saved_text_without_rewriting_it() {
         .expect("metadata")
         .modified()
         .expect("mtime");
-    let config = teamtype::config::AppConfig {
+    let config = teamtypev::config::AppConfig {
         base_dir: dir.path().into(),
-        ..teamtype::config::AppConfig::default()
+        ..teamtypev::config::AppConfig::default()
     };
-    let _document = teamtype::daemon::DocumentActorHandle::new(&config, false, true, true);
+    let _document = teamtypev::daemon::DocumentActorHandle::new(&config, false, true, true);
     assert_eq!(
         std::fs::read_to_string(metadata.join("open-files")).expect("cleared recovery list"),
         ""
@@ -407,7 +407,7 @@ fn rejected_edits_preserve_file_and_snapshot() {
     assert!(!dir.path().join("missing.txt").exists());
     assert!(
         !dir.path()
-            .join(".teamtype/agent-snapshots/agent/missing.txt")
+            .join(".teamtypev/agent-snapshots/agent/missing.txt")
             .exists()
     );
 }
@@ -444,10 +444,10 @@ fn unchanged_edit_updates_snapshot_without_daemon() {
 #[test]
 fn edit_refuses_daemon_content_that_changed_before_barrier() {
     let dir = tempfile::tempdir().expect("temporary project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata directory");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata directory");
     std::fs::write(dir.path().join("note.txt"), "disk content\n").expect("initial file");
     successful(agent(dir.path(), &["agent-read", "--file", "note.txt"]));
-    let listener = UnixListener::bind(dir.path().join(".teamtype/socket")).expect("daemon socket");
+    let listener = UnixListener::bind(dir.path().join(".teamtypev/socket")).expect("daemon socket");
     listener.set_nonblocking(true).expect("nonblocking accept");
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -514,17 +514,17 @@ fn edit_refuses_daemon_content_that_changed_before_barrier() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_write_before_watcher_delivery_survives_an_editor_edit() {
-    use teamtype::types::{RevisionedEditorTextDelta, RevisionedTextDelta};
+    use teamtypev::types::{RevisionedEditorTextDelta, RevisionedTextDelta};
     let dir = tempfile::tempdir().expect("project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata");
     let file = dir.path().join("note.txt");
     std::fs::write(&file, "base\n").expect("initial text");
-    let config = teamtype::config::AppConfig {
+    let config = teamtypev::config::AppConfig {
         base_dir: dir.path().into(),
         ..Default::default()
     };
-    let document = teamtype::daemon::DocumentActorHandle::new(&config, true, true, true);
-    let socket = dir.path().join(".teamtype/socket");
+    let document = teamtypev::daemon::DocumentActorHandle::new(&config, true, true, true);
+    let socket = dir.path().join(".teamtypev/socket");
     spawn_editor_listener(&socket, document);
     let mut editor = std::os::unix::net::UnixStream::connect(socket).expect("editor");
     editor
@@ -579,15 +579,15 @@ async fn outside_write_before_watcher_delivery_survives_an_editor_edit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_owned_file_saves_the_agents_write_with_an_open_editor() {
     let dir = tempfile::tempdir().expect("project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata");
     let file = dir.path().join("note.txt");
     std::fs::write(&file, "hello\n").expect("initial text");
-    let config = teamtype::config::AppConfig {
+    let config = teamtypev::config::AppConfig {
         base_dir: dir.path().into(),
-        ..teamtype::config::AppConfig::default()
+        ..teamtypev::config::AppConfig::default()
     };
-    let document = teamtype::daemon::DocumentActorHandle::new(&config, true, true, true);
-    let socket = dir.path().join(".teamtype/socket");
+    let document = teamtypev::daemon::DocumentActorHandle::new(&config, true, true, true);
+    let socket = dir.path().join(".teamtypev/socket");
     spawn_editor_listener(&socket, document);
     let mut editor = std::os::unix::net::UnixStream::connect(socket).expect("editor connection");
     editor
@@ -631,16 +631,16 @@ async fn daemon_owned_file_saves_the_agents_write_with_an_open_editor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edit_through_document_daemon_persists_and_refreshes_snapshot() {
     let dir = tempfile::tempdir().expect("temporary project");
-    std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata directory");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata directory");
     let file = dir.path().join("note.txt");
     std::fs::write(&file, "α before\nkeep\n").expect("initial file");
     successful(agent(dir.path(), &["agent-read", "--file", "note.txt"]));
-    let config = teamtype::config::AppConfig {
+    let config = teamtypev::config::AppConfig {
         base_dir: dir.path().into(),
-        ..teamtype::config::AppConfig::default()
+        ..teamtypev::config::AppConfig::default()
     };
-    let document = teamtype::daemon::DocumentActorHandle::new(&config, true, true, true);
-    spawn_editor_listener(&dir.path().join(".teamtype/socket"), document);
+    let document = teamtypev::daemon::DocumentActorHandle::new(&config, true, true, true);
+    spawn_editor_listener(&dir.path().join(".teamtypev/socket"), document);
     successful(agent(
         dir.path(),
         &[

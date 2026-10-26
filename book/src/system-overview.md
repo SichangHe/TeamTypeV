@@ -55,6 +55,6 @@ Most files are synchronized, except for [ignored files](ignored-files.md).
 Currently, you will need to start one daemon *per project*.
 When you start the daemon, you have the option to provide the directory as an optional `--directory` parameter, for example:
 
-    teamtype share --directory [DIRECTORY]
+    teamtypev share --directory [DIRECTORY]
 
 If you leave it out, the current directory is selected.

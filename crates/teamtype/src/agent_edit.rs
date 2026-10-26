@@ -15,10 +15,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
-use teamtype::editor_protocol::{EditorProtocolMessageFromEditor, IncomingMessage};
-use teamtype::jsonrpc_forwarder::{JSONRPCForwarder, UnixJSONRPCForwarder};
-use teamtype::path::AbsolutePath;
-use teamtype::types::{EditorTextDelta, EditorTextOp, TextDelta};
+use teamtypev::editor_protocol::{EditorProtocolMessageFromEditor, IncomingMessage};
+use teamtypev::jsonrpc_forwarder::{JSONRPCForwarder, UnixJSONRPCForwarder};
+use teamtypev::path::AbsolutePath;
+use teamtypev::types::{EditorTextDelta, EditorTextOp, TextDelta};
 
 const OPEN_ID: usize = 1;
 const BARRIER_ID: usize = 2;
@@ -94,7 +94,7 @@ pub async fn run(directory: &Path, file: &Path, old: &str, new: &str) -> Result<
     if !path.is_file() {
         bail!("Agent edit rejected: {} is not a file", path.display());
     }
-    let expected = String::from_utf8(teamtype::sandbox::read_file(directory, &path)?)
+    let expected = String::from_utf8(teamtypev::sandbox::read_file(directory, &path)?)
         .with_context(|| format!("Could not read {}", path.display()))?;
     let replacement = replace_once(&expected, old, new)?;
     let Some(op) = single_op(&expected, &replacement)? else {
@@ -111,7 +111,7 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
     let (mut from_daemon, mut to_daemon) = UnixJSONRPCForwarder {}
         .connect_stream(directory)
         .await
-        .context("Agent edit needs a running daemon (`teamtype share` or `teamtype join`)")?;
+        .context("Agent edit needs a running daemon (`teamtypev share` or `teamtypev join`)")?;
     let requests = [
         (
             OPEN_ID,
@@ -191,19 +191,19 @@ fn snapshot_root(directory: &Path, agent: &str) -> Result<PathBuf> {
     {
         bail!("Agent name must be one path component");
     }
-    let legacy = directory.join(".teamtype/agent-snapshots");
-    if teamtype::sandbox::exists(directory, &legacy)? {
+    let legacy = directory.join(".teamtypev/agent-snapshots");
+    if teamtypev::sandbox::exists(directory, &legacy)? {
         if std::fs::symlink_metadata(&legacy)?.file_type().is_symlink() {
             bail!("Legacy snapshot root must not be a symlink");
         }
         std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o700))?;
     }
-    let root = directory.join(".teamtype/agent-snapshots-v2");
+    let root = directory.join(".teamtypev/agent-snapshots-v2");
     let agent_root = root.join(agent);
-    // Only TeamTypeV directories hold snapshots; never create `.teamtype` as a side effect.
-    if !directory.join(".teamtype").is_dir() {
+    // Only TeamTypeV directories hold snapshots; never create `.teamtypev` as a side effect.
+    if !directory.join(".teamtypev").is_dir() {
         bail!(
-            "{} is not a TeamTypeV directory (no .teamtype); run agent commands inside a shared directory",
+            "{} is not a TeamTypeV directory (no .teamtypev); run agent commands inside a shared directory",
             directory.display()
         );
     }
@@ -273,7 +273,7 @@ pub fn save_snapshot(directory: &Path, agent: &str, file: &Path, content: &[u8])
 /// Prints `file` and remembers it as `agent`'s snapshot.
 pub fn read(directory: &Path, agent: &str, file: &Path) -> Result<()> {
     prepare_snapshot(directory, agent, file)?;
-    let content = String::from_utf8(teamtype::sandbox::read_file(
+    let content = String::from_utf8(teamtypev::sandbox::read_file(
         directory,
         &directory.join(file),
     )?)
@@ -314,7 +314,7 @@ pub fn diff(directory: &Path, agent: &str, file: Option<&Path>) -> Result<()> {
             continue;
         };
         anyhow::ensure!(saved_file == file, "Snapshot path collision");
-        let new = teamtype::sandbox::read_file(directory, &directory.join(&file))
+        let new = teamtypev::sandbox::read_file(directory, &directory.join(&file))
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .unwrap_or_default();
@@ -360,16 +360,16 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_need_a_teamtype_directory_and_never_create_one() {
+    fn snapshots_need_a_teamtypev_directory_and_never_create_one() {
         let dir = tempfile::tempdir().unwrap();
         assert!(snapshot_path(dir.path(), "ann", Path::new("f.txt")).is_err());
-        assert!(!dir.path().join(".teamtype").exists());
+        assert!(!dir.path().join(".teamtypev").exists());
     }
 
     #[test]
     fn snapshots_follow_reads() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".teamtype")).unwrap();
+        std::fs::create_dir(dir.path().join(".teamtypev")).unwrap();
         let file = Path::new("sub/f.txt");
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join(file), "one\n").unwrap();
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn snapshot_names_cannot_escape_or_collide_after_file_directory_changes() {
         let dir = tempfile::tempdir().expect("project");
-        std::fs::create_dir(dir.path().join(".teamtype")).expect("metadata");
+        std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata");
         assert!(snapshot_path(dir.path(), "..", Path::new("config")).is_err());
         assert!(snapshot_path(dir.path(), "ann", Path::new("/tmp/source")).is_err());
         assert!(snapshot_path(dir.path(), "ann", Path::new("../config")).is_err());

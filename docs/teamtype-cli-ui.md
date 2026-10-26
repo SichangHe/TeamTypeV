@@ -41,14 +41,14 @@ A shared project is an (ephemeral) session that is initiated from one end and ca
 
 Host / initiator:
 ```
-$ teamtype share
+$ teamtypev share
 Initiating a new shared directory!
 Sharing code: apple-camel-icecream
 ```
 
 Joining peers:
 ```
-$ teamtype join apple-camel-icecream
+$ teamtypev join apple-camel-icecream
 ```
 
 ## Longer Running Session

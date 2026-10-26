@@ -7,7 +7,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 
 # Configuration
 
-You can put the following options into a configuration file at `.teamtype/config`:
+You can put the following options into a configuration file at `.teamtypev/config`:
 
 ```ini
 username = <string>
@@ -22,5 +22,5 @@ iroh_dns_domain = <iroh_dns_domain>
 iroh_pkarr_relay = <iroh_pkarr_relay>
 ```
 
-After a successful `teamtype join`, the peer's secret address is automatically stored in your `.teamtype/config`.
-In the future, you can then use `teamtype join` without a join code to reconnect to the same peer.
+After a successful `teamtypev join`, the peer's secret address is automatically stored in your `.teamtypev/config`.
+In the future, you can then use `teamtypev join` without a join code to reconnect to the same peer.

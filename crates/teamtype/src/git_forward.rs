@@ -171,15 +171,27 @@ impl GitHandle {
 
 pub fn excluded(path: &Path) -> bool {
     path.components().any(|component| {
-        [".teamtype", ".git", ".hg", ".jj", ".bzr", ".pijul", ".svn"]
-            .iter()
-            .any(|name| component.as_os_str() == *name)
+        [
+            ".teamtypev",
+            ".teamtype",
+            ".teamtypeignore",
+            ".ethersync",
+            ".ethersyncignore",
+            ".git",
+            ".hg",
+            ".jj",
+            ".bzr",
+            ".pijul",
+            ".svn",
+        ]
+        .iter()
+        .any(|name| component.as_os_str() == *name)
     })
 }
 
 fn git_program() -> Result<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter(|path| !path.ends_with(".teamtype/bin"))
+        .filter(|path| !path.ends_with(".teamtypev/bin") && !path.ends_with(".teamtype/bin"))
         .map(|path| path.join("git"))
         .filter_map(|path| path.canonicalize().ok())
         .find(|path| {
@@ -200,7 +212,7 @@ pub fn remove_old_hook(root: &Path) {
         }
     }
     for hook in hooks {
-        if std::fs::read_to_string(&hook).is_ok_and(|text| text.contains("Installed by teamtype"))
+        if std::fs::read_to_string(&hook).is_ok_and(|text| text.contains("Installed by teamtypev"))
             && let Err(error) = std::fs::remove_file(&hook)
         {
             tracing::warn!(
@@ -212,7 +224,7 @@ pub fn remove_old_hook(root: &Path) {
 }
 
 fn bind_socket(root: &Path) -> Result<(UnixListener, std::fs::File)> {
-    let socket = root.join(".teamtype/git.sock");
+    let socket = root.join(".teamtypev/git.sock");
     let lock = std::fs::File::create(socket.with_extension("lock"))?;
     lock.try_lock()
         .context("Another Git listener owns this shared directory")?;
@@ -301,7 +313,7 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
 
 // 🧑 "Is there a way to get git working directly by having something like a virtual environment?"
 fn install_wrapper(root: &Path) -> Result<()> {
-    let bin = root.join(".teamtype/bin");
+    let bin = root.join(".teamtypev/bin");
     std::fs::create_dir_all(&bin)?;
     let exe = wrapper_executable(&std::env::current_exe()?);
     let quoted = exe
@@ -316,20 +328,20 @@ fn install_wrapper(root: &Path) -> Result<()> {
     std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755))?;
     let path = bin.to_str().context("Shared path is not UTF-8")?;
     std::fs::write(
-        root.join(".teamtype/activate"),
+        root.join(".teamtypev/activate"),
         include_str!("git_activate.sh")
             .replace("@BIN@", &format!("'{}'", path.replace('\'', "'\\''"))),
     )?;
     std::fs::write(
-        root.join(".teamtype/activate.fish"),
+        root.join(".teamtypev/activate.fish"),
         include_str!("git_activate.fish").replace(
             "@BIN@",
             &format!("'{}'", path.replace('\\', "\\\\").replace('\'', "\\'")),
         ),
     )?;
     tracing::info!(
-        "Git runs on the sharer. Use `teamtype git ...`, or source {} (fish: activate.fish).",
-        root.join(".teamtype/activate").display()
+        "Git runs on the sharer. Use `teamtypev git ...`, or source {} (fish: activate.fish).",
+        root.join(".teamtypev/activate").display()
     );
     Ok(())
 }
@@ -610,14 +622,14 @@ pub async fn client(directory: Option<&Path>, args: Vec<OsString>) -> Result<i32
         Some(directory) => directory.canonicalize()?,
         None => current
             .ancestors()
-            .find(|dir| dir.join(".teamtype").is_dir())
+            .find(|dir| dir.join(".teamtypev").is_dir())
             .context("No shared directory found; run inside it or use --directory")?
             .to_path_buf(),
     };
     let cwd = current
         .strip_prefix(&root)
         .unwrap_or_else(|_| Path::new(""));
-    let mut socket = UnixStream::connect(root.join(".teamtype/git.sock"))
+    let mut socket = UnixStream::connect(root.join(".teamtypev/git.sock"))
         .await
         .context("TeamTypeV daemon is offline; start share or join before running Git")?;
     let request = Request {
@@ -899,7 +911,7 @@ mod tests {
 
     async fn upload_cleanup(exit: bool) -> Result<()> {
         let root = tempfile::tempdir()?;
-        std::fs::create_dir(root.path().join(".teamtype"))?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
         let config = crate::config::AppConfig {
             base_dir: root.path().to_path_buf(),
             peer: Some(crate::config::Peer::SecretAddress(String::new())),
@@ -979,7 +991,7 @@ mod tests {
         let host_root = tempfile::tempdir()?;
         let join_root = tempfile::tempdir()?;
         for root in [host_root.path(), join_root.path()] {
-            std::fs::create_dir(root.join(".teamtype"))?;
+            std::fs::create_dir(root.join(".teamtypev"))?;
         }
         git2::Repository::init(host_root.path())?;
         std::fs::write(host_root.path().join("file"), "initial")?;
@@ -1114,7 +1126,7 @@ mod tests {
     #[tokio::test]
     async fn exit_barrier_delay_warns_and_preserves_git_exit_code() -> Result<()> {
         let root = tempfile::tempdir()?;
-        std::fs::create_dir(root.path().join(".teamtype"))?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
         let config = crate::config::AppConfig {
             base_dir: root.path().to_path_buf(),
             peer: Some(crate::config::Peer::SecretAddress(String::new())),
@@ -1158,10 +1170,39 @@ mod tests {
     #[test]
     fn upgraded_binary_path_and_help() {
         assert_eq!(
-            wrapper_executable(Path::new("/bin/teamtype (deleted)")),
-            PathBuf::from("/bin/teamtype")
+            wrapper_executable(Path::new("/bin/teamtypev (deleted)")),
+            PathBuf::from("/bin/teamtypev")
         );
         assert!(validate_args(&[b"-h".to_vec()]).is_ok());
+    }
+
+    #[test]
+    fn git_program_skips_both_projects_wrappers() -> Result<()> {
+        if let Some(expected) = std::env::var_os("TEAMTYPEV_TEST_REAL_GIT") {
+            assert_eq!(git_program()?, PathBuf::from(expected));
+            return Ok(());
+        }
+        let real_git = git_program()?;
+        let root = tempfile::tempdir()?;
+        let mut paths = Vec::new();
+        for name in [".teamtype", ".teamtypev"] {
+            let bin = root.path().join(name).join("bin");
+            std::fs::create_dir_all(&bin)?;
+            std::fs::write(bin.join("git"), "#!/bin/sh\nexit 1\n")?;
+            std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755))?;
+            paths.push(bin);
+        }
+        paths.push(real_git.parent().context("Git directory")?.to_path_buf());
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "git_forward::tests::git_program_skips_both_projects_wrappers",
+            ])
+            .env("PATH", std::env::join_paths(paths)?)
+            .env("TEAMTYPEV_TEST_REAL_GIT", real_git)
+            .status()?;
+        assert!(status.success());
+        Ok(())
     }
 
     #[test]
@@ -1172,11 +1213,14 @@ mod tests {
         let hook = repo.path().join("hooks/reference-transaction");
         std::fs::write(&hook, "# Installed by teamtype\nexit 1\n")?;
         remove_old_hook(root.path());
+        assert!(hook.exists());
+        std::fs::write(&hook, "# Installed by teamtypev\nexit 1\n")?;
+        remove_old_hook(root.path());
         assert!(!hook.exists());
         std::fs::create_dir(root.path().join("custom-hooks"))?;
         repo.config()?.set_str("core.hooksPath", "custom-hooks")?;
         let custom = root.path().join("custom-hooks/reference-transaction");
-        std::fs::write(&custom, "# Installed by teamtype\n")?;
+        std::fs::write(&custom, "# Installed by teamtypev\n")?;
         remove_old_hook(root.path());
         assert!(!custom.exists());
         Ok(())
@@ -1208,9 +1252,9 @@ mod tests {
     #[tokio::test]
     async fn socket_is_private_and_cannot_be_stolen() -> Result<()> {
         let root = tempfile::tempdir()?;
-        std::fs::create_dir(root.path().join(".teamtype"))?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
         let (listener, lock) = bind_socket(root.path())?;
-        let socket = root.path().join(".teamtype/git.sock");
+        let socket = root.path().join(".teamtypev/git.sock");
         assert_eq!(
             std::fs::metadata(&socket)?.permissions().mode() & 0o777,
             0o600
@@ -1220,7 +1264,16 @@ mod tests {
         let _accepted = listener.accept().await?;
         drop(listener);
         drop(lock);
-        let _replacement = bind_socket(root.path())?;
+        // A parallel test's fork can inherit the lock until its child completes exec.
+        let _replacement = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(listener) = bind_socket(root.path()) {
+                    break listener;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
         Ok(())
     }
 
@@ -1230,7 +1283,7 @@ mod tests {
         use notify::Watcher;
 
         let root = tempfile::tempdir()?;
-        let dir = root.path().join(".teamtype");
+        let dir = root.path().join(".teamtypev");
         std::fs::create_dir(&dir)?;
         let (events, received) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |event| {

@@ -33,11 +33,11 @@ async function scenario(applied, events, expectedDaemonRevision, expectedSent) {
         documentForUri: () => document,
         protocolUri: () => uri,
         getLines: doc => doc.text.split("\n"),
-        teamtypeDeltasToVSCodeTextEdits: () => [],
+        teamtypevDeltasToVSCodeTextEdits: () => [],
         contentAfterEdits: () => "xbase",
         clientsForDocument: () => [client],
         updateContents: () => { client.ot_states[uri].content = document.text.split("\n") },
-        vsCodeChangeEventToTeamtypeEdits: (_client, event) => [{
+        vsCodeChangeEventToTeamtypevEdits: (_client, event) => [{
             uri, revision: client.ot_states[uri].revision.daemon,
             delta: event.contentChanges.map(change => ({replacement: change.text})),
         }],

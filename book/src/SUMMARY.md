@@ -13,6 +13,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
 # User documentation
 
 - [Getting started](getting-started.md)
+- [Upgrading an existing fork installation](upgrading.md)
 - [Concepts](concepts.md)
     - [System overview](system-overview.md)
     - [File ownership](file-ownership.md)

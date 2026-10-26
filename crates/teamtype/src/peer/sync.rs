@@ -235,12 +235,12 @@ impl SyncActor {
             return;
         }
         error!(
-            "The sharer started a new history, so your changes here cannot be merged with theirs. Nothing was overwritten. Save any changes you made since you were last connected elsewhere, then run `teamtype join` again; it asks before replacing this directory's files with the sharer's."
+            "The sharer started a new history, so your changes here cannot be merged with theirs. Nothing was overwritten. Save any changes you made since you were last connected elsewhere, then run `teamtypev join` again; it asks before replacing this directory's files with the sharer's."
         );
-        let teamtype_dir = self.document_handle.base_dir().join(".teamtype");
-        let _ = std::fs::remove_file(teamtype_dir.join("doc"));
+        let teamtypev_dir = self.document_handle.base_dir().join(".teamtypev");
+        let _ = std::fs::remove_file(teamtypev_dir.join("doc"));
         // So that the next join asks before overwriting.
-        let _ = std::fs::remove_file(teamtype_dir.join("joined"));
+        let _ = std::fs::remove_file(teamtypev_dir.join("joined"));
         std::process::exit(1);
     }
 
@@ -396,7 +396,7 @@ mod tests {
     }
 
     fn fixture(base_dir: &std::path::Path, history: Option<&str>, has_files: bool) -> Result<()> {
-        std::fs::create_dir(base_dir.join(".teamtype"))?;
+        std::fs::create_dir(base_dir.join(".teamtypev"))?;
         let mut document = Document::default();
         if let Some(history) = history {
             let mut bytes = vec![0xff];
@@ -413,8 +413,8 @@ mod tests {
             );
             std::fs::write(base_dir.join("local.txt"), "local changes")?;
         }
-        std::fs::write(base_dir.join(".teamtype/doc"), document.save())?;
-        std::fs::write(base_dir.join(".teamtype/joined"), "joined")?;
+        std::fs::write(base_dir.join(".teamtypev/doc"), document.save())?;
+        std::fs::write(base_dir.join(".teamtypev/joined"), "joined")?;
         Ok(())
     }
 
@@ -444,8 +444,8 @@ mod tests {
             syncer.receive_peer_message(PeerMessage::Heartbeat).await?;
             syncer.check_history(remote).await;
             assert_eq!(syncer.document_handle.history_id().await, before);
-            assert!(directory.path().join(".teamtype/doc").exists());
-            assert!(directory.path().join(".teamtype/joined").exists());
+            assert!(directory.path().join(".teamtypev/doc").exists());
+            assert!(directory.path().join(".teamtypev/joined").exists());
         }
         Ok(())
     }
@@ -461,7 +461,7 @@ mod tests {
                     "peer::sync::tests::history_refusal_child",
                     "--nocapture",
                 ])
-                .env("TEAMTYPE_HISTORY_REFUSAL_TEST_DIR", directory.path())
+                .env("TEAMTYPEV_HISTORY_REFUSAL_TEST_DIR", directory.path())
                 .output()?;
             assert_eq!(
                 output.status.code(),
@@ -469,8 +469,8 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(!directory.path().join(".teamtype/doc").exists());
-            assert!(!directory.path().join(".teamtype/joined").exists());
+            assert!(!directory.path().join(".teamtypev/doc").exists());
+            assert!(!directory.path().join(".teamtypev/joined").exists());
             assert_eq!(
                 std::fs::read_to_string(directory.path().join("local.txt"))?,
                 "local changes"
@@ -481,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_refusal_child() -> Result<()> {
-        let Some(directory) = std::env::var_os("TEAMTYPE_HISTORY_REFUSAL_TEST_DIR") else {
+        let Some(directory) = std::env::var_os("TEAMTYPEV_HISTORY_REFUSAL_TEST_DIR") else {
             return Ok(());
         };
         actor(std::path::Path::new(&directory), false)

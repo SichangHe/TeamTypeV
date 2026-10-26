@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-// TODO: Define these constants in the teamtype crate, and use them here.
+// TODO: Define these constants in the teamtypev crate, and use them here.
 #[derive(Parser)]
 // 🧑 "change all mentioning of TeamType ... let's do TeamTypeV instead of X"
 #[command(about = "TeamTypeV: collaborative editing of local text files.", long_about = None)]
@@ -46,9 +46,9 @@ pub struct ShareJoinFlags {
     pub username: Option<String>,
     /// Create a new temporary directory and use it as the shared directory.
     /// The temporary directory is removed on exit.
-    /// The temporary directory is created in `$XDG_CACHE_DIR/teamtype/`,
-    /// or if `XDG_CACHE_DIR` is not set in `$HOME/.cache/teamtype/`,
-    /// or if `HOME` is not set in `/home/$USER/.cache/teamtype/`.
+    /// The temporary directory is created in `$XDG_CACHE_DIR/teamtypev/`,
+    /// or if `XDG_CACHE_DIR` is not set in `$HOME/.cache/teamtypev/`,
+    /// or if `HOME` is not set in `/home/$USER/.cache/teamtypev/`.
     #[arg(short, long)]
     pub temporary_directory: bool,
 }
@@ -68,7 +68,7 @@ pub enum Commands {
         #[arg(long)]
         show_secret_address: bool,
         /// Let guests reach this local TCP port, for example a web editor, by running
-        /// `teamtype tunnel` with the secret address.
+        /// `teamtypev tunnel` with the secret address.
         #[arg(long)]
         forward_port: Option<u16>,
         #[command(flatten)]
@@ -104,7 +104,7 @@ pub enum Commands {
     /// Use this instead of writing a shared file directly: the daemon ignores disk writes to files
     /// open in an editor, and a direct write can undo other people's edits.
     ///
-    /// How it works: teamtype reads the file's current content itself, requires `--old` to occur
+    /// How it works: teamtypev reads the file's current content itself, requires `--old` to occur
     /// in it exactly once, and replaces only that occurrence with `--new`. Text outside `--old` is
     /// never touched, so the edit cannot revert changes others made elsewhere, even if the caller's
     /// own copy of the file is stale. If someone changed the text inside `--old`, the edit is
@@ -121,7 +121,7 @@ pub enum Commands {
     /// rejected as soon as anyone edits anything.
     ///
     /// Example:
-    ///   teamtype agent-edit --file notes.md --old 'teh cat' --new 'the cat'
+    ///   teamtypev agent-edit --file notes.md --old 'teh cat' --new 'the cat'
     #[command(verbatim_doc_comment)]
     AgentEdit {
         /// File path relative to the shared directory.
@@ -140,7 +140,7 @@ pub enum Commands {
         #[arg(long, conflicts_with = "new")]
         new_file: Option<PathBuf>,
         /// Whose snapshot to update to the edited content, for `agent-diff`.
-        #[arg(long, env = "TEAMTYPE_AGENT", default_value = "agent")]
+        #[arg(long, env = "TEAMTYPEV_AGENT", default_value = "agent")]
         agent: String,
     },
     /// Print a file and remember its content as the agent's snapshot, for `agent-diff`.
@@ -149,7 +149,7 @@ pub enum Commands {
         #[arg(long)]
         file: PathBuf,
         /// Whose snapshot this is; agents sharing a directory should use distinct names.
-        #[arg(long, env = "TEAMTYPE_AGENT", default_value = "agent")]
+        #[arg(long, env = "TEAMTYPEV_AGENT", default_value = "agent")]
         agent: String,
     },
     /// Show what changed in files since the agent last read them with `agent-read` or wrote them
@@ -160,7 +160,7 @@ pub enum Commands {
         #[arg(long)]
         file: Option<PathBuf>,
         /// Whose snapshots to compare with.
-        #[arg(long, env = "TEAMTYPE_AGENT", default_value = "agent")]
+        #[arg(long, env = "TEAMTYPEV_AGENT", default_value = "agent")]
         agent: String,
     },
 }

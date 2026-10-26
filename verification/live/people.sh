@@ -3,17 +3,17 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Live trial: `N_PEOPLE` (default 4, at least 3) `teamtype` daemon processes, one headless Neovim
+# Live trial: `N_PEOPLE` (default 4, at least 3) `teamtypev` daemon processes, one headless Neovim
 # with the real plugin per daemon. Everyone types into one file at once; agent command line edits
 # follow; then a joiner and the sharer each drop out and return while the others keep typing,
 # once by a clean stop and once with the daemon killed by SIGKILL under its running editor.
 # `SEPARATE_NETWORKS=1` (needs `docker`) puts each daemon on a network of its own.
-# Needs `nvim`, `python3`, and a built `teamtype` (`cargo build -p teamtype`); `N_ROUNDS` sets
+# Needs `nvim`, `python3`, and a built `teamtypev` (`cargo build -p teamtypev`); `N_ROUNDS` sets
 # the lines each person types per phase.
 # Prints only failures; exit status 0 means every check passed.
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
-export TEAMTYPE_BINARY=${TEAMTYPE_BINARY:-$root/target/debug/teamtype}
+export TEAMTYPEV_BINARY=${TEAMTYPEV_BINARY:-$root/target/debug/teamtypev}
 n_rounds=${N_ROUNDS:-20}
 all_people=(a b c d e f g h)
 people=("${all_people[@]:0:${N_PEOPLE:-4}}")
@@ -23,7 +23,7 @@ sharer=a
 separate_networks=${SEPARATE_NETWORKS:-}
 image=silex/emacs:29
 joiner=${people[-1]}
-work=$(mktemp -d "${TMPDIR:-/tmp}/teamtype-live.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/teamtypev-live.XXXXXX")
 declare -A daemon_pid nvim_pid
 n_failures=0
 cleanup() {
@@ -57,15 +57,15 @@ start_daemon() {
         docker network create "$(container "$1")" >/dev/null 2>&1
         command=(docker run --rm --name "$(container "$1")" --network "$(container "$1")"
             --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work" -w "$work/$1"
-            -v "$TEAMTYPE_BINARY:/usr/local/bin/teamtype:ro" "$image" teamtype "${command[@]}")
+            -v "$TEAMTYPEV_BINARY:/usr/local/bin/teamtypev:ro" "$image" teamtypev "${command[@]}")
     else
-        command=("$TEAMTYPE_BINARY" "${command[@]}")
+        command=("$TEAMTYPEV_BINARY" "${command[@]}")
     fi
     (cd "$work/$1" && exec "${command[@]}" >>"$work/$1.log" 2>&1) &
     daemon_pid[$1]=$!
 }
 container() {
-    echo "teamtype-live-$$-$1"
+    echo "teamtypev-live-$$-$1"
 }
 # Send SIGNAL to PERSON's daemon and wait for it to end.
 stop_daemon() {
@@ -91,7 +91,7 @@ drop() {
     fi
     kill "${nvim_pid[$1]}" && wait "${nvim_pid[$1]}"
     [ "$2" = clean ] && stop_daemon "$1" TERM
-    rm -f "$work/$1.nvim" "$work/$1/.teamtype/socket"
+    rm -f "$work/$1.nvim" "$work/$1/.teamtypev/socket"
 }
 nvim_says_disconnected() {
     [ "$(nvim_expr "$1" '&modifiable')" = 0 ] &&
@@ -99,7 +99,7 @@ nvim_says_disconnected() {
 }
 rejoin() {
     start_daemon "$1"
-    eventually test -S "$work/$1/.teamtype/socket" || fail "daemon $1 did not come back"
+    eventually test -S "$work/$1/.teamtypev/socket" || fail "daemon $1 did not come back"
     start_nvim "$1"
 }
 nvim_expr() {
@@ -139,7 +139,7 @@ files_agree() {
     done
 }
 agent_edit() {
-    "$TEAMTYPE_BINARY" agent-edit --directory "$work/$1" --file "$2" \
+    "$TEAMTYPEV_BINARY" agent-edit --directory "$work/$1" --file "$2" \
         --old "$3" --new "$4" 2>>"$work/agent.log"
 }
 dump_buffers() {
@@ -148,7 +148,7 @@ dump_buffers() {
     wc -l "$work"/?.buffer >&2
 }
 
-for person in "${people[@]}"; do mkdir -p "$work/$person/.teamtype"; done
+for person in "${people[@]}"; do mkdir -p "$work/$person/.teamtypev"; done
 echo seed >"$work/$sharer/shared.txt"
 printf 'v1\n' >"$work/$sharer/agent.txt"
 start_daemon "$sharer"
@@ -157,7 +157,7 @@ eventually grep -q 'peer=' "$work/$sharer.log" || {
     exit 1
 }
 for person in "${people[@]:1}"; do
-    grep -oE 'peer=[^ ]+' "$work/$sharer.log" >"$work/$person/.teamtype/config"
+    grep -oE 'peer=[^ ]+' "$work/$sharer.log" >"$work/$person/.teamtypev/config"
     start_daemon "$person"
 done
 eventually files_agree shared.txt seed || {
@@ -181,7 +181,7 @@ eventually buffers_agree_with '^[a-h]-[0-9]*$' "$n_lines" || {
 agent_edit b agent.txt $'v1\n' $'v2\n' || fail "agent edit in a joining directory was rejected"
 eventually files_agree agent.txt v2 || fail "agent edit from a joiner did not reach the others"
 printf 'v2\n' >"$work/expected" && printf 'v3\n' >"$work/replacement"
-"$TEAMTYPE_BINARY" agent-edit --directory "$work/$sharer" --file agent.txt \
+"$TEAMTYPEV_BINARY" agent-edit --directory "$work/$sharer" --file agent.txt \
     --old-file "$work/expected" --new-file "$work/replacement" 2>>"$work/agent.log" ||
     fail "agent edit in the sharing directory, with content from files, was rejected"
 eventually files_agree agent.txt v3 || fail "agent edit from the sharer did not reach the others"
@@ -248,7 +248,7 @@ requests += [
     for i in range(2, 200)
 ]
 client = socket.socket(socket.AF_UNIX)
-client.connect(f"{directory}/.teamtype/socket")
+client.connect(f"{directory}/.teamtypev/socket")
 client.sendall("".join(json.dumps(request) + "\n" for request in requests).encode())
 client.close()
 PYTHON

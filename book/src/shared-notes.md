@@ -37,7 +37,7 @@ Launch the daemon in a way where it will keep running once you disconnect from y
 You could use `screen`, `tmux`, write a systemd service, or, in the easiest case, launch it with `nohup`:
 
 ```bash
-nohup teamtype share --show-secret-address &
+nohup teamtypev share --show-secret-address &
 ```
 
 Check the output of the command (written to the file `nohup.out` when using `nohup`) for the node's secret address.
@@ -48,13 +48,13 @@ Other peers can now connect to the "cloud peer".
 It is most convenient for them to put the secret address into their configuration file:
 
 ```bash
-echo "peer=<secret address>" >> .teamtype/config
+echo "peer=<secret address>" >> .teamtypev/config
 ```
 
 Then, they can connect anytime using
 
 ```bash
-teamtype join
+teamtypev join
 ```
 
 ## Tracking edits over time

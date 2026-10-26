@@ -26,7 +26,7 @@ recovery
 - disable UDP segmentation offload to avoid the repeated post-outage stalls observed with slirp4netns
 
 soak
-- run `SOAK_BINARY=/path/to/teamtype python3 verification/live/soak.py --work /tmp/catchup-run --duration-s 3600 --joiners 4 --seed 619`
+- run `SOAK_BINARY=/path/to/teamtypev python3 verification/live/soak.py --work /tmp/catchup-run --duration-s 3600 --joiners 4 --seed 619`
 - each peer uses a separate network namespace with default discovery and public relays
 - agent edits run every second on all peers; the sharer's real Neovim plugin edits every two seconds
 - seeded faults rotate ten one-second link drops, a 30-second outage, and a 90-second outage
@@ -38,11 +38,11 @@ soak
 - `events.jsonl` retains fault timing, accepted/rejected edits, recovery times, checks, and process identities
 - the daemon log reader permits lines up to 8 MiB
   - full document debug messages can exceed Python's default 64 KiB limit and block daemon output
-  - prefer `RUST_LOG=info,teamtype::peer=debug,iroh=debug` for network diagnosis
+  - prefer `RUST_LOG=info,teamtypev::peer=debug,iroh=debug` for network diagnosis
 - cleanup terminates only the harness's own process groups
 
 long outages
-- run `TEAMTYPE_BINARY=/path/to/teamtype python3 verification/live/sleep.py --modes network --durations 30 120 600 --repeats 2 --workers 2 --work /tmp/catchup-long`
+- run `TEAMTYPEV_BINARY=/path/to/teamtypev python3 verification/live/sleep.py --modes network --durations 30 120 600 --repeats 2 --workers 2 --work /tmp/catchup-long`
 - the recovered sleep harness uses a sharer and two joiners, each with real Neovim
   - one joiner's interface is dropped; the other peers keep editing
   - includes an edit just before disconnection and an offline edit
@@ -53,7 +53,7 @@ long outages
 - results and expected lines remain in the selected evidence directory
 
 relay regressions
-- run `SOAK_BINARY=/path/to/teamtype python3 -m verification.live.slow_relay /tmp/new-slow-relay-evidence` from the repository root
+- run `SOAK_BINARY=/path/to/teamtypev python3 -m verification.live.slow_relay /tmp/new-slow-relay-evidence` from the repository root
   - proxy relay upgrades to the public west-coast relay with a five-second delay
   - health probes pass immediately so relay selection can finish
   - run a thirty-second sharer outage with two joiners and concurrent edits

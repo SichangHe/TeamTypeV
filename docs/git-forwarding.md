@@ -7,7 +7,7 @@ User setup, direnv activation, and terminal behavior are documented in
 - 🧑 "Maybe we just intercept all the git stuff and forward them to the server?"
 - `git_forward` owns the local Unix socket and one command queue per daemon
   - only the sharer executes commands
-  - joiners install `.teamtype/bin/git`, forwarding to `teamtype git`
+  - joiners install `.teamtypev/bin/git`, forwarding to `teamtypev git`
     - generated activation files prepend its absolute directory and restore PATH and any previous deactivate function
     - bash/zsh and fish templates quote paths independently
   - arguments, relative working directory, and stdin travel over the authenticated peer connection
@@ -79,7 +79,8 @@ User setup, direnv activation, and terminal behavior are documented in
     - competing retries previously replaced an active connection during terminal Git
 - version-control directories never enter synchronization
   - old persisted metadata is removed from the document on startup
-  - legacy hooks containing `Installed by teamtype` are removed at startup and before execution
+  - hooks containing `Installed by teamtypev` are removed at startup and before execution
+    - upstream `Installed by teamtype` hooks are preserved
     - libgit2 resolves hook paths without spawning Git or inheriting `GIT_*` overrides
   - existing joiner repositories are left on disk, unused by forwarding or file enumeration
 - `verification/live/git_forward.sh` exercises real daemons and replaces `git_lock.sh`
