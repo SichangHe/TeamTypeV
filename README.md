@@ -13,7 +13,7 @@ TeamTypeV provides collaborative editing of local files, editor integration, and
 
 TeamTypeV is independently maintained and derived from [Teamtype](https://github.com/teamtype/teamtype), previously called Ethersync. The original authors built the peer-to-peer collaboration engine, editor protocol, and plugins on which this project depends. Please report TeamTypeV problems [here](https://github.com/SichangHe/TeamTypeV/issues), rather than to the upstream maintainers.
 
-TeamTypeV uses the `teamtypev` command, `.teamtypev` state directory, `.teamtypevignore` files, and its own editor plugins. Upstream Teamtype can remain installed with its separate names. Install TeamTypeV from this repository; packages named `teamtype` in public package managers belong to upstream. Existing fork users should follow the [manual upgrade instructions](book/src/upgrading.md).
+TeamTypeV uses the `teamtypev` command, `.teamtypev` state directory, `.teamtypevignore` files, and its own editor plugins. Upstream Teamtype can remain installed with its separate names. Install TeamTypeV from this repository; packages named `teamtype` in public package managers belong to upstream.
 
 ## Installation
 
@@ -25,7 +25,13 @@ curl -fsSL https://raw.githubusercontent.com/SichangHe/TeamTypeV/live-multi-edit
 
 To choose directly, replace `sh` with `sh -s -- --editor emacs`, `sh -s -- --editor code` (VS Code), `sh -s -- --editor codium`, or `sh -s -- --editor nvim`. Select several with repeated options, such as `sh -s -- --editor emacs --editor code`, or enter space-separated choices in the menu. Use `sh -s -- --no-editor` to install only the executable.
 
-Add `--dir DIR` to install elsewhere, or `--release TAG` for another release, after `sh -s --`. Ensure the installation directory is in your `PATH`, then restart your editor.
+Add `--dir DIR` to install elsewhere, or `--release TAG` for another release, after `sh -s --`. For the default location, run this in each terminal used for TeamTypeV or launching your editor:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add that line to your shell's startup configuration to keep it for future terminals. Restart your editor; launch VS Code with `code .` from a terminal with this PATH.
 
 To build from source, clone this repository, check out `live-multi-editor`, and run `cargo build --locked --release`. The executable is `target/release/teamtypev`.
 

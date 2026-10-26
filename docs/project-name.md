@@ -10,7 +10,7 @@ TeamTypeV
 - `teamtypev` executable, `.teamtypev` state, `.teamtypevignore` rules, and `TEAMTYPEV_*` environment variables
   - separate names let upstream Teamtype remain installed
   - no automatic adoption of `.teamtype` or `.ethersync` projects
-  - [manual upgrade](../book/src/upgrading.md) only for known existing fork state
+  - 🧑 "We don't need update instructions. We only need instructions for from-scratch"
 - VS Code extension publisher: `SichangHe`
   - extension ID `SichangHe.teamtypev`, commands/settings/URI scheme `teamtypev`
   - Emacs feature and Neovim plugin use `teamtypev` too
