@@ -6,12 +6,17 @@
 # pyright: reportUninitializedInstanceVariable=false, reportImplicitOverride=false
 
 import io
+import fcntl
 import os
 from pathlib import Path
+import pty
+import select
 import shutil
 import subprocess
 import tarfile
 import tempfile
+import termios
+import time
 import unittest
 
 
@@ -30,8 +35,19 @@ class InstallTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for command in ("tar", "gzip", "mkdir", "mv", "chmod", "mktemp", "rm"):
-            executable = shutil.which(command)
+        for command in (
+            "tar",
+            "gzip",
+            "mkdir",
+            "mv",
+            "chmod",
+            "mktemp",
+            "rm",
+            "sed",
+            "grep",
+            "dirname",
+        ):
+            executable = shutil.which(command, path=os.defpath)
             assert executable is not None, command
             (self.bin / command).symlink_to(executable)
         self.env = {
@@ -54,6 +70,13 @@ class InstallTests(unittest.TestCase):
             member.mode = 0o644
             archive.addfile(member, io.BytesIO(payload))
         self.downloader("curl")
+        _ = (self.root / "teamtype.el").write_text("(provide 'teamtype)\n")
+        _ = (self.root / "teamtype.vsix").write_bytes(b"local extension payload")
+        with tarfile.open(self.root / "teamtype-nvim.tar.gz", "w:gz") as archive:
+            payload = b"vim.g.teamtype_test_loaded = true\n"
+            member = tarfile.TarInfo("plugin/teamtype.lua")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
 
     def script(self, name: str, body: str) -> None:
         path = self.bin / name
@@ -64,14 +87,20 @@ class InstallTests(unittest.TestCase):
         copy = shutil.which("cp")
         assert copy is not None
         if name == "curl":
-            body = 'test "$1" = -fsSL\ntest "$3" = -o\nprintf "%s\\n" "$2" > "$TEST_ROOT/url"\n'
+            body = 'test "$1" = -fsSL\ntest "$3" = -o\nurl=$2\n'
             destination = '"$4"'
         else:
-            body = 'test "$1" = -qO\nprintf "%s\\n" "$3" > "$TEST_ROOT/url"\n'
+            body = 'test "$1" = -qO\nurl=$3\n'
             destination = '"$2"'
-        self.script(
-            name, body + f'"{copy}" "$TEST_ROOT/release.tar.gz" {destination}\n'
-        )
+        body += """printf "%s\\n" "$url" > "$TEST_ROOT/url"
+case "$url" in
+*/teamtype.el) asset=teamtype.el ;;
+*/teamtype.vsix) asset=teamtype.vsix ;;
+*/teamtype-nvim.tar.gz) asset=teamtype-nvim.tar.gz ;;
+*) asset=release.tar.gz ;;
+esac
+"""
+        self.script(name, body + f'"{copy}" "$TEST_ROOT/$asset" {destination}\n')
 
     def run_install(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -79,6 +108,7 @@ class InstallTests(unittest.TestCase):
             env=self.env,
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             timeout=5,
             check=False,
         )
@@ -150,10 +180,174 @@ class InstallTests(unittest.TestCase):
         self.assertFalse((self.root / "url").exists())
 
     def test_options_require_values(self) -> None:
-        for option in ("--dir", "--release"):
+        for option in ("--dir", "--release", "--editor"):
             with self.subTest(option=option):
                 self.assertNotEqual(self.run_install(option).returncode, 0)
                 self.assertFalse((self.root / "url").exists())
+
+    def test_unattended_default_skips_editor_setup(self) -> None:
+        result = self.run_install()
+        self.assert_installed(result, self.root / "home/.local/bin")
+        self.assertNotIn("Set up an editor?", result.stdout)
+        self.assertFalse((self.root / "home/.local/share").exists())
+
+    def test_unknown_editor_is_rejected_before_download(self) -> None:
+        result = self.run_install("--editor", "unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown editor", result.stderr)
+        self.assertFalse((self.root / "url").exists())
+
+    def test_neovim_uses_xdg_data_and_app_name(self) -> None:
+        self.env.update(
+            XDG_DATA_HOME=str(self.root / "data dir"), NVIM_APPNAME="custom-nvim"
+        )
+        result = self.run_install("--editor", "nvim", "--release", "custom")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plugin = (
+            self.root
+            / "data dir/custom-nvim/site/pack/plugins/start/teamtype/plugin/teamtype.lua"
+        )
+        self.assertIn("teamtype_test_loaded", plugin.read_text())
+        self.assertIn("/custom/teamtype-nvim.tar.gz", (self.root / "url").read_text())
+
+    def test_emacs_preserves_init_and_does_not_duplicate_loader(self) -> None:
+        home = self.root / 'home with "quotes"'
+        home.mkdir()
+        self.env["HOME"] = str(home)
+        init = home / ".emacs"
+        original = ";; Existing user configuration\n(setq inhibit-startup-screen t)\n"
+        _ = init.write_text(original)
+        directory = home / "bin directory"
+        for _ in range(2):
+            self.assert_installed(
+                self.run_install("--editor", "emacs", "--dir", str(directory)),
+                directory,
+            )
+        self.assertTrue(init.read_text().startswith(original))
+        self.assertEqual(init.read_text().count("setup.el"), 1)
+        self.assertIn(r"\"quotes\"", init.read_text())
+        setup = home / ".local/share/teamtype/emacs/setup.el"
+        self.assertIn("add-to-list 'exec-path", setup.read_text())
+        self.assertIn("bin directory", setup.read_text())
+        self.assertTrue(setup.with_name("teamtype.el").exists())
+
+    def test_emacs_xdg_init(self) -> None:
+        config = self.root / "config/emacs"
+        config.mkdir(parents=True)
+        self.env["XDG_CONFIG_HOME"] = str(config.parent)
+        result = self.run_install("--editor", "emacs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("setup.el", (config / "init.el").read_text())
+
+    def test_emacs_prefers_el_to_bare_init(self) -> None:
+        home = self.root / "home"
+        home.mkdir()
+        _ = (home / ".emacs").write_text(";; bare init\n")
+        _ = (home / ".emacs.el").write_text(";; source init\n")
+        result = self.run_install("--editor", "emacs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((home / ".emacs").read_text(), ";; bare init\n")
+        self.assertIn("setup.el", (home / ".emacs.el").read_text())
+
+    def test_emacs_xdg_takes_precedence_over_el_without_legacy_directory(self) -> None:
+        home = self.root / "home"
+        config = home / ".config/emacs"
+        config.mkdir(parents=True)
+        _ = (home / ".emacs.el").write_text(";; unused init\n")
+        result = self.run_install("--editor", "emacs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((home / ".emacs.el").read_text(), ";; unused init\n")
+        self.assertIn("setup.el", (config / "init.el").read_text())
+
+    def test_emacs_compiled_init_is_preserved_with_manual_guidance(self) -> None:
+        for relative in (".emacs.el", ".emacs.d/init.el"):
+            with self.subTest(relative=relative):
+                home = self.root / relative.replace("/", "_")
+                self.env["HOME"] = str(home)
+                init = home / relative
+                init.parent.mkdir(parents=True)
+                compiled = init.with_suffix(".elc")
+                _ = compiled.write_bytes(b"compiled user configuration")
+                result = self.run_install("--editor", "emacs")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("automatic init setup was skipped", result.stdout)
+                self.assertIn("recompile", result.stdout)
+                self.assertIn("setup.el", result.stdout)
+                self.assertEqual(compiled.read_bytes(), b"compiled user configuration")
+                self.assertFalse(init.exists())
+
+    def test_code_and_codium_install_release_extension(self) -> None:
+        for editor in ("code", "codium"):
+            with self.subTest(editor=editor):
+                self.script(
+                    editor,
+                    """test "$1" = --install-extension
+test "$3" = --force
+test -s "$2"
+printf '%s\\n' "$0" > "$TEST_ROOT/editor"
+""",
+                )
+                result = self.run_install("--editor", editor)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    (self.root / "editor").read_text().strip(), str(self.bin / editor)
+                )
+                self.assertIn("/nightly/teamtype.vsix", (self.root / "url").read_text())
+
+    def test_missing_code_command_explains_recovery(self) -> None:
+        result = self.run_install("--editor", "code")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rerun with --editor code", result.stderr)
+        self.assertTrue((self.root / "home/.local/bin/teamtype").exists())
+
+    def test_piped_script_prompts_on_terminal_and_can_skip(self) -> None:
+        for choice, args in (("2", []), ("", []), ("", ["--no-editor"])):
+            with self.subTest(choice=choice, args=args):
+                master, slave = pty.openpty()
+
+                def terminal() -> None:
+                    os.setsid()
+                    _ = fcntl.ioctl(1, termios.TIOCSCTTY, 0)
+
+                with subprocess.Popen(
+                    ["/bin/sh", "-s", "--", *args],
+                    stdin=subprocess.PIPE,
+                    stdout=slave,
+                    stderr=slave,
+                    env=self.env,
+                    preexec_fn=terminal,
+                ) as process:
+                    os.close(slave)
+                    try:
+                        assert process.stdin is not None
+                        _ = process.stdin.write(INSTALLER.read_bytes())
+                        process.stdin.close()
+                        output = b""
+                        answered = False
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            ready, _, _ = select.select([master], [], [], 0.1)
+                            if ready:
+                                try:
+                                    chunk = os.read(master, 65536)
+                                except OSError:
+                                    break
+                                if not chunk:
+                                    break
+                                output += chunk
+                                if b"[Enter] Skip:" in output and not answered:
+                                    _ = os.write(master, (choice + "\n").encode())
+                                    answered = True
+                            elif process.poll() is not None:
+                                break
+                        self.assertEqual(process.wait(timeout=1), 0, output.decode())
+                        self.assertEqual(answered, not args)
+                        if choice == "2":
+                            self.assertIn(b"Installed Emacs plugin", output)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        os.close(master)
 
     def test_unsupported_platforms_are_rejected_before_download(self) -> None:
         for system, arch in (("Linux", "riscv64"), ("FreeBSD", "x86_64")):

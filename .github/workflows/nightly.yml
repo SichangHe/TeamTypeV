@@ -65,8 +65,29 @@ jobs:
           ref: refs/tags/build-${{ github.run_id }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  upload-editor-assets:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode-plugin/package-lock.json
+      - name: Package editor plugins
+        run: |
+          tar -czf teamtype-nvim.tar.gz -C nvim-plugin .
+          cd vscode-plugin
+          npm ci
+          npx --yes @vscode/vsce@3.6.2 package --out ../teamtype.vsix
+      - name: Upload editor plugins
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "build-$GITHUB_RUN_ID" teamtype-nvim.tar.gz emacs-plugin/teamtype.el teamtype.vsix --clobber
+
   publish:
-    needs: upload-assets
+    needs: [upload-assets, upload-editor-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

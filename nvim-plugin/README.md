@@ -18,6 +18,12 @@ It is mainly meant to be used with TeamTypeV, but can also be configured to work
 
 ## Installation
 
+Install the executable and plugin together, then restart Neovim:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SichangHe/TeamTypeV/live-multi-editor/install.sh | sh -s -- --editor nvim
+```
+
 ### Manual installation
 
 Clone TeamTypeV and link its bundled plugin into Neovim's package directory:

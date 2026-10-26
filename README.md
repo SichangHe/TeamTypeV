@@ -17,17 +17,21 @@ The `teamtype` command, `.teamtype` configuration directory, and editor command 
 
 ## Installation
 
-Install the latest nightly build into `~/.local/bin` on Linux or macOS:
+Install the latest nightly build into `~/.local/bin` on Linux or macOS. In a terminal, the installer also asks which editor to set up:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SichangHe/TeamTypeV/live-multi-editor/install.sh | sh
 ```
 
-Add `-s -- --dir DIR` after `sh` to install elsewhere, or `-s -- --release TAG` for another release. Ensure the installation directory is in your `PATH`.
+To choose directly, replace `sh` with `sh -s -- --editor emacs`, `sh -s -- --editor code` (VS Code), `sh -s -- --editor codium`, or `sh -s -- --editor nvim`. Rerun for another editor. Use `sh -s -- --no-editor` to install only the executable.
+
+Add `--dir DIR` to install elsewhere, or `--release TAG` for another release, after `sh -s --`. Ensure the installation directory is in your `PATH`, then restart your editor.
 
 To build from source, clone this repository, check out `live-multi-editor`, and run `cargo build --locked --release`. The executable is `target/release/teamtype`.
 
 ## Share or join
+
+For a first session, follow the [getting-started guide](book/src/getting-started.md), including editor setup.
 
 In the directory to share:
 
@@ -42,6 +46,8 @@ teamtype join CODE
 ```
 
 Joining replaces local directory contents with the sharer's contents; use an empty directory. Keep backups of important work.
+
+Leave both commands running while editing; they run the collaboration daemons used by the editor plugins.
 
 Use the plugins shipped in this repository: [Neovim](nvim-plugin/README.md), [VS Code/Codium](vscode-plugin/README.md), and [Emacs](emacs-plugin/README.md). Upstream marketplace plugins may lack TeamTypeV's editor changes.
 
