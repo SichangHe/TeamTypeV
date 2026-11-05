@@ -280,11 +280,11 @@ impl Position {
             bail!("Position is referencing a line that doesn't exist in the content")
         }
 
-        // Newlines are part of lines in Ropey. To make sure our character offset is
-        // valid, check it against the "actual line length" (with out the optional \n).
+        // Line terminators are part of lines in Ropey. Every line except the last has one;
+        // exclude its last character so a column cannot alias the next line's start.
         let line = rope.line(self.line);
         let mut line_length = line.len_chars();
-        if line.chars().last() == Some('\n') {
+        if self.line + 1 < rope.len_lines() {
             line_length -= 1;
         }
 
@@ -1246,6 +1246,22 @@ mod tests {
                 .try_to_offset("h🥕llo\nwelt")
                 .is_err()
             );
+        }
+
+        #[test]
+        fn column_past_carriage_return_fails() {
+            // Ropey treats a lone CR as a line break, so (0, 2) and (1, 0) would alias.
+            let content = "a\rb";
+            assert!(
+                Position {
+                    line: 0,
+                    character: 2,
+                }
+                .try_to_offset(content)
+                .is_err()
+            );
+            let pos = Position::try_from_offset(2, content).unwrap();
+            assert_eq!(pos.try_to_offset(content).unwrap(), 2);
         }
     }
 }
