@@ -96,13 +96,19 @@ impl OTServer {
 
     /// Called when the CRDT world makes a change to the document.
     pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> Result<RevisionedEditorTextDelta> {
-        // We can apply the change immediately.
-        self.operations.push(delta.clone().into());
-        self.editor_queue.push(delta.clone().into());
-        self.daemon_revision += 1;
+        // Validate before mutating, so that a rejected change leaves the state untouched.
+        let op_seq: OperationSeq = delta.clone().into();
+        if op_seq.base_len() > self.current_content.chars().count() {
+            bail!("CRDT change does not fit the current content.");
+        }
         // Use "previous" content to transform into editor text delta.
         let editor_delta = EditorTextDelta::try_from_delta(delta.clone(), &self.current_content).context("Failed to convert delta to editor delta, under the given content. Was the edit invalid?")?;
-        self.current_content = Self::force_apply(&self.current_content, delta.clone().into());
+
+        // We can apply the change immediately.
+        self.operations.push(op_seq.clone());
+        self.editor_queue.push(op_seq.clone());
+        self.daemon_revision += 1;
+        self.current_content = Self::force_apply(&self.current_content, op_seq);
 
         // We assume that the editor is up-to-date, and send the operation to it.
         // If it can't accept it, we will transform and send it later.
@@ -490,6 +496,20 @@ mod tests {
                 .apply_editor_operation(rev_ed_delta_single(0, (5, 0), (5, 0), "x"))
                 .is_err());
             assert_eq!(ot_server.editor_revision, 0);
+        }
+
+        #[test]
+        fn crdt_change_that_does_not_fit_is_rejected_without_mutation() {
+            let mut ot_server: OTServer = OTServer::new("foo".to_string());
+            assert!(ot_server.apply_crdt_change(&delete(10, 2)).is_err());
+            assert!(ot_server.apply_crdt_change(&insert(10, "x")).is_err());
+            let mut overshooting_retain = TextDelta::default();
+            overshooting_retain.retain(10);
+            assert!(ot_server.apply_crdt_change(&overshooting_retain).is_err());
+            assert_eq!(ot_server.daemon_revision, 0);
+            assert!(ot_server.editor_queue.is_empty());
+            assert!(ot_server.operations.is_empty());
+            assert_eq!(ot_server.current_content(), "foo");
         }
 
         #[test]
