@@ -224,8 +224,22 @@ function uriToFname(uri: string): string {
 }
 
 // helpful: https://stackoverflow.com/a/54369605
-function UTF16CodeUnitOffsetToCharOffset(utf16CodeUnitOffset: number, content: string): number {
-    if (utf16CodeUnitOffset > content.length) {
+function isHighSurrogate(codeUnit: number): boolean {
+    return codeUnit >= 0xd800 && codeUnit <= 0xdbff
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+    return codeUnit >= 0xdc00 && codeUnit <= 0xdfff
+}
+
+export function UTF16CodeUnitOffsetToCharOffset(utf16CodeUnitOffset: number, content: string): number {
+    if (
+        utf16CodeUnitOffset > content.length ||
+        (utf16CodeUnitOffset > 0 &&
+            utf16CodeUnitOffset < content.length &&
+            isHighSurrogate(content.charCodeAt(utf16CodeUnitOffset - 1)) &&
+            isLowSurrogate(content.charCodeAt(utf16CodeUnitOffset)))
+    ) {
         throw new Error(
             `Could not convert UTF-16 code unit offset ${utf16CodeUnitOffset} to char offset in string '${content}'`,
         )
@@ -233,7 +247,7 @@ function UTF16CodeUnitOffsetToCharOffset(utf16CodeUnitOffset: number, content: s
     return [...content.slice(0, utf16CodeUnitOffset)].length
 }
 
-function charOffsetToUTF16CodeUnitOffset(charOffset: number, content: string): number {
+export function charOffsetToUTF16CodeUnitOffset(charOffset: number, content: string): number {
     let utf16Offset = 0
     let chars = [...content]
     if (charOffset > chars.length) {
