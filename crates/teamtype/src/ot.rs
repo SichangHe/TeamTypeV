@@ -119,7 +119,6 @@ impl OTServer {
         rev_editor_delta: RevisionedEditorTextDelta,
     ) -> Result<(TextDelta, Vec<RevisionedEditorTextDelta>)> {
         let daemon_revision = rev_editor_delta.revision;
-        self.editor_revision += 1;
 
         let mut op_seq: OperationSeq;
 
@@ -165,6 +164,8 @@ impl OTServer {
         .context(
             "The edit received from the editor has a range that doesn't fit the current content",
         )?;
+        // Only count the edit once it is known to apply.
+        self.editor_revision += 1;
         op_seq = rev_delta.delta.into();
 
         debug!(
@@ -475,6 +476,20 @@ mod tests {
                 .apply_editor_operation(rev_ed_delta_single(0, (0, 0), (0, 0), "y"))
                 .is_err());
             assert_eq!(ot_server.current_content(), "xfofooobar");
+        }
+
+        #[test]
+        fn rejected_editor_operation_keeps_editor_revision() {
+            let mut ot_server: OTServer = OTServer::new("foobar".to_string());
+            // Out-of-window revision.
+            assert!(ot_server
+                .apply_editor_operation(rev_ed_delta_single(1, (0, 0), (0, 0), "x"))
+                .is_err());
+            // Range that does not fit the content.
+            assert!(ot_server
+                .apply_editor_operation(rev_ed_delta_single(0, (5, 0), (5, 0), "x"))
+                .is_err());
+            assert_eq!(ot_server.editor_revision, 0);
         }
 
         #[test]
