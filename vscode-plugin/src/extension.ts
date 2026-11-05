@@ -672,14 +672,19 @@ function processLocalEdit(event: vscode.TextDocumentChangeEvent, lines: string[]
     }
 }
 
-function processSelection(event: vscode.TextEditorSelectionChangeEvent) {
+export function processSelection(event: vscode.TextEditorSelectionChangeEvent) {
     for (let client of clientsForDocument(event.textEditor.document)) {
-        let uri = protocolUri(event.textEditor.document)
-        let content = client.ot_states[uri].content
-        let ranges = event.selections.map((s) => {
-            return vsCodeRangeToTeamtypevRange(content, s)
-        })
-        client.connection.sendNotification(cursorType, {uri, ranges})
+        // 🧑 "handle the error the way the plugin handled such positions before, without crashing"
+        try {
+            let uri = protocolUri(event.textEditor.document)
+            let content = client.ot_states[uri].content
+            let ranges = event.selections.map((s) => {
+                return vsCodeRangeToTeamtypevRange(content, s)
+            })
+            client.connection.sendNotification(cursorType, {uri, ranges})
+        } catch (e) {
+            vscode.window.showErrorMessage(`Error while sending cursor to TeamTypeV daemon: ${e}`)
+        }
     }
 }
 

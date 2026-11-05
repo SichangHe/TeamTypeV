@@ -10,6 +10,7 @@ import * as os from "os"
 import * as path from "path"
 import * as vscode from "vscode"
 import {getCursorInfo} from "../cursor"
+import {processSelection} from "../extension"
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -257,6 +258,20 @@ suite("Extension Test Suite", () => {
         // (2) Daemon B's file -> VS Code document.
         fs.writeFileSync(fileB, readB() + "written-in-b\n")
         await waitFor("daemon B's change appears in VS Code", () => doc.getText().includes("written-in-b"))
+    })
+
+    test("a selection inside a surrogate pair does not throw", async function () {
+        this.timeout(60000)
+        assert.ok(await editor.edit((e) => e.insert(new vscode.Position(0, 0), "😀")))
+        await waitFor("the shared document contains the emoji", () => fs.readFileSync(fileB, "utf8").startsWith("😀"))
+        assert.doesNotThrow(() =>
+            processSelection({
+                textEditor: editor,
+                selections: [new vscode.Selection(0, 1, 0, 1)],
+                kind: vscode.TextEditorSelectionChangeKind.Command,
+            }),
+        )
+        assert.ok(await editor.edit((e) => e.delete(new vscode.Range(0, 0, 0, 2))))
     })
 
     test("VS Code, Neovim, and Emacs type at once", async function () {
