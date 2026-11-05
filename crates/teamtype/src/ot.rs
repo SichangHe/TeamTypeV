@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use operational_transform::OperationSeq;
 use tracing::{debug, warn};
 
@@ -123,10 +123,9 @@ impl OTServer {
 
         let mut op_seq: OperationSeq;
 
-        assert!(
-            daemon_revision <= self.daemon_revision,
-            "This must not happen, editor has seen a daemon revision from the future."
-        );
+        if daemon_revision > self.daemon_revision {
+            bail!("Editor has seen a daemon revision from the future.");
+        }
 
         // The operation might apply to an older daemon revision.
         // We need to transform it through the daemon operations that have happened since then.
@@ -134,10 +133,9 @@ impl OTServer {
         // But we at least we know that the editor has seen all daemon operations until
         // daemon_revision. So we can remove them from the editor queue.
         let daemon_operations_to_transform = self.daemon_revision - daemon_revision;
-        assert!(
-            self.editor_queue.len() >= daemon_operations_to_transform,
-            "Whoopsie, we don't have enough operations cached. Was this already processed?"
-        );
+        if self.editor_queue.len() < daemon_operations_to_transform {
+            bail!("We don't have enough operations cached. Was this already processed?");
+        }
         let seen_operations = self.editor_queue.len() - daemon_operations_to_transform;
         debug!(
             "Editor is confirming {} operations, there are still {} unconfirmed operations.",
@@ -454,6 +452,29 @@ mod tests {
                 .unwrap();
             assert_eq!(ot_server.editor_revision, 1);
             assert_eq!(ot_server.daemon_revision, 0);
+        }
+
+        #[test]
+        fn editor_revision_from_the_future_is_rejected() {
+            let mut ot_server: OTServer = OTServer::new("foobar".to_string());
+            assert!(ot_server
+                .apply_editor_operation(rev_ed_delta_single(1, (0, 0), (0, 0), "x"))
+                .is_err());
+            assert_eq!(ot_server.current_content(), "foobar");
+        }
+
+        #[test]
+        fn editor_revision_already_processed_is_rejected() {
+            let mut ot_server: OTServer = OTServer::new("foobar".to_string());
+            ot_server.apply_crdt_change(&dummy_insert(2)).unwrap();
+            ot_server
+                .apply_editor_operation(rev_ed_delta_single(1, (0, 0), (0, 0), "x"))
+                .unwrap();
+            // The queue is now empty, so revision 0 asks for one more queued op than we have.
+            assert!(ot_server
+                .apply_editor_operation(rev_ed_delta_single(0, (0, 0), (0, 0), "y"))
+                .is_err());
+            assert_eq!(ot_server.current_content(), "xfofooobar");
         }
 
         #[test]
