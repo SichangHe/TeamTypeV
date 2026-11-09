@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use anyhow::bail;
 use anyhow::{Context, Result};
 use automerge::{
-    AutoCommit, ChangeHash, ObjId, ObjType, Patch, PatchLog, ReadDoc, ScalarValue, Value,
+    AutoCommit, ChangeHash, ObjId, ObjType, Patch, PatchAction, PatchLog, Prop, ReadDoc,
+    ScalarValue, Value,
     sync::{Message as AutomergeSyncMessage, State as AutomergeSyncState, SyncDoc},
     transaction::Transactable,
 };
@@ -89,12 +90,14 @@ impl Document {
         message: AutomergeSyncMessage,
         peer_state: &mut AutomergeSyncState,
     ) -> Vec<Patch> {
+        let before = self.visible_text_objects();
         let mut patch_log = PatchLog::active();
         self.doc
             .sync()
             .receive_sync_message_log_patches(peer_state, message, &mut patch_log)
             .expect("Failed to apply sync message to Automerge document");
-        let patches = self.doc.make_patches(&mut patch_log);
+        let patches =
+            self.replaced_text_objects_as_puts(self.doc.make_patches(&mut patch_log), &before);
 
         // Update files cache.
         for patch in &patches {
@@ -139,6 +142,44 @@ impl Document {
         }
 
         patches
+    }
+
+    fn visible_text_objects(&self) -> HashMap<RelativePath, ObjId> {
+        self.files
+            .keys()
+            .filter_map(|path| Some((path.clone(), self.text_obj(path).ok()?)))
+            .collect()
+    }
+
+    /// When peers concurrently create the same path, Automerge may switch the visible text object
+    /// but report only `Conflict` followed by the new object's text as edits of the old one.
+    /// A receiver would insert that text into the old text. Report the switch as what it is: a
+    /// new text object at that path, like `PutMap`.
+    fn replaced_text_objects_as_puts(
+        &self,
+        patches: Vec<Patch>,
+        before: &HashMap<RelativePath, ObjId>,
+    ) -> Vec<Patch> {
+        patches
+            .into_iter()
+            .map(|mut patch| {
+                if let PatchAction::Conflict {
+                    prop: Prop::Map(key),
+                } = &patch.action
+                    && let Ok(now) = self.text_obj(&RelativePath::new(key))
+                    && before
+                        .get(&RelativePath::new(key))
+                        .is_some_and(|was| *was != now)
+                {
+                    patch.action = PatchAction::PutMap {
+                        key: key.clone(),
+                        value: (Value::Object(ObjType::Text), now),
+                        conflict: true,
+                    };
+                }
+                patch
+            })
+            .collect()
     }
 
     #[must_use]
@@ -582,6 +623,137 @@ mod tests {
             }
         }
         assert_eq!(editor, "new");
+    }
+
+    /// The cache must equal what the CRDT itself holds, which a reload reads without the cache.
+    fn assert_cache_matches_crdt(document: &mut Document, file: &RelativePath) {
+        let reloaded = Document::load(&document.save());
+        assert_eq!(
+            document.current_file_content(file),
+            reloaded.current_file_content(file)
+        );
+    }
+
+    fn from_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Two peers delete and recreate the same file concurrently. A third peer that first learned
+    /// of one new file receives the other's: Automerge reports the text of the object that lost
+    /// the conflict, which is not visible. Applying it made the cache differ from the CRDT, so
+    /// the daemon wrote the wrong text to disk and sent it to editors. The document and the sync
+    /// message are recorded from a failing randomized run, because the conflict winner depends on
+    /// the order of random actor ids.
+    #[test]
+    fn text_of_a_losing_concurrent_object_does_not_leak_into_cache() {
+        let file = RelativePath::new("a");
+        let before = from_hex(&[
+            "856f4a83b8a93fce00c40304105a5c84bfe7686d4a70fb453f52c8d00710786b682fd7094c2084883c7c987890b61090",
+            "6db396d90f5b03d8c442f10994899c10d3650676b65f9ed8754664fb8784d276021d57196e7727e3089b4ea6556c3664",
+            "6ee26f7d583d56aa00cf20e8bfc6f68ae3e57393e18e213e64f5c212d1934b03ee7bc1b91cf7642313c7be96f81a2c7e",
+            "ea0701080307130723024004430656020e01080208110a130b1525210a230b340242085609573280010b81011d83011d",
+            "7f01020202007f037a0100017f017f7a02100f7f010206007f0005017b000100020106070002030110027f0300020301",
+            "10047f2200067f0200010d02000100057c002060050c017f6f7d0566696c657306737461746573112e7465616d747970",
+            "652f686973746f72790201610011020102027f0310027f0304017c1e7e01640d017f11051102007f010204110102007f",
+            "970402001116ff31316564643164663434336334623333313566363861616364313635353935660a0a6f6e650a74776f",
+            "0a74687265650a7803007f0103000d027e01000200660200020002000200020002000200020002000200020002000200",
+            "64217200010001000100010001000100010001000100010001000100010205",
+        ].concat());
+        let message = from_hex(&[
+            "43031d57196e7727e3089b4ea6556c36646ee26f7d583d56aa00cf20e8bfc6f68ae36582a9b6ced62794e688846c04f5",
+            "1f4a779279daa5273c0f6f399e1642b50144ad24f4e6ac98a5dd282adb2e20060c9b7cea1eef2cb197212f5375551c96",
+            "fd2d0001011d57196e7727e3089b4ea6556c36646ee26f7d583d56aa00cf20e8bfc6f68ae30a050a0716a26b004dd66a",
+            "018404856f4a83dcbc7f3500f90304105a5c84bfe7686d4a70fb453f52c8d00710786b682fd7094c2084883c7c987890",
+            "b610906db396d90f5b03d8c442f10994899c10d3650676b65f9ed8754664fb8784d276031d57196e7727e3089b4ea655",
+            "6c36646ee26f7d583d56aa00cf20e8bfc6f68ae36582a9b6ced62794e688846c04f51f4a779279daa5273c0f6f399e16",
+            "42b50144ad24f4e6ac98a5dd282adb2e20060c9b7cea1eef2cb197212f5375551c96fd2d070109030a13092302400443",
+            "0856020e01090208110a130c1525210c230d340242085609573380010e81011e83011e7e010203007f0202037f010200",
+            "0201027f7f017802100e01027e020108007f0007017f0003017d7e020308070002040110027e00030002040110040222",
+            "00077f0200010d02000200067c002060050c017e6f007d0566696c657306737461746573112e7465616d747970652f68",
+            "6973746f72790301610012020102027e000310027e000304017b1e007e01640d017e1100061202007f01030412010200",
+            "7f970403001216ff31316564643164663434336334623333313566363861616364313635353935660a0a6f6e650a7477",
+            "6f0a74687265650a787803007d01000102000d027f010200630003000200020002000200020002000200020002000200",
+            "0200020002006321036f0001000100010001000100010001000100010001000100010001050704020284",
+        ].concat());
+        let mut observer = Document::load(&before);
+        assert_cache_matches_crdt(&mut observer, &file);
+        let message = AutomergeSyncMessage::decode(&message).unwrap();
+        let _ = observer.receive_sync_message_log_patches(message, &mut AutomergeSyncState::new());
+        assert_cache_matches_crdt(&mut observer, &file);
+    }
+
+    #[test]
+    fn fuzz_cache_stays_in_step_with_crdt() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+        let file = RelativePath::new("file");
+        for seed in 0..500u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut docs: Vec<Document> =
+                std::iter::repeat_with(Document::default).take(3).collect();
+            let mut states = vec![vec![AutomergeSyncState::new(); 3]; 3];
+            let mut wire: Vec<Vec<Vec<AutomergeSyncMessage>>> = vec![vec![vec![]; 3]; 3];
+            let mut log = vec![];
+            for _ in 0..25 {
+                let p = rng.random_range(0..3);
+                let q = rng.random_range(0..3);
+                match rng.random_range(0..7) {
+                    6 => {
+                        if let Some(Content::String(t)) = docs[p].current_file_content(&file) {
+                            let at = rng.random_range(0..=t.chars().count());
+                            let mut d = TextDelta::default();
+                            d.retain(at);
+                            d.insert("z");
+                            log.push(format!("{p}: insert z at {at}"));
+                            docs[p].apply_delta_to_doc(&d, &file).unwrap();
+                        }
+                    }
+                    0 => {
+                        let t = ["", "x", "xx", "y"][rng.random_range(0..4)];
+                        log.push(format!("{p}: update_text {t:?}"));
+                        let _ = docs[p].update_text(t, &file);
+                    }
+                    1 => {
+                        log.push(format!("{p}: remove"));
+                        docs[p].remove_file(&file);
+                    }
+                    2 => {
+                        let t = ["", "x", "xx", "y"][rng.random_range(0..4)];
+                        log.push(format!("{p}: set_file {t:?}"));
+                        docs[p].set_file(Content::String(t.into()), &file);
+                    }
+                    3 if p != q => {
+                        if let Some(m) = docs[p].generate_sync_message(&mut states[p][q]) {
+                            wire[p][q].push(m);
+                        }
+                    }
+                    _ if p != q && !wire[p][q].is_empty() => {
+                        let m = wire[p][q].remove(0);
+                        log.push(format!("{q}: receive from {p}"));
+                        let patches =
+                            docs[q].receive_sync_message_log_patches(m, &mut states[q][p]);
+                        if PatchEffect::from_crdt_patches(&patches)
+                            .iter()
+                            .any(|e| matches!(e, PatchEffect::FileRemoval(_)))
+                            && !docs[q].file_exists(&file)
+                            && rng.random_bool(0.5)
+                        {
+                            log.push(format!("{q}: bring back empty"));
+                            docs[q].update_text("", &file);
+                        }
+                        let reloaded = Document::load(&docs[q].save());
+                        assert_eq!(
+                            docs[q].current_file_content(&file),
+                            reloaded.current_file_content(&file),
+                            "seed {seed}: {log:#?}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// This set of tests has some documentation character to show to ourselves,

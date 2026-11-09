@@ -1096,7 +1096,10 @@ impl DocumentActor {
         result
     }
 
-    fn remove_disk_file(&self, file_path: &RelativePath) {
+    fn remove_disk_file(&mut self, file_path: &RelativePath) {
+        // The disk no longer has the file, so it must not be compared against later; otherwise
+        // the next write of a recreated file reads the missing file as a local deletion.
+        self.disk_content.remove(file_path);
         if let Err(error) = sandbox::remove_file(
             &self.app_config.base_dir,
             &self.absolute_path_for_file_path(file_path),
@@ -1630,6 +1633,14 @@ mod tests {
         use tempfile::{TempDir, tempdir};
 
         use super::*;
+
+        #[expect(clippy::unused_async, clippy::match_same_arms)]
+        mod races {
+            use tempfile::{TempDir, tempdir};
+
+            use super::*;
+            include!("daemon_race_tests.rs");
+        }
         //use tracing_test::traced_test;
 
         impl DocumentActor {

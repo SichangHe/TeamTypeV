@@ -42,6 +42,11 @@ impl EditorConnection {
         }
     }
 
+    #[cfg(test)]
+    pub fn debug_ot(&self, file_path: &RelativePath) -> String {
+        format!("{:?}", self.ot_servers.get(file_path))
+    }
+
     #[must_use]
     pub fn owns(&self, file_path: &RelativePath) -> bool {
         self.ot_servers.contains_key(file_path)
