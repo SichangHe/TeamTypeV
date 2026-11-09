@@ -23,6 +23,10 @@ use crate::socket::MockSocket;
 pub const TEAMTYPEV_DEBUG_BINARY: &str = env!("TEAMTYPEV_DEBUG_BINARY");
 
 // TODO: Consider renaming this, to avoid confusion with tokio "actors".
+#[expect(
+    clippy::double_must_use,
+    reason = "`async_trait` adds `#[must_use]` to boxed futures."
+)]
 #[async_trait]
 pub trait Actor: Send {
     async fn apply_random_delta(&mut self);

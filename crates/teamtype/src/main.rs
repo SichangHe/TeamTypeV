@@ -457,7 +457,7 @@ mod tests {
         };
         assert_eq!(
             sandbox::enumerate_non_ignored_files(&config),
-            [] as [std::path::PathBuf; 0]
+            [] as [PathBuf; 0]
         );
         std::fs::write(directory.path().join(".teamtypeignore"), "visible.txt\n")?;
         std::fs::write(directory.path().join("visible.txt"), "shared")?;

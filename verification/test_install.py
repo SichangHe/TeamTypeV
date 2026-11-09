@@ -51,7 +51,7 @@ class InstallTests(unittest.TestCase):
             assert executable is not None, command
             (self.bin / command).symlink_to(executable)
         self.env = {
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if not k.startswith("XDG_")},
             "HOME": str(self.root / "home"),
             "PATH": str(self.bin),
             "TMPDIR": str(self.root),
