@@ -24,6 +24,8 @@ concurrency:
 
 jobs:
   deploy:
+    # Pages stays disabled on the TeamTypeV fork.
+    if: github.repository == 'teamtype/teamtype'
     runs-on: ubuntu-latest
     permissions:
       contents: write  # To push a branch

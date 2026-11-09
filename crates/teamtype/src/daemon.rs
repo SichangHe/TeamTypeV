@@ -1627,6 +1627,7 @@ mod tests {
 
     mod document_actor {
         include!("daemon_save_tests.rs");
+        include!("daemon_race_tests.rs");
         use tempfile::{TempDir, tempdir};
 
         use super::*;
