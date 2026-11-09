@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use operational_transform::OperationSeq;
 use tracing::{debug, warn};
 
@@ -463,9 +463,11 @@ mod tests {
         #[test]
         fn editor_revision_from_the_future_is_rejected() {
             let mut ot_server: OTServer = OTServer::new("foobar".to_string());
-            assert!(ot_server
-                .apply_editor_operation(rev_ed_delta_single(1, (0, 0), (0, 0), "x"))
-                .is_err());
+            assert!(
+                ot_server
+                    .apply_editor_operation(rev_ed_delta_single(1, (0, 0), (0, 0), "x"))
+                    .is_err()
+            );
             assert_eq!(ot_server.current_content(), "foobar");
         }
 
@@ -477,9 +479,11 @@ mod tests {
                 .apply_editor_operation(rev_ed_delta_single(1, (0, 0), (0, 0), "x"))
                 .unwrap();
             // The queue is now empty, so revision 0 asks for one more queued op than we have.
-            assert!(ot_server
-                .apply_editor_operation(rev_ed_delta_single(0, (0, 0), (0, 0), "y"))
-                .is_err());
+            assert!(
+                ot_server
+                    .apply_editor_operation(rev_ed_delta_single(0, (0, 0), (0, 0), "y"))
+                    .is_err()
+            );
             assert_eq!(ot_server.current_content(), "xfofooobar");
         }
 
@@ -492,8 +496,8 @@ mod tests {
             overshooting_retain.retain(10);
             assert!(ot_server.apply_crdt_change(&overshooting_retain).is_err());
             assert_eq!(ot_server.daemon_revision, 0);
-            assert!(ot_server.editor_queue.is_empty());
-            assert!(ot_server.operations.is_empty());
+            assert_eq!(ot_server.editor_queue, vec![]);
+            assert_eq!(ot_server.operations, vec![]);
             assert_eq!(ot_server.current_content(), "foo");
         }
 

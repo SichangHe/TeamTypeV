@@ -34,6 +34,10 @@ use super::editor::strip_current_dir;
 pub const DEFAULT_SOCKET_NAME: &str = "socket";
 pub const CONFIG_DIR: &str = ".teamtypev";
 
+#[expect(
+    clippy::double_must_use,
+    reason = "`async_trait` adds `#[must_use]` to boxed futures."
+)]
 #[async_trait]
 pub trait JSONRPCForwarder<
     R: AsyncRead + Unpin + Send + 'static,

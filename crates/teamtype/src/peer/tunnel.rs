@@ -137,7 +137,7 @@ mod tests {
                 let (mut send, mut recv) = conn.open_bi().await?;
                 send.write_all(&invalid).await?;
                 send.finish()?;
-                assert!(recv.read_to_end(1).await?.is_empty());
+                assert_eq!(recv.read_to_end(1).await?, Vec::<u8>::new());
                 assert!(listener.accept().now_or_never().is_none());
             }
 

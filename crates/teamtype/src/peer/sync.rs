@@ -37,6 +37,10 @@ pub enum PeerMessage {
     Heartbeat,
 }
 
+#[expect(
+    clippy::double_must_use,
+    reason = "`async_trait` adds `#[must_use]` to boxed futures."
+)]
 #[async_trait]
 pub trait Connection<T>: Send + Sync {
     async fn send(&mut self, message: T) -> Result<()>;
