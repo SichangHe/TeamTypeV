@@ -338,7 +338,6 @@ local function activate_plugin()
     vim.api.nvim_create_user_command("TeamtypevInfo", print_info, {})
     vim.api.nvim_create_user_command("TeamtypevJumpToCursor", cursor.jump_to_cursor, {})
     vim.api.nvim_create_user_command("TeamtypevFollow", cursor.follow_cursor, {})
-
 end
 
 activate_plugin()
