@@ -302,7 +302,7 @@ impl World {
     }
 
     fn random_chars(&mut self, n: usize) -> String {
-        std::iter::repeat_with(|| ["x", "y", "\n", "é", "🥕"][self.rng.random_range(0..5)])
+        repeat_with(|| ["x", "y", "\n", "é", "🥕"][self.rng.random_range(0..5)])
             .take(n)
             .collect()
     }

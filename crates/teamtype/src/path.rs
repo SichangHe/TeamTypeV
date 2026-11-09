@@ -13,6 +13,8 @@ use derive_more::{AsRef, Deref, Display};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::sandbox;
+
 /// Paths like these are guaranteed to be absolute.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq, Hash, Deref, AsRef, Display)]
 #[as_ref(Path)]
@@ -73,7 +75,20 @@ impl RelativePath {
                 base_dir.display()
             )
         })?;
-        let relative_path = path.strip_prefix(&shared_dir).with_context(|| {
+        // A symlink such as macOS's `/var` -> `/private/var` can make the two spellings differ.
+        let canonical = || {
+            Some((
+                sandbox::absolute_and_canonicalized(&shared_dir).ok()?,
+                sandbox::absolute_and_canonicalized(path).ok()?,
+            ))
+        };
+        let relative_path = match path.strip_prefix(&shared_dir) {
+            Ok(relative_path) => Ok(relative_path.to_path_buf()),
+            Err(error) => canonical()
+                .and_then(|(dir, path)| Some(path.strip_prefix(dir).ok()?.to_path_buf()))
+                .ok_or(error),
+        }
+        .with_context(|| {
             format!(
                 "The path {path} is not in the shared directory '{}'. Your plugin probably doesn't support opening files from multiple TeamTypeV directories.",
                 shared_dir.display()
@@ -84,7 +99,7 @@ impl RelativePath {
             bail!("base_dir was equal to path when computing relative path");
         }
 
-        Ok(Self(relative_path.to_path_buf()))
+        Ok(Self(relative_path))
     }
 
     pub fn try_from_path(base_dir: &Path, path: &Path) -> Result<Self, anyhow::Error> {
@@ -178,6 +193,20 @@ mod test {
 
             assert_eq!(RelativePath::new(expected), relative_path);
         }
+    }
+
+    #[test]
+    fn test_relative_path_through_symlinked_base_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = AbsolutePath::try_from(real.join("new.txt")).unwrap();
+        assert_eq!(
+            RelativePath::try_from_absolute(&link, &path).unwrap(),
+            RelativePath::new("new.txt")
+        );
     }
 
     #[test]

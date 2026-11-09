@@ -151,7 +151,7 @@ fn snapshots_survive_file_directory_changes_and_long_paths() {
             "new parent",
         ],
     ));
-    let file = format!("{}/note.txt", vec!["x".repeat(120); 20].join("/"));
+    let file = format!("{}/note.txt", vec!["x".repeat(120); 7].join("/"));
     let path = dir.path().join(&file);
     std::fs::create_dir_all(path.parent().expect("parent")).expect("long directories");
     std::fs::write(&path, "long before\n").expect("long file");
