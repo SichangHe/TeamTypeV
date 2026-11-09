@@ -27,7 +27,8 @@ impl AbsolutePath {
     }
 
     pub fn to_file_uri(&self) -> FileUri {
-        FileUri::try_from(format!("file://{}", self.0.display()))
+        Url::from_file_path(&self.0)
+            .map(|url| FileUri(url.to_string()))
             .expect("Should be able to create File URI from absolute path")
     }
 }
@@ -176,6 +177,14 @@ mod test {
             let relative_path = RelativePath::try_from_absolute(base_dir, &absolute_path).unwrap();
 
             assert_eq!(RelativePath::new(expected), relative_path);
+        }
+    }
+
+    #[test]
+    fn test_uri_roundtrip_keeps_reserved_characters() {
+        for path in ["/a#b", "/a?b", "/a%20b", "/a b"] {
+            let path = AbsolutePath::try_from(path).unwrap();
+            assert_eq!(path.to_file_uri().to_absolute_path(), path);
         }
     }
 

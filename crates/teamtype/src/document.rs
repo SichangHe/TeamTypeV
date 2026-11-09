@@ -542,6 +542,48 @@ mod tests {
         document.assert_file_content(&file2, "");
     }
 
+    /// Exchanges sync messages until both sides are idle; returns patches `b` received.
+    fn sync(a: &mut Document, b: &mut Document) -> Vec<Patch> {
+        let (mut sa, mut sb) = (AutomergeSyncState::new(), AutomergeSyncState::new());
+        let mut received = vec![];
+        loop {
+            let (ma, mb) = (
+                a.generate_sync_message(&mut sa),
+                b.generate_sync_message(&mut sb),
+            );
+            if ma.is_none() && mb.is_none() {
+                return received;
+            }
+            if let Some(m) = ma {
+                received.extend(b.receive_sync_message_log_patches(m, &mut sb));
+            }
+            if let Some(m) = mb {
+                let _ = a.receive_sync_message_log_patches(m, &mut sa);
+            }
+        }
+    }
+
+    #[test]
+    fn replaced_text_object_clears_stale_text() {
+        let file = RelativePath::new("file");
+        let (mut a, mut b) = (Document::default(), Document::default());
+        a.set_file(Content::String("old".into()), &file);
+        sync(&mut a, &mut b);
+        a.remove_file(&file);
+        assert!(a.update_text("new", &file).is_none());
+        let patches = sync(&mut a, &mut b);
+        b.assert_file_content(&file, "new");
+        let mut editor = "old".to_owned();
+        for effect in PatchEffect::from_crdt_patches(&patches) {
+            match effect {
+                PatchEffect::FileRemoval(_) => editor.clear(),
+                PatchEffect::FileChange(d) => editor = d.delta.apply_to(&editor).unwrap(),
+                PatchEffect::FileBytes(..) | PatchEffect::NoEffect => {}
+            }
+        }
+        assert_eq!(editor, "new");
+    }
+
     /// This set of tests has some documentation character to show to ourselves,
     /// what happens under the hood when sync'ing.
     mod automerge_interna {

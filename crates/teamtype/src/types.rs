@@ -384,21 +384,14 @@ impl TryFrom<&Patch> for PatchEffect {
                             match value {
                                 (Value::Object(ObjType::Text), _) => {
                                     if *conflict {
-                                        // In this case, the peer receiving this PutMap should
-                                        // remove all existing content of this file in open
-                                        // editors. So we emit a FileRemovel.
                                         warn!(
                                             "Resolved conflict for file {relative_path} by overwriting your version."
                                         );
-                                        Ok(Self::FileRemoval(relative_path))
-                                    } else {
-                                        // We return an empty delta on the new file, so that the file is created on disk when
-                                        // synced over to another peer. TODO: Is this the best way to solve this?
-                                        Ok(Self::FileChange(FileTextDelta::new(
-                                            relative_path,
-                                            TextDelta::default(),
-                                        )))
                                     }
+                                    // A new text object replaces any previous content of this
+                                    // path, so receivers must clear it; later patches fill it.
+                                    // The removal also creates the (possibly empty) file on disk.
+                                    Ok(Self::FileRemoval(relative_path))
                                 }
                                 (Value::Scalar(Cow::Owned(ScalarValue::Bytes(bytes))), _) => {
                                     Ok(Self::FileBytes(relative_path, bytes.clone()))

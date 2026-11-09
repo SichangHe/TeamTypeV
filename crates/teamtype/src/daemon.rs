@@ -368,7 +368,7 @@ impl DocumentActor {
 
                                 let content_before_sync_message = self
                                     .file_content_at(&file_path, &heads_before_sync_message)
-                                    .expect("Could not get file content at heads");
+                                    .unwrap_or_default();
 
                                 // Create a delta that deletes all the previous content.
                                 let mut text_delta = TextDelta::default();
