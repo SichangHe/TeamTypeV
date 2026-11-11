@@ -99,6 +99,7 @@ impl RelayRecovery {
     }
 }
 
+#[derive(Clone)]
 struct SecretAddress {
     endpoint_addr: EndpointAddr,
     passphrase: SecretKey,
@@ -363,6 +364,14 @@ enum EndpointMessage {
     },
 }
 
+struct DialInfo {
+    address: SecretAddress,
+    /// Consecutive failed attempts.
+    failures: usize,
+    /// An attempt has started and its result has not been handled yet.
+    in_flight: bool,
+}
+
 // Owns the Iroh endpoint, accepts incoming connections, and can be instructed to connect to
 // another daemon.
 struct EndpointActor {
@@ -374,9 +383,9 @@ struct EndpointActor {
     my_passphrase: SecretKey,
     peer_tasks: HashMap<PublicKey, JoinHandle<()>>,
     peer_generations: HashMap<PublicKey, u64>,
-    /// Peers this daemon was told to connect to (it keeps reconnecting to them), with the number
-    /// of consecutive failed attempts.
-    dialed: HashMap<PublicKey, usize>,
+    /// Peers this daemon was told to connect to. It keeps reconnecting to them whenever it has no
+    /// live connection to them, whoever started the connection that just ended.
+    dialed: HashMap<PublicKey, DialInfo>,
     connecting: HashMap<PublicKey, JoinHandle<()>>,
     next_generation: u64,
     forward_port: Option<u16>,
@@ -425,7 +434,20 @@ impl EndpointActor {
                     debug!("Ignoring stale reconnect attempt for peer {peer_id}.");
                     return Ok(());
                 }
-                self.dialed.entry(peer_id).or_insert(0);
+                if generation.is_some() && self.has_live_task(peer_id) {
+                    // Some connection to this peer works (for example theirs, which we accepted):
+                    // this reconnect loop is done; the next lost connection starts a new one.
+                    debug!("Peer {peer_id} is connected; reconnect loop ends.");
+                    return Ok(());
+                }
+                self.dialed
+                    .entry(peer_id)
+                    .or_insert_with(|| DialInfo {
+                        address: secret_address.clone(),
+                        failures: 0,
+                        in_flight: false,
+                    })
+                    .in_flight = true;
                 let generation = self.start_peer_generation(peer_id);
                 if previous_attempts > 0 && previous_attempts.is_multiple_of(3) {
                     self.endpoint.dns_resolver()?.reset();
@@ -474,13 +496,24 @@ impl EndpointActor {
                     return Ok(());
                 }
                 self.connecting.remove(&peer_id);
-                let conn = match result {
-                    Ok(conn) => {
-                        self.dialed.insert(peer_id, 0);
-                        conn
+                if let Some(dial) = self.dialed.get_mut(&peer_id) {
+                    dial.in_flight = false;
+                    dial.failures = if result.is_ok() {
+                        0
+                    } else {
+                        previous_attempts + 1
+                    };
+                }
+                if result.is_ok() && self.has_live_task(peer_id) {
+                    debug!("Dropping a connection to peer {peer_id}: another one is already live.");
+                    if let Some(response_tx) = response_tx {
+                        let _ = response_tx.send(Ok(()));
                     }
+                    return Ok(());
+                }
+                let conn = match result {
+                    Ok(conn) => conn,
                     Err(err) => {
-                        self.dialed.insert(peer_id, previous_attempts + 1);
                         if format!("{err:#}").contains("known protocol") {
                             warn!(
                                 "The peer runs a teamtypev version that cannot sync with yours; install the same build on both sides."
@@ -558,17 +591,27 @@ impl EndpointActor {
         Ok(())
     }
 
-    /// Two processes with the same `.teamtypev/key`, for example in a copied `.teamtypev`
-    /// directory, keep replacing each other's connection.
+    fn has_live_task(&self, peer_id: PublicKey) -> bool {
+        self.peer_tasks
+            .get(&peer_id)
+            .is_some_and(|task| !task.is_finished())
+    }
+
+    /// The daemon with the smaller id, told to connect to the peer, keeps the connection it
+    /// dials and refuses the peer's incoming one; otherwise each would accept the other's and
+    /// cancel its own, leaving none. It accepts theirs once its own dial has failed repeatedly
+    /// (the peer is unreachable from here) and no attempt is in flight.
     fn refuses_duplicate(&self, peer_id: PublicKey) -> bool {
         const FAILURES_BEFORE_ACCEPTING: usize = 3;
         self.endpoint.id().as_bytes() < peer_id.as_bytes()
             && self
                 .dialed
                 .get(&peer_id)
-                .is_some_and(|failures| *failures < FAILURES_BEFORE_ACCEPTING)
+                .is_some_and(|dial| dial.failures < FAILURES_BEFORE_ACCEPTING || dial.in_flight)
     }
 
+    /// Two processes with the same `.teamtypev/key`, for example in a copied `.teamtypev`
+    /// directory, keep replacing each other's connection.
     fn warn_if_flapping(&mut self, peer_id: PublicKey) {
         let now = std::time::Instant::now();
         let times = self.recent_connections.entry(peer_id).or_default();
@@ -736,20 +779,26 @@ impl EndpointActor {
     fn handle_incoming_connection(&mut self, conn: IrohEndpointConnection) {
         let endpoint_id = conn.remote_id();
         if self.refuses_duplicate(endpoint_id) {
-            // Both daemons were told to connect to each other. Accepting the other's connection
-            // would cancel our own, and theirs cancels ours: no connection would be left, and
-            // neither side would retry. The daemon with the smaller id keeps the connection it
-            // dialed (and its reconnect loop) while that works; the other accepts. If our dial
-            // keeps failing (the peer is unreachable from here), we accept theirs instead.
             debug!("Refusing a duplicate connection from {endpoint_id}.");
             conn.close(0u32.into(), b"duplicate connection");
             return;
         }
-        // Their connection replaces our dial, so we stop dialing; they keep reconnecting.
-        self.dialed.remove(&endpoint_id);
         info!("Peer connected: {}", &endpoint_id);
         self.warn_if_flapping(endpoint_id);
-        self.start_peer_generation(endpoint_id);
+        // If we were told to connect to this peer, our reconnect loop keeps running (it ends on
+        // its own while a connection is live), and this task restarts it when the connection ends.
+        let redial = if let Some(dial) = self.dialed.get(&endpoint_id) {
+            if let Some(previous_task) = self.peer_tasks.remove(&endpoint_id) {
+                previous_task.abort();
+            }
+            self.peer_generations
+                .get(&endpoint_id)
+                .map(|generation| (dial.address.clone(), *generation))
+        } else {
+            self.start_peer_generation(endpoint_id);
+            None
+        };
+        let message_tx = self.message_tx.clone();
 
         let my_passphrase = self.my_passphrase.clone();
         let document_handle = self.document_handle.clone();
@@ -762,6 +811,9 @@ impl EndpointActor {
             }
 
             info!("Peer disconnected: {endpoint_id}",);
+            if let Some((address, generation)) = redial {
+                let _ = Self::reconnect(message_tx, address, 0, generation).await;
+            }
         });
         self.peer_tasks.insert(endpoint_id, task);
     }
@@ -1321,10 +1373,20 @@ mod tests {
         _dir: tempfile::TempDir,
         message_tx: mpsc::Sender<EndpointMessage>,
         address: SecretAddress,
+        key: SecretKey,
         task: JoinHandle<()>,
     }
 
     async fn test_peer() -> Result<TestPeer> {
+        test_peer_with(SecretKey::generate(), SecretKey::generate(), None).await
+    }
+
+    /// A test daemon with the given endpoint key and passphrase, bound to `addr` if given.
+    async fn test_peer_with(
+        key: SecretKey,
+        passphrase: SecretKey,
+        addr: Option<std::net::SocketAddr>,
+    ) -> Result<TestPeer> {
         use crate::daemon::DocumentActorHandle;
         let dir = tempfile::tempdir()?;
         let app_config = AppConfig {
@@ -1332,11 +1394,13 @@ mod tests {
             ..Default::default()
         };
         let handle = DocumentActorHandle::new(&app_config, false, false, false);
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await?;
-        let passphrase = SecretKey::generate();
+        let mut builder = Endpoint::builder(presets::Minimal)
+            .secret_key(key.clone())
+            .alpns(vec![ALPN.to_vec()]);
+        if let Some(addr) = addr {
+            builder = builder.bind_addr(addr)?;
+        }
+        let endpoint = builder.bind().await?;
         let (message_tx, message_rx) = mpsc::channel(8);
         let address = SecretAddress {
             endpoint_addr: endpoint.addr(),
@@ -1355,6 +1419,7 @@ mod tests {
             _dir: dir,
             message_tx,
             address,
+            key,
             task,
         })
     }
@@ -1472,6 +1537,53 @@ mod tests {
         panic!("restarted daemon did not connect");
     }
 
+    /// Two daemons joined to each other; the one with the smaller id restarts (same key and
+    /// address) without being told to join again. The other daemon, which was told to connect,
+    /// must reconnect: it used to forget its dial when it accepted the other's connection.
+    #[tokio::test]
+    async fn accepted_peer_that_restarts_is_redialed() -> Result<()> {
+        let (a, b) = (test_peer().await?, test_peer().await?);
+        let (small, large) =
+            if a.address.endpoint_addr.id.as_bytes() < b.address.endpoint_addr.id.as_bytes() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+        dial(&small, &large).await?;
+        dial(&large, &small).await?;
+        let pair = [small, large];
+        assert!(all_connected(&pair).await?, "mutual join did not connect");
+        let [small, large] = pair;
+        let addr = small
+            .address
+            .endpoint_addr
+            .ip_addrs()
+            .next()
+            .copied()
+            .expect("ip addr");
+        let passphrase = small.address.passphrase.clone();
+        let small_key = small.key.clone();
+        small.task.abort();
+        let _ = small.task.await;
+        let mut restarted = None;
+        for _ in 0..50 {
+            match test_peer_with(small_key.clone(), passphrase.clone(), Some(addr)).await {
+                Ok(peer) => {
+                    restarted = Some(peer);
+                    break;
+                }
+                Err(_) => sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let restarted = restarted.expect("rebind the restarted daemon");
+        let pair = [restarted, large];
+        assert!(
+            all_connected(&pair).await?,
+            "the daemon told to connect did not redial the restarted peer"
+        );
+        Ok(())
+    }
+
     /// The tie-break only holds back an incoming connection while our own dial can still work.
     #[tokio::test]
     async fn duplicate_refusal_depends_on_ids_and_dial_health() -> Result<()> {
@@ -1504,8 +1616,16 @@ mod tests {
         }
         let (smaller, larger) = (smaller.expect("smaller"), larger.expect("larger"));
         assert!(!actor.refuses_duplicate(larger), "not dialed: accept");
-        actor.dialed.insert(larger, 0);
-        actor.dialed.insert(smaller, 0);
+        let info = |id: PublicKey, failures: usize, in_flight: bool| DialInfo {
+            address: SecretAddress {
+                endpoint_addr: id.into(),
+                passphrase: SecretKey::generate(),
+            },
+            failures,
+            in_flight,
+        };
+        actor.dialed.insert(larger, info(larger, 0, false));
+        actor.dialed.insert(smaller, info(smaller, 0, false));
         assert!(
             actor.refuses_duplicate(larger),
             "we are smaller and our dial works"
@@ -1514,7 +1634,12 @@ mod tests {
             !actor.refuses_duplicate(smaller),
             "they are smaller: accept theirs"
         );
-        actor.dialed.insert(larger, 3);
+        actor.dialed.insert(larger, info(larger, 3, true));
+        assert!(
+            actor.refuses_duplicate(larger),
+            "an attempt is in flight: refuse"
+        );
+        actor.dialed.insert(larger, info(larger, 3, false));
         assert!(
             !actor.refuses_duplicate(larger),
             "our dial keeps failing: accept"
