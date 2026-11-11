@@ -42,6 +42,9 @@ impl OutgoingMessage {
 pub enum JSONRPCId {
     Usize(usize),
     String(String),
+    /// Any other JSON number (negative or fractional), echoed back unchanged so such a request
+    /// is answered rather than mistaken for a notification.
+    Number(serde_json::Number),
 }
 
 impl From<usize> for JSONRPCId {
@@ -204,6 +207,29 @@ mod test_serde {
             assert!(
                 IncomingMessage::from_jsonrpc(bad).is_err(),
                 "accepted {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_and_negative_ids_are_requests() {
+        for id in ["1.5", "-3"] {
+            let message = IncomingMessage::from_jsonrpc(&format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"close","params":{{"uri":"file:///f"}}}}"#
+            ))
+            .expect("parse");
+            let IncomingMessage::Request { id: got, .. } = message else {
+                panic!("id {id} treated as a notification");
+            };
+            let response = OutgoingMessage::Response(JSONRPCResponse::RequestSuccess {
+                id: got,
+                result: "success".into(),
+            });
+            assert!(
+                response
+                    .to_jsonrpc()
+                    .expect("json")
+                    .contains(&format!(r#""id":{id}"#))
             );
         }
     }
