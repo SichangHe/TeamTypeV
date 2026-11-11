@@ -2182,7 +2182,8 @@ mod tests {
             drop(readers.remove(0));
             std::fs::write(dir.path().join("file1"), "first outside write").expect("write");
             actor.file_created_or_changed(&path);
-            std::fs::write(dir.path().join("file1"), "second outside write, longer").expect("write");
+            std::fs::write(dir.path().join("file1"), "second outside write, longer")
+                .expect("write");
             actor.send_disk_edits().await;
             assert!(actor.disk_edits.is_empty(), "edits stayed queued");
             let Some(document::Content::String(shared)) = actor.current_file_content(&path) else {
