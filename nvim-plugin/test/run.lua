@@ -58,7 +58,10 @@ local function apply(text, op)
 end
 
 local function edit(sl, sc, el, ec, text)
-    return { range = { start = { line = sl, character = sc }, ["end"] = { line = el, character = ec } }, replacement = text }
+    return {
+        range = { start = { line = sl, character = sc }, ["end"] = { line = el, character = ec } },
+        replacement = text,
+    }
 end
 
 -- Track a buffer, collecting emitted deltas.
@@ -118,7 +121,8 @@ end
 -- 3. Random local edits: emitted deltas folded over the initial text equal the buffer.
 do
     local pieces = { "a", "b", " ", "\u{e9}", "\u{65e5}", "\u{1F600}", "e\u{301}", "\n", "\n" }
-    local cmds = { "dd", "x", "p", "P", "u", "ddp", "J", "yyp", "ggdG", "Gdd", "ggdd", "dG", "oab\27", "Ox\27", "A\u{e9}\27" }
+    local cmds =
+        { "dd", "x", "p", "P", "u", "ddp", "J", "yyp", "ggdG", "Gdd", "ggdd", "dG", "oab\27", "Ox\27", "A\u{e9}\27" }
     math.randomseed(12345)
     local failed
     for seed = 1, 300 do
@@ -161,7 +165,14 @@ do
                 end
             end)
             if not ok or text ~= logical(buf) then
-                failed = failed or ("seed %d step %d (%s): folded %q, buffer %q"):format(seed, step, what, tostring(text), logical(buf))
+                failed = failed
+                    or ("seed %d step %d (%s): folded %q, buffer %q"):format(
+                        seed,
+                        step,
+                        what,
+                        tostring(text),
+                        logical(buf)
+                    )
             end
         end
     end
@@ -219,7 +230,12 @@ do
 
     -- edits for a file with no synced state (not opened yet, or closed) must not raise
     local before = #sent
-    local ok = pcall(process, client, "edit", { uri = "file:///no/such/file", revision = 0, delta = { edit(0, 0, 0, 0, "q") } })
+    local ok = pcall(
+        process,
+        client,
+        "edit",
+        { uri = "file:///no/such/file", revision = 0, delta = { edit(0, 0, 0, 0, "q") } }
+    )
     check(ok, "edit for an unknown file must not raise")
     client.files[buf] = nil
     ok = pcall(process, client, "edit", { uri = uri, revision = 0, delta = { edit(0, 0, 0, 0, "q") } })
