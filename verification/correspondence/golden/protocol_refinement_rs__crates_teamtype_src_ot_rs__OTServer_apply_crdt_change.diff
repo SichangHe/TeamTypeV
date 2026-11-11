@@ -1,0 +1,34 @@
+--- repo
++++ proof
+-pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> Result<RevisionedEditorTextDelta> {
+-    let op_seq: OperationSeq = delta.clone().into();
+-    if op_seq.base_len() > self.current_content.chars().count() {
+-        bail!("CRDT change does not fit the current content.");
++pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> (r: Result<RevisionedEditorTextDelta>)
++    requires old(self).wf(), old(self).daemon_revision < usize::MAX,
++    ensures
++        final(self).daemon_revision == old(self).daemon_revision + 1,
++        final(self).editor_revision == old(self).editor_revision,
++        ops(final(self).editor_queue@) == ops(old(self).editor_queue@).push(delta_op(*delta)),
++        r is Ok ==> final(self).wf() && r->Ok_0.revision == old(self).editor_revision
++            && final(self).current_content@ == ap(old(self).current_content@, delta_op(*delta)),
++{
++    self.operations.push(op_from_delta(delta.clone()));
++    self.editor_queue.push(op_from_delta(delta.clone()));
++    self.daemon_revision += 1;
++    let editor_delta = match try_from_delta(delta.clone(), self.current_content.as_str()) {
++        Ok(x) => x,
++        Err(e) => return Err(e),
++    };
++    self.current_content = force_apply(self.current_content.as_str(), op_from_delta(delta.clone()));
++    proof {
++        assert(ops(self.editor_queue@) =~= ops(old(self).editor_queue@).push(delta_op(*delta)));
++        lemma_fold_snoc(self.last_confirmed_editor_content@, ops(old(self).editor_queue@), delta_op(*delta));
+     }
+-    let editor_delta = EditorTextDelta::try_from_delta(delta.clone(), &self.current_content).context("Failed to convert delta to editor delta, under the given content. Was the edit invalid?")?;
+-    self.operations.push(op_seq.clone());
+-    self.editor_queue.push(op_seq.clone());
+-    self.daemon_revision += 1;
+-    self.current_content = Self::force_apply(&self.current_content, op_seq);
+     Ok(RevisionedEditorTextDelta {
+         revision: self.editor_revision,

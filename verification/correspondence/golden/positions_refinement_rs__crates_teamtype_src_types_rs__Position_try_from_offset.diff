@@ -1,0 +1,15 @@
+--- repo
++++ proof
+-fn try_from_offset(full_offset: usize, content: &str) -> Result<Self> {
++fn try_from_offset(full_offset: usize, content: &str) -> (r: Result<Self, Error>)
++    ensures
++        full_offset <= n(content@) ==> (r matches Ok(p) && {
++            let l = line_of(content@, full_offset as int);
++            p.line == l && p.character == full_offset - start(content@, l)
++                && p.character <= line_len(content@, l)
++        }),
++        full_offset > n(content@) ==> r is Err,
++{
++    proof { axiom_rope_wf(content@); }
+     let rope = Rope::from_str(content);
+     let line = rope.try_char_to_line(full_offset)?;
