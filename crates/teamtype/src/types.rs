@@ -782,7 +782,9 @@ mod tests {
     #[test]
     fn conversion_editor_to_text_delta_multiple_operations_is_an_error_not_a_panic() {
         let mut ed_delta = ed_delta_single((0, 0), (0, 0), "a");
-        ed_delta.0.push(ed_delta_single((0, 1), (0, 1), "b").0.remove(0));
+        ed_delta
+            .0
+            .push(ed_delta_single((0, 1), (0, 1), "b").0.remove(0));
         assert!(TextDelta::try_from_ed_delta(ed_delta, "foo").is_err());
     }
 
