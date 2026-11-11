@@ -470,3 +470,86 @@ async fn failed_write_is_retried_without_any_event() -> Result<()> {
     assert_eq!(std::fs::read_to_string(&file)?, "peer text");
     Ok(())
 }
+
+#[test]
+fn crash_before_removing_a_file_a_peer_deleted_does_not_resurrect_it() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    actor.crdt_doc.remove_file(&path);
+    actor.persist()?;
+    drop(actor);
+    assert!(dir.path().join("shared").exists());
+    let restarted = restarted_actor(&dir);
+    assert!(restarted.current_file_content(&path).is_none());
+    assert!(!dir.path().join("shared").exists());
+    Ok(())
+}
+
+#[test]
+fn crash_before_creating_a_file_a_peer_created_still_creates_it() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    let created = RelativePath::new("created");
+    actor.crdt_doc.update_text("new\n", &created);
+    actor.mark_pending([created.clone()]);
+    actor.persist()?;
+    drop(actor);
+    assert!(!dir.path().join("created").exists());
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&created, "new\n");
+    assert_eq!(std::fs::read(dir.path().join("created"))?, b"new\n");
+    Ok(())
+}
+
+#[test]
+fn crash_with_an_unsaved_editor_edit_keeps_the_disk_version_once() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.files_open_in_editors.insert(path.clone());
+    actor.save_files_open_in_editors();
+    actor.crdt_doc.update_text("line1\neditor\n", &path);
+    actor.persist()?;
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&path, "line1\n");
+    assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\n");
+    Ok(())
+}
+
+#[test]
+fn crash_after_merging_an_outside_edit_before_writing_keeps_it_once() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.persist()?;
+    std::fs::write(dir.path().join("shared"), "line1\nout\n")?;
+    actor.file_created_or_changed(&path);
+    actor.persist()?;
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&path, "line1\nout\n");
+    assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\nout\n");
+    Ok(())
+}
+
+#[test]
+fn finish_git_writes_every_deferred_edit_and_clears_the_records() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    let path = RelativePath::new("shared");
+    assert!(actor.start_git(&[])?);
+    actor.write_file(&path);
+    assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\n");
+    actor.finish_git()?;
+    assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\npeer\n");
+    assert!(actor.read_pending().is_empty());
+    Ok(())
+}
