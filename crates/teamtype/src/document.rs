@@ -16,7 +16,7 @@ use automerge::{
     transaction::Transactable,
 };
 use dissimilar::Chunk;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     path::RelativePath,
@@ -98,18 +98,36 @@ impl Document {
         self.doc.get_actor().to_hex_string()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn receive_sync_message_log_patches(
         &mut self,
         message: AutomergeSyncMessage,
         peer_state: &mut AutomergeSyncState,
     ) -> Vec<Patch> {
+        self.try_receive_sync_message_log_patches(message, peer_state)
+            .expect("Failed to apply sync message to Automerge document")
+    }
+
+    /// A peer's sync message can be one Automerge refuses (for example a second, different change
+    /// with the same actor and sequence number). Then the error is returned, `peer_state` is
+    /// restored, and the files cache is not touched.
+    pub fn try_receive_sync_message_log_patches(
+        &mut self,
+        message: AutomergeSyncMessage,
+        peer_state: &mut AutomergeSyncState,
+    ) -> Result<Vec<Patch>> {
         let before = self.visible_text_objects();
         let mut patch_log = PatchLog::active();
-        self.doc
-            .sync()
-            .receive_sync_message_log_patches(peer_state, message, &mut patch_log)
-            .expect("Failed to apply sync message to Automerge document");
+        let state_before = peer_state.clone();
+        if let Err(error) =
+            self.doc
+                .sync()
+                .receive_sync_message_log_patches(peer_state, message, &mut patch_log)
+        {
+            *peer_state = state_before;
+            return Err(error.into());
+        }
         let patches =
             self.replaced_text_objects_as_puts(self.doc.make_patches(&mut patch_log), &before);
 
@@ -130,9 +148,21 @@ impl Document {
                         // And set old_text to the empty string.
                         ""
                     };
-                    // We're not in a good position here to "reject" the sync message, so let's
-                    // panic on errors.
-                    let new_text = file_text_delta.delta.apply_to(old_text).expect("If Automerge and our file cache work correctly, this delta should always apply");
+                    // The delta should always fit. If it does not, the cache is wrong: read the
+                    // text from the document instead of crashing.
+                    let new_text = match file_text_delta.delta.apply_to(old_text) {
+                        Ok(new_text) => new_text,
+                        Err(error) => {
+                            error!(
+                                "A patch for {} does not fit the cached text ({error:#}); rereading it from the document.",
+                                file_text_delta.file_path
+                            );
+                            self.text_obj(&file_text_delta.file_path)
+                                .ok()
+                                .and_then(|obj| self.doc.text(&obj).ok())
+                                .unwrap_or_default()
+                        }
+                    };
                     self.files
                         .insert(file_text_delta.file_path, Content::String(new_text));
                 }
@@ -155,7 +185,7 @@ impl Document {
             }
         }
 
-        patches
+        Ok(patches)
     }
 
     fn visible_text_objects(&self) -> HashMap<RelativePath, ObjId> {
@@ -684,6 +714,51 @@ mod tests {
         let loaded = Document::load(&bytes);
         assert_eq!(loaded.current_file_content(&RelativePath::new("int")), None);
         loaded.assert_file_content(&RelativePath::new("keep"), "t");
+    }
+
+    /// Automerge refuses a second, different change with the same actor and sequence number. A peer
+    /// can send that; the daemon must ignore the message, not crash.
+    #[test]
+    fn refused_sync_message_is_an_error_not_a_crash_and_changes_nothing() {
+        let actor = automerge::ActorId::random();
+        let (mut a, mut b, mut c) = (
+            Document::default(),
+            Document::default(),
+            Document::default(),
+        );
+        a.doc.set_actor(actor.clone());
+        b.doc.set_actor(actor);
+        a.set_file(Content::String("from a".into()), &RelativePath::new("f"));
+        b.set_file(Content::String("from b".into()), &RelativePath::new("g"));
+        sync(&mut a, &mut c);
+        let before = c.save();
+
+        let (mut sb, mut sc) = (AutomergeSyncState::new(), AutomergeSyncState::new());
+        let mut refused = false;
+        for _ in 0..10 {
+            let (mb, mc) = (
+                b.generate_sync_message(&mut sb),
+                c.generate_sync_message(&mut sc),
+            );
+            if mb.is_none() && mc.is_none() {
+                break;
+            }
+            if let Some(m) = mb {
+                let state = sc.clone();
+                if c.try_receive_sync_message_log_patches(m, &mut sc).is_err() {
+                    refused = true;
+                    assert_eq!(format!("{state:?}"), format!("{sc:?}"));
+                    break;
+                }
+            }
+            if let Some(m) = mc {
+                let _ = b.try_receive_sync_message_log_patches(m, &mut sb);
+            }
+        }
+        assert!(refused, "Automerge accepted the conflicting change");
+        assert_eq!(c.save(), before);
+        c.assert_file_content(&RelativePath::new("f"), "from a");
+        assert_cache_matches_crdt(&mut c, &RelativePath::new("f"));
     }
 
     /// The cache must equal what the CRDT itself holds, which a reload reads without the cache.

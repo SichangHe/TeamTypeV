@@ -100,8 +100,12 @@ impl Watcher {
                     }).await.expect("Channel closed");
                 }
                 event = self.notify_receiver.recv() => {
-                    // TODO: Better errors?
-                    let event = event.unwrap().unwrap();
+                    // The watcher can report errors (for example a full inotify queue). Losing
+                    // events must not kill the daemon; the periodic rescan catches up.
+                    let Some(Ok(event)) = event else {
+                        if event.is_none() { return; }
+                        continue;
+                    };
                     match event.kind {
                         EventKind::Create(CreateKind::File) => {
                             assert_eq!(event.paths.len(), 1);

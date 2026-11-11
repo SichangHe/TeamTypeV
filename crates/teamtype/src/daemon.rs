@@ -745,7 +745,7 @@ impl DocumentActor {
             &self.open_files_list(),
             lines.as_bytes(),
         )
-        .unwrap_or_else(|err| panic!("Failed to save the list of open files: {err}"));
+        .unwrap_or_else(|err| error!("Failed to save the list of open files: {err}"));
     }
 
     /// Drops closed files from the recovery list.
@@ -974,9 +974,15 @@ impl DocumentActor {
         if self.git_running {
             return;
         }
-        let relative_file_path =
+        let Ok(relative_file_path) =
             RelativePath::try_from_path(&self.app_config.base_dir, &watcher_event.file_path)
-                .expect("Watcher event should have a path within the base directory");
+        else {
+            debug!(
+                "Ignoring watcher event for '{}', which is not a path in the shared directory.",
+                watcher_event.file_path.display()
+            );
+            return;
+        };
 
         if git_forward::excluded(&relative_file_path) {
             return;
@@ -1114,17 +1120,26 @@ impl DocumentActor {
         }
     }
 
+    /// A sync message the document refuses is logged and has no effect; it must not crash us.
     #[must_use]
     fn apply_sync_message_to_doc(
         &mut self,
         message: AutomergeSyncMessage,
         peer_state: &mut SyncState,
     ) -> Vec<Patch> {
-        let patches = self
+        match self
             .crdt_doc
-            .receive_sync_message_log_patches(message, peer_state);
-        let _ = self.doc_changed_ping_tx.send(());
-        patches
+            .try_receive_sync_message_log_patches(message, peer_state)
+        {
+            Ok(patches) => {
+                let _ = self.doc_changed_ping_tx.send(());
+                patches
+            }
+            Err(error) => {
+                error!("Ignoring a sync message that the document refuses: {error:#}");
+                vec![]
+            }
+        }
     }
 
     #[must_use]
@@ -1451,9 +1466,15 @@ impl DocumentActor {
         for file_path in paths {
             match sandbox::read_file(&self.app_config.base_dir, &file_path) {
                 Ok(bytes) => {
-                    let relative_file_path =
+                    let Ok(relative_file_path) =
                         RelativePath::try_from_path(&self.app_config.base_dir, &file_path)
-                            .expect("Walked file path should be within base directory");
+                    else {
+                        warn!(
+                            "Skipping '{}': not a path in the shared directory.",
+                            file_path.display()
+                        );
+                        continue;
+                    };
                     if git_forward::excluded(&relative_file_path) {
                         continue;
                     }

@@ -30,7 +30,7 @@ use postcard::{from_bytes, to_allocvec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 use self::sync::{Connection, PeerMessage, SyncActor};
@@ -520,9 +520,8 @@ impl EndpointActor {
                             );
                         }
                         if let Some(response_tx) = response_tx {
-                            response_tx
-                                .send(Err(err))
-                                .expect("Connect receiver dropped");
+                            // The caller may have given up already.
+                            let _ = response_tx.send(Err(err));
                         } else {
                             tokio::spawn(Self::reconnect(
                                 self.message_tx.clone(),
@@ -553,7 +552,7 @@ impl EndpointActor {
                 }
 
                 if let Some(response_tx) = response_tx {
-                    response_tx.send(Ok(())).expect("Connect receiver dropped");
+                    let _ = response_tx.send(Ok(()));
                 }
 
                 let peer_id = conn.remote_id();
@@ -570,9 +569,11 @@ impl EndpointActor {
                     {
                         debug!("Error while handling a peer: {:?}", err);
                     }
-                    Self::reconnect(message_tx, secret_address, 0, generation)
-                        .await
-                        .expect("Failed to initiate reconnection");
+                    if let Err(error) =
+                        Self::reconnect(message_tx, secret_address, 0, generation).await
+                    {
+                        debug!("Failed to initiate reconnection: {error:#}");
+                    }
                 });
                 self.peer_tasks.insert(peer_id, task);
             }
@@ -764,7 +765,9 @@ impl EndpointActor {
                 maybe_message = self.message_rx.recv() => {
                     match maybe_message {
                         Some(message) => {
-                            self.handle_message(message).await.expect("Failed to handle endpoint message");
+                            if let Err(error) = self.handle_message(message).await {
+                                error!("Failed to handle endpoint message: {error:#}");
+                            }
                         }
                         None => {
                             // Our message channel was closed? Let's shut down.
@@ -916,12 +919,22 @@ impl PeerMessageStream {
     }
 
     async fn read_next(receive: &mut RecvStream) -> Result<PeerMessage> {
+        const CHUNK: usize = 1 << 20;
         let mut message_len_buf = [0; 4];
         Self::read_exact(receive, &mut message_len_buf).await?;
         let byte_count = u32::from_be_bytes(message_len_buf);
 
-        let mut bytes = vec![0; byte_count as usize];
-        Self::read_exact(receive, &mut bytes).await?;
+        // Grow with the bytes that arrive: the length is the peer's claim, and must not make us
+        // allocate gigabytes up front.
+        let mut bytes = Vec::new();
+        let mut remaining = byte_count as usize;
+        while remaining > 0 {
+            let start = bytes.len();
+            let take = remaining.min(CHUNK);
+            bytes.resize(start + take, 0);
+            Self::read_exact(receive, &mut bytes[start..]).await?;
+            remaining -= take;
+        }
         from_bytes(&bytes).context("Could not read the peer's message; the peer probably runs a different teamtypev version")
     }
 
