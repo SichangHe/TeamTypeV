@@ -98,7 +98,6 @@ impl RelativePath {
         if relative_path.iter().count() == 0 {
             bail!("base_dir was equal to path when computing relative path");
         }
-
         Ok(Self(relative_path))
     }
 
@@ -170,6 +169,13 @@ mod test {
         let path = AbsolutePath::try_from("/an/absolute/path2/file").unwrap();
 
         assert!(RelativePath::try_from_absolute(base_dir, &path,).is_err());
+    }
+
+    #[test]
+    fn test_relative_path_rejects_dotdot() {
+        let base_dir = Path::new("/an/absolute/path");
+        let path = AbsolutePath::try_from("/an/absolute/path/../escape").unwrap();
+        assert!(RelativePath::try_from_absolute(base_dir, &path).is_err());
     }
 
     #[test]

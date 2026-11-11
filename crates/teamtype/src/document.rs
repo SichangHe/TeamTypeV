@@ -58,6 +58,20 @@ impl Default for Document {
 
 impl Document {
     // TODO: use sth like try_load + Result to bubble up potential errors.
+    /// Loads every intact change; a torn tail (a crash while appending) is dropped.
+    pub fn try_load(bytes: &[u8]) -> Result<Self> {
+        let doc = AutoCommit::load_with_options(
+            bytes,
+            automerge::LoadOptions::new().on_partial_load(automerge::OnPartialLoad::Ignore),
+        )?;
+        let mut result = Self {
+            files: HashMap::default(),
+            doc,
+        };
+        result.update_files();
+        Ok(result)
+    }
+
     pub fn load(bytes: &[u8]) -> Self {
         let doc =
             AutoCommit::load(bytes).expect("Failed to load Automerge document from given bytes");
@@ -775,5 +789,24 @@ mod tests {
             // Again, stop, until peers tell us if they want more information.
             assert!(document.generate_sync_message(&mut state).is_none());
         }
+    }
+
+    #[test]
+    fn torn_persisted_document_loads_its_intact_prefix() {
+        let mut d = Document::default();
+        d.set_file(Content::String("hello".into()), &RelativePath::new("a"));
+        let mut bytes = d.save();
+        d.set_file(Content::String("world".into()), &RelativePath::new("b"));
+        bytes.extend(d.save_incremental());
+        // A crash while appending leaves any prefix of the second chunk.
+        for cut in 1..bytes.len() {
+            let _ = Document::try_load(&bytes[..cut]);
+        }
+        let torn = Document::try_load(&bytes[..bytes.len() - 3]).expect("prefix loads");
+        assert_eq!(
+            torn.current_file_content(&RelativePath::new("a")),
+            Some(&Content::String("hello".into()))
+        );
+        assert!(Document::try_load(b"garbage").is_err());
     }
 }

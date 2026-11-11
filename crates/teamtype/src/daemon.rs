@@ -185,7 +185,16 @@ impl DocumentActor {
             );
             let bytes = sandbox::read_file(&app_config.base_dir, &persistence_file)
                 .unwrap_or_else(|_| panic!("Could not read file '{}'", persistence_file.display()));
-            Document::load(&bytes)
+            Document::try_load(&bytes).unwrap_or_else(|error| {
+                // Never crash-loop on a damaged save: keep it for inspection and start empty.
+                error!("Persisted document is unreadable ({error:#}); setting it aside.");
+                let _ = sandbox::rename_file(
+                    &app_config.base_dir,
+                    &persistence_file,
+                    &app_config.base_dir.join(".teamtypev/doc.corrupt"),
+                );
+                Document::default()
+            })
         } else {
             Document::default()
         };
@@ -473,7 +482,8 @@ impl DocumentActor {
         let result = if self.save_fully {
             debug!("Persisting CRDT document fully.");
             let bytes = self.crdt_doc.save();
-            sandbox::write_file(&self.app_config.base_dir, &persistence_file, &bytes)
+            // Atomic: a crash while rewriting must not leave a truncated document.
+            sandbox::replace_file(&self.app_config.base_dir, &persistence_file, &bytes).map(|_| ())
         } else {
             debug!("Persisting CRDT document incrementally.");
             let bytes = self.crdt_doc.save_incremental();
