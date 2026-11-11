@@ -11,5 +11,5 @@
 +    requires app_config.base_abs(),
 +    ensures r.inv(), r.ot_servers@ == Map::<int, Srv>::empty(), r.app_config == app_config,
 +{
-+    Self { id, username: None, app_config, ot_servers: ServerMap::new() }
++    Self { id, username: clone_username(&app_config), app_config, ot_servers: ServerMap::new() }
  }

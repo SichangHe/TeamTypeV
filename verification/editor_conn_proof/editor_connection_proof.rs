@@ -926,6 +926,9 @@ impl AppConfig {
     // base_dir is absolute and canonical (main.rs `get_directory` canonicalizes it)
     pub uninterp spec fn base_abs(&self) -> bool;
 }
+// AppConfig::username (read-only, opaque here: only used as the cursor display name)
+#[verifier::external_body]
+pub fn clone_username(cfg: &AppConfig) -> (r: Option<String>) { unimplemented!() }
 #[verifier::external_body] pub struct ProtoError { inner: () }   // EditorProtocolMessageError
 #[verifier::external_body] pub struct Ranges { inner: () }       // Vec<Range>
 impl Ranges {
@@ -1080,7 +1083,7 @@ impl EditorConnection {
         requires app_config.base_abs(),
         ensures r.inv(), r.ot_servers@ == Map::<int, Srv>::empty(), r.app_config == app_config,
     {
-        Self { id, username: None, app_config, ot_servers: ServerMap::new() }
+        Self { id, username: clone_username(&app_config), app_config, ot_servers: ServerMap::new() }
     }
     // corr-end
 
