@@ -2283,5 +2283,225 @@ impl DocumentActor {
 }
 
 
+// =====================================================================================
+// REFINEMENT OF daemon.rs `process_component_message` (Open / Edit branches) and `remove_file`
+// (new round). The bodies below follow the Rust statement by statement (dropped: async/await, the ping channel,
+// `files_open_in_editors` bookkeeping, `write_file`, broadcast; each listed in STATUS.md). The CRDT document is an
+// external type whose view is the model's `doc` map; its methods carry the ASSUMED contracts written on them.
+// The theorems at the end tie each body to the corresponding daemon-model `Step`: the real code's document
+// after the body equals `dapply(st, step).doc`, and the code's `.expect` cannot fail, for every state satisfying `dinv`.
+// =====================================================================================
+
+#[verifier::external_body]
+pub struct CrdtDoc { inner: () }
+impl CrdtDoc {
+    pub uninterp spec fn view(&self) -> Map<int, DocContent>;
+
+    // document.rs current_file_content, restricted to "is it text, and which"
+    #[verifier::external_body]
+    pub fn current_text(&self, p: &RelativePath) -> (r: Option<String>)
+        ensures
+            (self@.contains_key(p@) && self@[p@] is Text) <==> r is Some,
+            r is Some ==> r->0@ == self@[p@]->Text_0,
+    { unimplemented!() }
+
+    // document.rs apply_delta_to_doc (ASSUMED: Ok iff the delta fits the text; on Ok the text becomes ap(..))
+    #[verifier::external_body]
+    pub fn apply_delta_to_doc(&mut self, d: &TextDelta, p: &RelativePath) -> (r: Result<()>)
+        ensures
+            old(self)@.contains_key(p@) && old(self)@[p@] is Text && fits(old(self)@[p@]->Text_0, delta_op(*d)) ==> {
+                &&& r is Ok
+                &&& final(self)@ == old(self)@.insert(p@, DocContent::Text(ap(old(self)@[p@]->Text_0, delta_op(*d))))
+            },
+    { unimplemented!() }
+
+    #[verifier::external_body]
+    pub fn set_file_text(&mut self, content: String, p: &RelativePath)
+        ensures final(self)@ == old(self)@.insert(p@, DocContent::Text(content@)),
+    { unimplemented!() }
+
+    #[verifier::external_body]
+    pub fn remove_file(&mut self, p: &RelativePath)
+        ensures final(self)@ == old(self)@.remove(p@),
+    { unimplemented!() }
+}
+
+// `dissimilar::diff(content, crdt_content)` followed by the `[] | [Equal]` test and `chunks.into()`:
+// None = "equal", Some(delta) otherwise (ASSUMED, trusted claim 4: the delta fits `a` and turns it into `b`)
+#[verifier::external_body]
+pub fn diff_delta(a: &String, b: &String) -> (r: Option<TextDelta>)
+    ensures
+        r is None <==> a@ == b@,
+        r is Some ==> fits(a@, delta_op(r->Some_0)) && ap(a@, delta_op(r->Some_0)) == b@,
+{ unimplemented!() }
+
+#[verifier::external_body]
+pub fn rp_clone(p: &RelativePath) -> (r: RelativePath) ensures r@ == p@ { unimplemented!() }
+
+pub struct PcmActor {
+    pub crdt_doc: CrdtDoc,
+    // abstraction of `editor_connections` (per editor, its OT servers); the refined `EditorConnection::owns`
+    // is `ot_servers@.contains_key`, so `owns` below is "some editor has the file open"
+    pub conns: Ghost<Map<int, Map<int, Srv>>>,
+    pub disk_queue_len: Ghost<nat>,
+}
+
+impl PcmActor {
+    #[verifier::external_body]
+    pub fn owns_any(&self, p: &RelativePath) -> (r: bool)
+        ensures r <==> exists|e: int| self.conns@.contains_key(e) && #[trigger] self.conns@[e].contains_key(p@),
+    { unimplemented!() }
+
+    // merge_disk_content(path, vec![]): abstracted as a DocEdit/Invalidate step (trusted claim 4); only its
+    // frame matters here: editor connections are untouched, and (ASSUMED) merging empty bytes keeps the file
+    // (it becomes empty text via update_text, or bytes via the non-UTF-8 branch, never absent)
+    #[verifier::external_body]
+    pub fn merge_empty(&mut self, p: &RelativePath)
+        ensures final(self).conns@ == old(self).conns@,
+            old(self).crdt_doc@.contains_key(p@) ==> final(self).crdt_doc@.contains_key(p@),
+    { unimplemented!() }
+
+    // corr-shaped: daemon.rs :: DocumentActor::remove_file. NOTE: `owns(path)` in the Rust is true when NO editor
+    // owns the file ("If any editor owns the file, it means that the daemon doesn't have ownership").
+    pub fn remove_file(&mut self, p: &RelativePath)
+        ensures
+            // no editor has it open: the document loses the file (= model FreeDoc { f, None }, enabled)
+            (forall|e: int| old(self).conns@.contains_key(e) ==> !(#[trigger] old(self).conns@[e].contains_key(p@)))
+                ==> final(self).crdt_doc@ == old(self).crdt_doc@.remove(p@),
+            // some editor has it open: the file stays (changed only through merge_disk_content, a DocEdit)
+            (exists|e: int| old(self).conns@.contains_key(e) && #[trigger] old(self).conns@[e].contains_key(p@))
+                && old(self).crdt_doc@.contains_key(p@) ==> final(self).crdt_doc@.contains_key(p@),
+            final(self).conns@ == old(self).conns@,
+    {
+        let daemon_owns = !self.owns_any(p);
+        if daemon_owns {
+            self.crdt_doc.remove_file(p);
+        } else {
+            self.merge_empty(p);
+        }
+    }
+
+    // corr-shaped: daemon.rs :: process_component_message, `ComponentMessage::Edit` branch (the `.expect` is
+    // `match .. Err => panic`, so verifying it shows the expect cannot fire under the precondition)
+    pub fn pcm_edit(&mut self, p: &RelativePath, d: &TextDelta)
+        requires
+            old(self).crdt_doc@.contains_key(p@), old(self).crdt_doc@[p@] is Text,
+            fits(old(self).crdt_doc@[p@]->Text_0, delta_op(*d)),
+        ensures
+            final(self).crdt_doc@ == old(self).crdt_doc@.insert(p@, DocContent::Text(ap(old(self).crdt_doc@[p@]->Text_0, delta_op(*d)))),
+            final(self).conns@ == old(self).conns@,
+    {
+        let r = self.crdt_doc.apply_delta_to_doc(d, p);
+        match r { Ok(()) => {}, Err(_) => { assert(false); } }
+    }
+
+    // corr-shaped: daemon.rs :: process_component_message, `ComponentMessage::Open` branch; returns `to_editor`
+    pub fn pcm_open(&mut self, p: &RelativePath, content: &String) -> (to_editor: Vec<ComponentMessage>)
+        ensures
+            final(self).conns@ == old(self).conns@,
+            ({
+                let was_text = old(self).crdt_doc@.contains_key(p@) && old(self).crdt_doc@[p@] is Text;
+                if was_text {
+                    let t = old(self).crdt_doc@[p@]->Text_0;
+                    &&& final(self).crdt_doc@ == old(self).crdt_doc@
+                    &&& (to_editor@.len() == 0 <==> content@ == t)
+                    &&& to_editor@.len() <= 1
+                    &&& to_editor@.len() == 1 ==> {
+                        &&& to_editor@[0] is Edit
+                        &&& to_editor@[0]->Edit_file_path@ == p@
+                        &&& fits(content@, delta_op(to_editor@[0]->Edit_delta))
+                        &&& ap(content@, delta_op(to_editor@[0]->Edit_delta)) == t
+                    }
+                } else {
+                    &&& final(self).crdt_doc@ == old(self).crdt_doc@.insert(p@, DocContent::Text(content@))
+                    &&& to_editor@.len() == 0
+                }
+            }),
+    {
+        let mut to_editor: Vec<ComponentMessage> = Vec::new();
+        match self.crdt_doc.current_text(p) {
+            Some(crdt_content) => {
+                match diff_delta(content, &crdt_content) {
+                    None => {}
+                    Some(text_delta) => {
+                        to_editor.push(ComponentMessage::Edit { file_path: rp_clone(p), delta: text_delta });
+                    }
+                }
+            }
+            None => {
+                self.crdt_doc.set_file_text(clone_str(content), p);
+            }
+        }
+        to_editor
+    }
+}
+
+// ---- tie the bodies to the model steps ----
+
+// EditorEdit: the real Edit branch, given the doc the model describes, takes the CRDT to dapply(..).doc and
+// its `.expect` cannot fail
+pub proof fn theorem_pcm_edit_refines(st: DState, e: int, f: int, rev: nat, o: int, docv: Map<int, DocContent>, dop: int)
+    requires
+        dinv(st), step_ok(st, Step::EditorEdit { e, f, rev, o }),
+        docv == st.doc, dop == crdt_op_of(st.eds[e][f], rev, o),
+    ensures
+        docv.contains_key(f) && docv[f] is Text && fits(docv[f]->Text_0, dop),
+        docv.insert(f, DocContent::Text(ap(docv[f]->Text_0, dop))) == dapply(st, Step::EditorEdit { e, f, rev, o }).doc,
+{
+    lemma_step(st, Step::EditorEdit { e, f, rev, o });
+}
+
+// EditorOpen: for every outcome of the real Open branch, the model step built from it (d = the returned delta)
+// is enabled (its preconditions hold given the drained queue and a known connection) and its doc equals the
+// code's doc; this includes re-opening a file the same editor already has open (no `!is_open` premise).
+pub proof fn theorem_pcm_open_refines(st: DState, e: int, f: int, c: Seq<char>, d: Option<int>,
+    docv2: Map<int, DocContent>)
+    requires
+        dinv(st), all_drained(st), st.eds.contains_key(e),
+        // the ensures of pcm_open, with docv == st.doc and d = the delta of to_editor[0] (if any)
+        is_text(st, f) ==> {
+            &&& docv2 == st.doc
+            &&& (d is None <==> c == doc_text(st, f))
+            &&& d is Some ==> fits(c, d->Some_0) && ap(c, d->Some_0) == doc_text(st, f)
+        },
+        !is_text(st, f) ==> docv2 == st.doc.insert(f, DocContent::Text(c)) && d is None,
+    ensures
+        step_ok(st, Step::EditorOpen { e, f, c, d }),
+        dinv(dapply(st, Step::EditorOpen { e, f, c, d })),
+        dapply(st, Step::EditorOpen { e, f, c, d }).doc == docv2,
+        // after the open, e's server holds the document text
+        dapply(st, Step::EditorOpen { e, f, c, d }).eds[e][f].cur == doc_text(dapply(st, Step::EditorOpen { e, f, c, d }), f),
+{
+    lemma_step(st, Step::EditorOpen { e, f, c, d });
+    let st2 = dapply(st, Step::EditorOpen { e, f, c, d });
+    assert(is_open(st2, e, f));
+    assert(pq(st2, f) =~= pq(st, f));
+    assert(pq(st, f).len() == 0);
+    assert(pq(st2, f) =~= Seq::<int>::empty());
+    assert(fold(st2.eds[e][f].cur, pq(st2, f)) == st2.eds[e][f].cur)
+}
+
+// Open of a file the editor ALREADY has open (`ot_servers.insert` replaces the server): the invariant survives
+// and every other editor of f is unaffected.
+pub proof fn theorem_reopen_owned(st: DState, e: int, f: int, c: Seq<char>, d: Option<int>, e2: int)
+    requires
+        dinv(st), is_open(st, e, f), step_ok(st, Step::EditorOpen { e, f, c, d }),
+        e2 != e, is_open(st, e2, f),
+    ensures
+        dinv(dapply(st, Step::EditorOpen { e, f, c, d })),
+        dapply(st, Step::EditorOpen { e, f, c, d }).eds[e2][f] == st.eds[e2][f],
+        dapply(st, Step::EditorOpen { e, f, c, d }).doc == st.doc,
+{
+    lemma_step(st, Step::EditorOpen { e, f, c, d });
+}
+
+// remove_file: when the Rust removes the file from the document, the model's FreeDoc precondition holds
+pub proof fn theorem_remove_file_is_freedoc(st: DState, f: int)
+    requires
+        forall|e: int| st.eds.contains_key(e) ==> !(#[trigger] st.eds[e].contains_key(f)),
+    ensures
+        step_ok(st, Step::FreeDoc { f, nc: None }),
+{}
+
 } // verus!
 fn main() {}
