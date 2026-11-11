@@ -1,0 +1,41 @@
+--- repo
++++ proof
+-fn deltas_for_editor(&self) -> Vec<RevisionedEditorTextDelta> {
+-    let mut to_editor = vec![];
++fn deltas_for_editor(&self) -> (r: Vec<RevisionedEditorTextDelta>)
++    ensures
++        r@.len() == self.editor_queue@.len(),
++        forall|i: int| 0 <= i < r@.len() ==> (#[trigger] r@[i]).revision == self.editor_revision
++            && ed_op(r@[i].delta) == ops(self.editor_queue@)[i],
++{
++    let mut to_editor: Vec<RevisionedEditorTextDelta> = Vec::new();
+     let mut document = self.last_confirmed_editor_content.clone();
+-    for editor_op in &self.editor_queue {
+-        let delta: TextDelta = editor_op.clone().into();
+-        let ed_delta = EditorTextDelta::try_from_delta(delta, &document).expect("It should always be possible to convert delta to editor delta when calculating edits to send to editor in OT Server");
+-        to_editor.push(RevisionedEditorTextDelta::new(
+-            self.editor_revision,
+-            ed_delta,
+-        ));
+-        document = Self::force_apply(&document, editor_op.clone());
++    let mut i: usize = 0;
++    while i < self.editor_queue.len()
++        invariant
++            i <= self.editor_queue@.len(),
++            to_editor@.len() == i,
++            forall|j: int| 0 <= j < i ==> (#[trigger] to_editor@[j]).revision == self.editor_revision
++                && ed_op(to_editor@[j].delta) == ops(self.editor_queue@)[j],
++        decreases self.editor_queue@.len() - i,
++    {
++        let editor_op = &self.editor_queue[i];
++        let delta: TextDelta = delta_from_op(editor_op.clone());
++        let ed_delta = try_from_delta_expect(delta, document.as_str());
++        to_editor.push(RevisionedEditorTextDelta {
++            revision: self.editor_revision,
++            delta: ed_delta,
++        });
++        document = force_apply(document.as_str(), editor_op.clone());
++        i += 1;
+     }
+     to_editor
+-}

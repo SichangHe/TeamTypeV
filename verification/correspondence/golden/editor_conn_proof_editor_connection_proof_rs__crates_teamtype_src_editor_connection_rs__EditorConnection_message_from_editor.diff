@@ -1,0 +1,379 @@
+--- repo
++++ proof
+-pub fn message_from_editor(
+-    &mut self,
+-    allow_file_creation: bool,
+-    message: &EditorProtocolMessageFromEditor,
+-) -> Result<(ComponentMessage, Vec<EditorProtocolMessageToEditor>), EditorProtocolMessageError>
++pub fn message_from_editor(&mut self, allow_file_creation: bool, message: &FromEditor)
++    -> (r: core::result::Result<(ComponentMessage, Vec<ToEditor>), ProtoError>)
++    requires
++        old(self).inv(), map_room(old(self).ot_servers@),
++        !(message is DaemonWriter), !(message is Save),
++    ensures
++        final(self).inv(),
++        final(self).app_config == old(self).app_config,
++        (message is Edit || message is Cursor) ==> forall|k: int| #[trigger] old(self).ot_servers@.contains_key(k) && final(self).ot_servers@.contains_key(k)
++            ==> final(self).ot_servers@[k].er <= old(self).ot_servers@[k].er + 1
++                && final(self).ot_servers@[k].dr == old(self).ot_servers@[k].dr,
++        match message {
++            FromEditor::Open { content, saves_file, daemon_writes, .. } => {
++                &&& (*saves_file || !*daemon_writes) ==> r is Err
++                &&& r is Err ==> final(self).ot_servers@ == old(self).ot_servers@
++                &&& r is Ok ==> {
++                    let (cm, to_ed) = r->Ok_0;
++                    &&& cm is Open
++                    &&& cm->Open_content@ == content@
++                    &&& to_ed@.len() == 0
++                    &&& final(self).ot_servers@ == old(self).ot_servers@.insert(cm->Open_file_path@, fresh_srv(content@))
++                    &&& !*saves_file && *daemon_writes
++                }
++            },
++            FromEditor::Close { .. } => {
++                &&& r is Err ==> final(self).ot_servers@ == old(self).ot_servers@
++                &&& r is Ok ==> {
++                    let (cm, to_ed) = r->Ok_0;
++                    &&& cm is Close
++                    &&& to_ed@.len() == 0
++                    &&& final(self).ot_servers@ == old(self).ot_servers@.remove(cm->Close_file_path@)
++                    &&& !final(self).ot_servers@.contains_key(cm->Close_file_path@)
++                }
++            },
++            FromEditor::Edit { revision, delta, .. } => {
++                &&& r is Err ==> err_edit_effect(old(self).ot_servers@, final(self).ot_servers@)
++                &&& r is Ok ==> {
++                    let (cm, to_ed) = r->Ok_0;
++                    &&& cm is Edit
++                    &&& old(self).ot_servers@.contains_key(cm->Edit_file_path@)  // only for open files
++                    &&& ({
++                        let k = cm->Edit_file_path@;
++                        let s0 = old(self).ot_servers@[k];
++                        let (s1, batch) = srv_edit(s0, *revision as nat, ed_op(*delta));
++                        &&& final(self).ot_servers@ == old(self).ot_servers@.insert(k, s1)
++                        &&& confirmed(s0) <= *revision <= s0.dr
++                        &&& delta_op(cm->Edit_delta) == tt(ed_op(*delta),
++                                s0.q.subrange(*revision - confirmed(s0), s0.q.len() as int)).0
++                        &&& to_ed@.len() == batch.len()
++                        &&& forall|i: int| 0 <= i < to_ed@.len() ==> {
++                            &&& (#[trigger] to_ed@[i]) is Edit
++                            &&& to_ed@[i]->Edit_revision == batch[i].rev
++                            &&& ed_op(to_ed@[i]->Edit_delta) == batch[i].op
++                            &&& to_ed@[i]->Edit_uri@ == uri_of(k)
++                        }
++                    })
++                }
++            },
++            FromEditor::Cursor { ranges, .. } => {
++                &&& final(self).ot_servers@ == old(self).ot_servers@
++                &&& r is Ok ==> {
++                    let (cm, to_ed) = r->Ok_0;
++                    &&& cm is Cursor
++                    &&& cm->Cursor_cursor_id@ == old(self).id@
++                    &&& cm->Cursor_cursor_state.ranges == *ranges
++                    &&& to_ed@.len() == 0
++                }
++            },
++            _ => true,
++        },
+ {
+-    #[expect(clippy::needless_pass_by_value)] // map_err takes by value
+-    fn anyhow_err_to_protocol_err(error: anyhow::Error) -> EditorProtocolMessageError {
+-        EditorProtocolMessageError {
+-            code: -1, // TODO: Should the error codes differ per error?
+-            message: error.to_string(),
+-            data: None,
+-        }
+-    }
+     match message {
+-        EditorProtocolMessageFromEditor::Open {
+-            uri,
+-            content,
+-            saves_file,
+-            daemon_writes,
+-        } => {
++        FromEditor::Open { uri, content, saves_file, daemon_writes } => {
+             if *saves_file || !*daemon_writes {
+-                return Err(EditorProtocolMessageError {
+-                    code: -1,
+-                    message:
+-                        "Update the editor plugin: shared files must be written by the daemon"
+-                            .into(),
+-                    data: None,
+-                });
+-            }
+-            let uri = FileUri::try_from(uri.clone()).map_err(anyhow_err_to_protocol_err)?;
+-            let absolute_path = uri.to_absolute_path();
+-            let relative_path =
+-                RelativePath::try_from_absolute(&self.app_config.base_dir, &absolute_path)
+-                    .map_err(anyhow_err_to_protocol_err)?;
+-            debug!("Got an 'open' message for {relative_path}");
+-            if !sandbox::exists(&self.app_config.base_dir, &absolute_path)
+-                .map_err(anyhow_err_to_protocol_err)?
+-            {
++                return Err(err_legacy_open());
++            }
++            let absolute_path = match uri_to_abs(uri) { Ok(x) => x, Err(e) => return Err(e) };
++            let relative_path = match relativize(&self.app_config, &absolute_path) {
++                Ok(x) => x, Err(e) => return Err(e),
++            };
++            let exists = match sandbox_exists(&self.app_config, &absolute_path) {
++                Ok(x) => x, Err(e) => return Err(e),
++            };
++            if !exists {
+                 if !allow_file_creation {
+-                    return Err(EditorProtocolMessageError {
+-                        code: -1,
+-                        message: "Git is running; retry opening when the command finishes"
+-                            .into(),
+-                        data: None,
+-                    });
+-                }
+-                sandbox::write_file(&self.app_config.base_dir, &absolute_path, b"")
+-                    .map_err(anyhow_err_to_protocol_err)?;
+-            }
+-            if sandbox::ignored(&self.app_config, &absolute_path)
+-                .map_err(anyhow_err_to_protocol_err)?
+-            {
+-                return Err(EditorProtocolMessageError {
+-                    code: -1,
+-                    message: format!("File {absolute_path} is ignored"),
+-                    data: Some("This file should not be shared with other peers".into()),
+-                });
+-            }
+-            let bytes = sandbox::read_file(&self.app_config.base_dir, &absolute_path)
+-                .map_err(anyhow_err_to_protocol_err)?;
+-            if std::str::from_utf8(&bytes).is_err() {
+-                return Err(EditorProtocolMessageError {
+-                    code: -1,
+-                    message: "Only UTF-8 files can be shared with an editor".into(),
+-                    data: None,
+-                });
+-            }
+-            let ot_server = OTServer::new(content.clone());
++                    return Err(err_git_running());
++                }
++                match sandbox_touch(&self.app_config, &absolute_path) {
++                    Ok(()) => {}, Err(e) => return Err(e),
++                }
++            }
++            let ignored = match sandbox_ignored(&self.app_config, &absolute_path) {
++                Ok(x) => x, Err(e) => return Err(e),
++            };
++            if ignored {
++                return Err(err_ignored(&absolute_path));
++            }
++            let utf8 = match sandbox_is_utf8(&self.app_config, &absolute_path) {
++                Ok(x) => x, Err(e) => return Err(e),
++            };
++            if !utf8 {
++                return Err(err_not_utf8());
++            }
++            let c = clone_str(content);
++            let ot_server = OTServer::new(c);
++            proof { assert(ot_server@.q =~= Seq::<int>::empty()); assert(ot_server@ == fresh_srv(content@)); }
+             self.ot_servers.insert(relative_path.clone(), ot_server);
+-            Ok((
+-                ComponentMessage::Open {
++            proof { assert(self.ot_servers@ =~= old(self).ot_servers@.insert(relative_path@, fresh_srv(content@))); }
++            Ok((ComponentMessage::Open { file_path: relative_path, content: clone_str(content) }, Vec::new()))
++        }
++        FromEditor::Close { uri } => {
++            let relative_path = match self.resolve(uri) { Ok(x) => x, Err(e) => return Err(e) };
++            self.ot_servers.remove(&relative_path);
++            Ok((ComponentMessage::Close { file_path: relative_path }, Vec::new()))
++        }
++        FromEditor::Edit { uri, revision, delta } => {
++            let relative_path = match self.resolve(uri) {
++                Ok(x) => x,
++                Err(e) => { proof { lemma_err_effect_refl(old(self).ot_servers@); } return Err(e) }
++            };
++            let mut ot_server = match self.ot_servers.take(&relative_path) {
++                Some(s) => s,
++                None => {
++                    proof {
++                        assert(self.ot_servers@ =~= old(self).ot_servers@);
++                        lemma_err_effect_refl(old(self).ot_servers@);
++                    }
++                    return Err(err_file_not_found())
++                }
++            };
++            let rev_delta = RevisionedEditorTextDelta { revision: *revision, delta: delta.clone() };
++            let ghost old_map = old(self).ot_servers@;
++            let result = ot_server.apply_editor_operation(rev_delta);
++            match result {
++                Err(_) => {
++                    proof {
++                        assert(old_map.contains_key(relative_path@));
++                    }
++                    self.ot_servers.insert(relative_path.clone(), ot_server);
++                    proof {
++                        let nm = self.ot_servers@;
++                        assert(nm.dom() =~= old_map.dom());
++                        assert(same_except(old_map, nm, relative_path@));
++                        assert forall|k: int| #[trigger] old_map.contains_key(k) implies {
++                            &&& nm[k].cur == old_map[k].cur && nm[k].dr == old_map[k].dr
++                            &&& nm[k].er <= old_map[k].er + 1 && nm[k].er >= old_map[k].er
++                            &&& wf(nm[k])
++                        } by {
++                            if k == relative_path@ { assert(nm[k] == ot_server@); } else { assert(nm[k] == old_map[k]); }
++                        }
++                        assert(err_edit_effect(old_map, nm));
++                    }
++                    Err(err_invalid_edit())
++                }
++                Ok((delta_for_crdt, rev_deltas_for_editor)) => {
++                    let ghost s0 = old_map[relative_path@];
++                    self.ot_servers.insert(relative_path.clone(), ot_server);
++                    proof {
++                        assert(self.ot_servers@ =~= old_map.insert(relative_path@, srv_edit(s0, *revision as nat, ed_op(*delta)).0));
++                    }
++                    let uri = uri_str(&self.app_config, &relative_path);
++                    let mut messages_to_editor: Vec<ToEditor> = Vec::new();
++                    let mut i: usize = 0;
++                    while i < rev_deltas_for_editor.len()
++                        invariant
++                            i <= rev_deltas_for_editor@.len(),
++                            messages_to_editor@.len() == i,
++                            forall|j: int| 0 <= j < i ==> {
++                                &&& (#[trigger] messages_to_editor@[j]) is Edit
++                                &&& messages_to_editor@[j]->Edit_revision == rev_deltas_for_editor@[j].revision
++                                &&& ed_op(messages_to_editor@[j]->Edit_delta) == ed_op(rev_deltas_for_editor@[j].delta)
++                                &&& messages_to_editor@[j]->Edit_uri@ == uri@
++                            },
++                        decreases rev_deltas_for_editor@.len() - i,
++                    {
++                        let d = &rev_deltas_for_editor[i];
++                        messages_to_editor.push(ToEditor::Edit {
++                            uri: clone_str(&uri),
++                            delta: d.delta.clone(),
++                            revision: d.revision,
++                        });
++                        i += 1;
++                    }
++                    proof {
++                        let s1 = srv_edit(s0, *revision as nat, ed_op(*delta)).0;
++                        let b = srv_edit(s0, *revision as nat, ed_op(*delta)).1;
++                        lemma_batch(s1.q, s1.er, *revision as nat);
++                        assert(b == batch(s1.q, s1.er, *revision as nat));
++                        assert(s1 == self.ot_servers@[relative_path@]);
++                    }
++                    Ok((ComponentMessage::Edit { file_path: relative_path, delta: delta_for_crdt }, messages_to_editor))
++                }
++            }
++        }
++        FromEditor::Cursor { uri, ranges } => {
++            let relative_path = match self.resolve(uri) { Ok(x) => x, Err(e) => return Err(e) };
++            Ok((ComponentMessage::Cursor {
++                cursor_id: clone_str(&self.id),
++                cursor_state: CursorState {
++                    name: self.username.clone(),
+                     file_path: relative_path,
+-                    content: content.clone(),
++                    ranges: ranges.clone(),
+                 },
+-                vec![],
+-            ))
+-        }
+-        EditorProtocolMessageFromEditor::Close { uri } => {
+-            let uri = FileUri::try_from(uri.clone()).map_err(anyhow_err_to_protocol_err)?;
+-            let absolute_path = uri.to_absolute_path();
+-            let relative_path =
+-                RelativePath::try_from_absolute(&self.app_config.base_dir, &absolute_path)
+-                    .map_err(anyhow_err_to_protocol_err)?;
+-            debug!("Got a 'close' message for {relative_path}");
+-            self.ot_servers.remove(&relative_path);
+-            Ok((
+-                ComponentMessage::Close {
+-                    file_path: relative_path,
+-                },
+-                vec![],
+-            ))
+-        }
+-        EditorProtocolMessageFromEditor::Edit {
+-            uri,
+-            revision,
+-            delta,
+-        } => {
+-            debug!(
+-                "Handling RevDelta from editor: revision {:#?}, delta {:#?}",
+-                revision, delta
+-            );
+-            let uri = FileUri::try_from(uri.clone()).map_err(anyhow_err_to_protocol_err)?;
+-            let absolute_path = uri.to_absolute_path();
+-            let relative_path =
+-                RelativePath::try_from_absolute(&self.app_config.base_dir, &absolute_path)
+-                    .map_err(anyhow_err_to_protocol_err)?;
+-            if self.ot_servers.get_mut(&relative_path).is_none() {
+-                return Err(EditorProtocolMessageError {
+-                    code: -1,
+-                    message: "File not found".into(),
+-                    data: Some(
+-                        "Please stop sending edits for this file or 'open' it before.".into(),
+-                    ),
+-                });
+-            }
+-            let ot_server = self
+-                .ot_servers
+-                .get_mut(&relative_path)
+-                .expect("Could not find OT server.");
+-            let rev_delta = RevisionedEditorTextDelta {
+-                revision: *revision,
+-                delta: delta.clone(),
+-            };
+-            let Ok((delta_for_crdt, rev_deltas_for_editor)) =
+-                ot_server.apply_editor_operation(rev_delta)
+-            else {
+-                return Err(EditorProtocolMessageError {
+-                    code: -1,
+-                    message: "Invalid edit".into(),
+-                    data: Some(
+-                        "This edit can not be applied to the current document content. This is probably a bug in the editor plugin.".into(),
+-                    ),
+-                });
+-            };
+-            let uri = AbsolutePath::from_parts(&self.app_config.base_dir, &relative_path)
+-                .expect("Should be able to construct absolute URI")
+-                .to_file_uri();
+-            let messages_to_editor = rev_deltas_for_editor
+-                .into_iter()
+-                .map(|rev_delta_for_editor| EditorProtocolMessageToEditor::Edit {
+-                    uri: uri.to_string(),
+-                    delta: rev_delta_for_editor.delta,
+-                    revision: rev_delta_for_editor.revision,
+-                })
+-                .collect();
+-            Ok((
+-                ComponentMessage::Edit {
+-                    file_path: relative_path,
+-                    delta: delta_for_crdt,
+-                },
+-                messages_to_editor,
+-            ))
+-        }
+-        EditorProtocolMessageFromEditor::Cursor { uri, ranges } => {
+-            let uri = FileUri::try_from(uri.clone()).map_err(anyhow_err_to_protocol_err)?;
+-            let absolute_path = uri.to_absolute_path();
+-            let relative_path =
+-                RelativePath::try_from_absolute(&self.app_config.base_dir, &absolute_path)
+-                    .map_err(anyhow_err_to_protocol_err)?;
+-            Ok((
+-                ComponentMessage::Cursor {
+-                    cursor_id: self.id.clone(),
+-                    cursor_state: CursorState {
+-                        name: self.username.clone(),
+-                        file_path: relative_path,
+-                        ranges: ranges.clone(),
+-                    },
+-                },
+-                vec![],
+-            ))
+-        }
+-        EditorProtocolMessageFromEditor::DaemonWriter {}
+-        | EditorProtocolMessageFromEditor::Save { .. } => {
+-            unreachable!("Handled by document actor")
++            }, Vec::new()))
++        }
++        FromEditor::DaemonWriter | FromEditor::Save { .. } => {
++            expect_failed()
+         }
+     }

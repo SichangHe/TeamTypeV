@@ -1,0 +1,39 @@
+--- repo
++++ proof
+-pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> Result<RevisionedEditorTextDelta> {
+-    let op_seq: OperationSeq = delta.clone().into();
+-    if op_seq.base_len() > self.current_content.chars().count() {
+-        bail!("CRDT change does not fit the current content.");
++pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> (r: Result<RevisionedEditorTextDelta>)
++    requires wf(old(self)@), old(self).daemon_revision < usize::MAX,
++    ensures
++        crdt_ok(old(self).current_content@, *delta) ==> r is Ok,
++        r is Err ==> final(self)@ == old(self)@,
++        r is Ok ==> {
++            &&& final(self)@ == srv_crdt(old(self)@, delta_op(*delta)).0
++            &&& r->Ok_0.revision == srv_crdt(old(self)@, delta_op(*delta)).1.rev
++            &&& ed_op(r->Ok_0.delta) == srv_crdt(old(self)@, delta_op(*delta)).1.op
++            &&& wf(final(self)@)
++        },
++{
++    let op_seq: OperationSeq = op_from_delta(delta.clone());
++    if op_seq.base_len() > chars_count(&self.current_content) {
++        proof { if crdt_ok(old(self).current_content@, *delta) { axiom_crdt_ok_len(old(self).current_content@, *delta); } }
++        return Err(Error); // bail!
+     }
+-    let editor_delta = EditorTextDelta::try_from_delta(delta.clone(), &self.current_content).context("Failed to convert delta to editor delta, under the given content. Was the edit invalid?")?;
++    let editor_delta = match try_from_delta(delta.clone(), self.current_content.as_str()) {
++        Ok(x) => x,
++        Err(e) => return Err(e),
++    };
+     self.operations.push(op_seq.clone());
+     self.editor_queue.push(op_seq.clone());
+     self.daemon_revision += 1;
+-    self.current_content = Self::force_apply(&self.current_content, op_seq);
++    self.current_content = force_apply(self.current_content.as_str(), op_seq);
++    proof {
++        assert(ops(self.editor_queue@) =~= ops(old(self).editor_queue@).push(delta_op(*delta)));
++        lemma_srv_crdt_wf(old(self)@, delta_op(*delta));
++    }
+     Ok(RevisionedEditorTextDelta {
+         revision: self.editor_revision,

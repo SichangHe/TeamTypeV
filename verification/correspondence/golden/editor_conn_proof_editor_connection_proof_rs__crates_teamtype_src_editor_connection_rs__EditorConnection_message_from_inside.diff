@@ -1,0 +1,101 @@
+--- repo
++++ proof
+-#[must_use]
+-pub fn message_from_inside(
+-    &mut self,
+-    message: &ComponentMessage,
+-) -> Vec<EditorProtocolMessageToEditor> {
++pub fn message_from_inside(&mut self, message: &ComponentMessage) -> (r: Vec<ToEditor>)
++    requires old(self).inv(), map_room(old(self).ot_servers@), old(self).inside_ok(message),
++    ensures
++        final(self).inv(),
++        final(self).app_config == old(self).app_config,
++        ({ if let ComponentMessage::Edit { file_path, delta } = message {
++            if old(self).ot_servers@.contains_key(file_path@) {
++                let (s1, m1) = srv_crdt(old(self).ot_servers@[file_path@], delta_op(*delta));
++                &&& final(self).ot_servers@ == old(self).ot_servers@.insert(file_path@, s1)
++                &&& r@.len() == 1
++                &&& r@[0] is Edit
++                &&& r@[0]->Edit_revision == m1.rev
++                &&& ed_op(r@[0]->Edit_delta) == m1.op
++                &&& r@[0]->Edit_uri@ == uri_of(file_path@)
++            } else {
++                &&& final(self).ot_servers@ == old(self).ot_servers@
++                &&& r@.len() == 0
++            }
++        } else if let ComponentMessage::Cursor { cursor_id, cursor_state } = message {
++            &&& final(self).ot_servers@ == old(self).ot_servers@
++            &&& r@.len() == 1
++            &&& r@[0] is Cursor
++            &&& r@[0]->Cursor_userid@ == cursor_id@
++            &&& r@[0]->Cursor_uri@ == uri_of(cursor_state.file_path@)
++            &&& r@[0]->Cursor_ranges == cursor_state.ranges
++        } else {
++            &&& final(self).ot_servers@ == old(self).ot_servers@
++            &&& r@.len() == 0
++        } }),
++{
+     match message {
+         ComponentMessage::Edit { file_path, delta } => {
+-            if let Some(ot_server) = self.ot_servers.get_mut(file_path) {
+-                debug!("Applying incoming CRDT patch for {file_path}");
+-                let rev_text_delta_for_editor = ot_server.apply_crdt_change(delta).expect("Failed to apply delta originating from another component to OT Server. Probably the delta is invalid.");
+-                let uri = AbsolutePath::from_parts(&self.app_config.base_dir, file_path)
+-                    .expect("Should be able to construct absolute URI")
+-                    .to_file_uri();
+-                vec![EditorProtocolMessageToEditor::Edit {
+-                    uri: uri.to_string(),
+-                    delta: rev_text_delta_for_editor.delta,
+-                    revision: rev_text_delta_for_editor.revision,
+-                }]
+-            } else {
+-                vec![]
++            match self.ot_servers.take(file_path) {
++                Some(mut ot_server) => {
++                    let rev_text_delta_for_editor = match ot_server.apply_crdt_change(delta) {
++                        Ok(x) => x,
++                        Err(_) => expect_failed(),
++                    };
++                    let uri = uri_str(&self.app_config, file_path);
++                    let mut v: Vec<ToEditor> = Vec::new();
++                    v.push(ToEditor::Edit {
++                        uri,
++                        delta: rev_text_delta_for_editor.delta,
++                        revision: rev_text_delta_for_editor.revision,
++                    });
++                    self.ot_servers.insert(file_path.clone(), ot_server);
++                    v
++                }
++                None => Vec::new(),
+             }
+         }
+-        ComponentMessage::Cursor {
+-            cursor_id,
+-            cursor_state,
+-        } => {
+-            let uri =
+-                AbsolutePath::from_parts(&self.app_config.base_dir, &cursor_state.file_path)
+-                    .expect("Should be able to construct absolute URI")
+-                    .to_file_uri();
+-            vec![EditorProtocolMessageToEditor::Cursor {
+-                userid: cursor_id.clone(),
++        ComponentMessage::Cursor { cursor_id, cursor_state } => {
++            let uri = uri_str(&self.app_config, &cursor_state.file_path);
++            let mut v: Vec<ToEditor> = Vec::new();
++            v.push(ToEditor::Cursor {
++                userid: clone_str(cursor_id),
+                 name: cursor_state.name.clone(),
+-                uri: uri.to_string(),
++                uri,
+                 ranges: cursor_state.ranges.clone(),
+-            }]
++            });
++            v
+         }
+-        _ => {
+-            debug!("Ignoring message from inside: {message:#?}");
+-            vec![]
+-        }
++        _ => Vec::new(),
+     }
+ }

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Steven Hé (Sīchàng) <stevensichanghe@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: Proof correspondence
+on: { push: { branches: [main] }, pull_request: {} }
+jobs:
+  correspondence:   # cheap: python only; fails when repo and proof copies diverge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 -I verification/correspondence/corr.py check --repo .
+  verus:            # needs ~60 GiB RAM: self-hosted runner only
+    if: false       # enable when a big runner exists
+    runs-on: [self-hosted, verus]
+    steps:
+      - uses: actions/checkout@v6
+      - run: verification/correspondence/run_all.sh "$PWD"

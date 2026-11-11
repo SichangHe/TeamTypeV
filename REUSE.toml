@@ -16,3 +16,9 @@ SPDX-License-Identifier = "AGPL-3.0-or-later"
 path = ["docs/decisions/*.md", "docs/git-forwarding.md", "docs/project-name.md", "emacs-plugin/DESIGN.md", "verification/**/*.md"]
 SPDX-FileCopyrightText = "2026 Steven Hé (Sīchàng) <stevensichanghe@gmail.com>"
 SPDX-License-Identifier = "CC-BY-SA-4.0"
+
+# Proof/source correspondence checker, reviewed golden diffs, and Verus proof copies.
+[[annotations]]
+path = ["verification/correspondence/golden/*.diff", "verification/correspondence/*.txt", "verification/**/*.rs", ".github/workflows/proofs.yml"]
+SPDX-FileCopyrightText = "2026 Steven Hé (Sīchàng) <stevensichanghe@gmail.com>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

@@ -1,0 +1,9 @@
+--- repo
++++ proof
+-#[must_use]
+-pub fn owns(&self, file_path: &RelativePath) -> bool {
++pub fn owns(&self, file_path: &RelativePath) -> (r: bool)
++    ensures r == self.ot_servers@.contains_key(file_path@),
++{
+     self.ot_servers.contains_key(file_path)
+ }
