@@ -11,7 +11,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::bail;
@@ -43,7 +43,15 @@ pub fn write_file(
         .expect("Failed to get parent directory");
     create_dir_all(absolute_base_dir, parent_dir)?;
 
-    fs::write(canonical_file_path, content)?;
+    // `absolute_and_canonicalized` treats a dangling symlink as a missing file, so the final
+    // component must not be followed: it could point outside the base directory.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(canonical_file_path)?;
+    file.write_all(content)?;
     Ok(())
 }
 
@@ -490,5 +498,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod dangling_symlink_tests {
+    use super::*;
+    #[test]
+    fn write_does_not_follow_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("project");
+        fs::create_dir(&base).unwrap();
+        let outside = dir.path().join("outside-new");
+        std::os::unix::fs::symlink(&outside, base.join("link")).unwrap();
+        let r = write_file(&base, &base.join("link"), b"pwned");
+        assert!(r.is_err(), "write succeeded");
+        assert!(!outside.exists(), "escaped: wrote outside");
+    }
+    #[test]
+    fn dangling_dir_symlink_create_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("project");
+        fs::create_dir(&base).unwrap();
+        let outside = dir.path().join("outdir");
+        std::os::unix::fs::symlink(&outside, base.join("d")).unwrap();
+        let _ = write_file(&base, &base.join("d/f"), b"pwned");
+        assert!(!outside.exists(), "escaped: created dir outside");
     }
 }

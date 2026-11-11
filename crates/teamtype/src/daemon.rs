@@ -1037,15 +1037,13 @@ impl DocumentActor {
                 continue;
             }
             let absolute_file_path = self.absolute_path_for_file_path(&relative_file_path);
-            if !sandbox::exists(&self.app_config.base_dir, &absolute_file_path)
-                .expect(
-                    "Should have been able to check for file existence while reading current directory content"
-                )
-                && !git_forward::excluded(&relative_file_path)
-            {
+            if git_forward::excluded(&relative_file_path) {
+                continue;
+            }
+            if !sandbox::exists(&self.app_config.base_dir, &absolute_file_path).unwrap_or(true) {
                 warn!(
-                        "File {relative_file_path} exists in the CRDT, but not on disk. Deleting from CRDT."
-                    );
+                    "File {relative_file_path} exists in the CRDT, but not on disk. Deleting from CRDT."
+                );
                 self.remove_file(&relative_file_path);
             }
         }
@@ -1703,6 +1701,38 @@ mod tests {
             actor.assert_file_content(&RelativePath::new("file1"), "content1");
             actor.assert_file_content(&RelativePath::new("file2"), "content2");
             actor.assert_file_content(&RelativePath::new("sub/file3"), "content3");
+        }
+
+        #[test]
+        fn hostile_peer_paths_do_not_crash_rescan_or_escape() {
+                .join(format!("tt-escape-{}", std::process::id()));
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            for key in [
+                "../escape-by-dotdot",
+                "/tmp/tt-escape-abs",
+                "a/../../escape2",
+            ] {
+                actor.crdt_doc.set_file(
+                    document::Content::String("x".into()),
+                    &RelativePath::new(key),
+                );
+            }
+            actor.read_current_content_from_dir(false);
+            for key in [
+                "../escape-by-dotdot",
+                "/tmp/tt-escape-abs",
+                "a/../../escape2",
+            ] {
+                actor.write_file(&RelativePath::new(key));
+            }
+            assert!(
+                !dir.path()
+                    .parent()
+                    .unwrap()
+                    .join("escape-by-dotdot")
+                    .exists()
+            );
+            assert!(!Path::new("/tmp/tt-escape-abs").exists());
         }
 
         #[tokio::test]

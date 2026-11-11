@@ -169,24 +169,28 @@ impl GitHandle {
     }
 }
 
+/// Paths that are never shared: metadata directories, and anything that is not a plain relative
+/// path (peers choose document keys, so `..`, a root, or an empty key must not reach the disk).
 pub fn excluded(path: &Path) -> bool {
-    path.components().any(|component| {
-        [
-            ".teamtypev",
-            ".teamtype",
-            ".teamtypeignore",
-            ".ethersync",
-            ".ethersyncignore",
-            ".git",
-            ".hg",
-            ".jj",
-            ".bzr",
-            ".pijul",
-            ".svn",
-        ]
-        .iter()
-        .any(|name| component.as_os_str() == *name)
-    })
+    path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            !matches!(component, std::path::Component::Normal(_))
+                || [
+                    ".teamtypev",
+                    ".teamtype",
+                    ".teamtypeignore",
+                    ".ethersync",
+                    ".ethersyncignore",
+                    ".git",
+                    ".hg",
+                    ".jj",
+                    ".bzr",
+                    ".pijul",
+                    ".svn",
+                ]
+                .iter()
+                .any(|name| component.as_os_str() == *name)
+        })
 }
 
 fn git_program() -> Result<PathBuf> {
