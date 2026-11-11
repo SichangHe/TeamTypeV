@@ -1831,12 +1831,15 @@ fn spawn_file_watcher(app_config: &AppConfig, document_handle: DocumentActorHand
 
 /// File name prefix of a displaced file kept while `path` is replaced.
 fn displaced_prefix(path: &RelativePath) -> String {
-    let hex: String = path
+    use std::fmt::Write;
+    let hex = path
         .display()
         .to_string()
         .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
     format!("displaced-{hex}-")
 }
 
