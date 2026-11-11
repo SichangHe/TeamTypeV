@@ -16,7 +16,7 @@ const uri = "file:///note.txt"
 
 async function scenario(seed) {
     let s = (seed * 2654435761) % 4294967296
-    const rnd = (n) => ((s = (s * 1103515245 + 12345) & 0x7fffffff), s % n)
+    const rnd = (n) => ((s = (s * 1103515245 + 12345) & 0x7fffffff), (s >> 8) % n)
     const sent = []
     const document = {
         version: 1,
