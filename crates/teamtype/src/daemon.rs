@@ -159,6 +159,8 @@ pub struct DocumentActor {
     git_running: bool,
     deferred_writes: HashSet<RelativePath>,
     deferred_removals: HashSet<RelativePath>,
+    /// Displaced files whose bytes are merged into the document but not yet saved with it.
+    displaced_unsaved: Vec<PathBuf>,
 }
 
 impl DocumentActor {
@@ -216,6 +218,7 @@ impl DocumentActor {
             git_running: false,
             deferred_writes: HashSet::new(),
             deferred_removals: HashSet::new(),
+            displaced_unsaved: Vec::new(),
         };
         git_forward::remove_old_hook(&s.app_config.base_dir);
         for path in s.crdt_doc.files() {
@@ -252,6 +255,7 @@ impl DocumentActor {
                         .unwrap_or_default();
                 s.check_files_left_open();
                 let pending_before = s.read_pending();
+                s.drop_staged_displaced();
                 s.apply_pending_writes(&left_open);
                 s.recover_displaced(&pending_before);
             }
@@ -516,6 +520,12 @@ impl DocumentActor {
         };
         // Saving advances Automerge's incremental cursor even when disk I/O fails.
         self.save_fully = result.is_err();
+        if result.is_ok() {
+            // The document now holds what the displaced files held.
+            for kept in std::mem::take(&mut self.displaced_unsaved) {
+                let _ = std::fs::remove_file(kept);
+            }
+        }
         result.with_context(|| format!("Failed to persist to '{}'", persistence_file.display()))
     }
 
@@ -947,6 +957,16 @@ impl DocumentActor {
             return;
         }
         if let Ok(new_content) = String::from_utf8(new_content.clone()) {
+            if matches!(
+                self.current_file_content(relative_file_path),
+                Some(document::Content::String(current)) if *current == new_content
+            ) {
+                // The outside write is exactly the shared text (for example Git applied the same
+                // change a peer made). Merging it would apply that change a second time.
+                self.disk_content
+                    .insert(relative_file_path.clone(), new_content.into_bytes());
+                return;
+            }
             let desired = if let (Some(base), Some(document::Content::String(current))) = (
                 self.disk_content
                     .get(relative_file_path)
@@ -1130,6 +1150,11 @@ impl DocumentActor {
                     // Record what is on disk. A stale record would make the next watcher event
                     // merge this very text as an outside edit, duplicating it.
                     self.disk_content.insert(file_path.clone(), bytes.to_vec());
+                    // The record is cleared next; a restart must find the document at least as
+                    // new as this file.
+                    if self.persist {
+                        self.persist()?;
+                    }
                     return Ok(());
                 }
             } else {
@@ -1158,7 +1183,10 @@ impl DocumentActor {
                 self.merge_disk_content(file_path, displaced);
             }
             if outside && self.persist {
+                self.displaced_unsaved.extend(kept);
                 self.persist()?;
+                self.disk_content.insert(file_path.clone(), bytes.to_vec());
+                return Ok(());
             }
         }
         if let Some(kept) = kept {
@@ -1166,6 +1194,33 @@ impl DocumentActor {
         }
         self.disk_content.insert(file_path.clone(), bytes.to_vec());
         Ok(())
+    }
+
+    /// Removes displaced files that hold the bytes the document itself had: a kill before the
+    /// swap left the staged new bytes behind. Must run before anything changes the document.
+    fn drop_staged_displaced(&self) {
+        let Ok(entries) = std::fs::read_dir(self.app_config.base_dir.join(".teamtypev")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(path) = name
+                .strip_prefix("displaced-")
+                .and_then(|rest| rest.split('-').next())
+                .and_then(unhex)
+            else {
+                continue;
+            };
+            let shared = self
+                .current_file_content(&RelativePath::new(&path))
+                .map(|content| match content {
+                    document::Content::String(text) => text.as_bytes().to_vec(),
+                    document::Content::Bytes(bytes) => bytes.clone(),
+                });
+            if std::fs::read(entry.path()).ok() == shared {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// After a restart, merges outside writes that a kill displaced from a file while the daemon
@@ -1204,23 +1259,28 @@ impl DocumentActor {
                 let _ = std::fs::remove_file(entry.path());
                 continue;
             }
-            match (pending_before.get(&path), shared.is_some(), on_disk) {
-                (Some(base), true, Some(on_disk)) => {
+            if let (Some(base), true, Some(on_disk)) =
+                (pending_before.get(&path), shared.is_some(), on_disk)
+            {
+                {
                     self.disk_content
                         .insert(path.clone(), base.clone().unwrap_or_default());
                     self.merge_disk_content(&path, bytes);
                     self.disk_content.insert(path.clone(), on_disk);
+                    // Removed once a save of the document includes the merge.
+                    self.displaced_unsaved.push(entry.path());
                     if let Err(error) = self.try_write_file(&path) {
                         warn!("Could not write {path} after merging a displaced edit: {error:#}");
-                        continue;
                     }
-                    let _ = std::fs::remove_file(entry.path());
                 }
-                _ => {
+            } else {
+                {
+                    let kept = dir.join(format!("lost-{name}"));
+                    let _ = std::fs::rename(entry.path(), &kept);
                     warn!(
                         "{path} was replaced while another program changed it; the other \
                          version is kept at {}",
-                        entry.path().display()
+                        kept.display()
                     );
                 }
             }

@@ -553,3 +553,39 @@ fn finish_git_writes_every_deferred_edit_and_clears_the_records() -> Result<()> 
     assert!(actor.read_pending().is_empty());
     Ok(())
 }
+
+#[test]
+fn staged_bytes_left_by_a_kill_before_the_swap_are_not_merged_as_an_outside_edit() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    actor.persist()?;
+    let staged = dir
+        .path()
+        .join(".teamtypev")
+        .join(format!("{}stage", displaced_prefix(&path)));
+    std::fs::write(&staged, "line1\npeer\n")?;
+    drop(actor);
+    // Another program changed the file meanwhile, so the restart merges before it writes.
+    std::fs::write(dir.path().join("shared"), "outside\nline1\n")?;
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&path, "outside\nline1\npeer\n");
+    assert!(!staged.exists());
+    Ok(())
+}
+
+#[test]
+fn skipping_a_write_that_is_already_on_disk_still_saves_the_document() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    std::fs::write(dir.path().join("shared"), "line1\npeer\n")?;
+    actor.try_write_file(&path)?;
+    drop(actor);
+    let saved = Document::load(&std::fs::read(dir.path().join(".teamtypev/doc"))?);
+    assert_eq!(
+        saved.current_file_content(&path),
+        Some(&document::Content::String("line1\npeer\n".into()))
+    );
+    Ok(())
+}

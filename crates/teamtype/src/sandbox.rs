@@ -103,12 +103,14 @@ pub fn replace_file_keeping(
             rustix::fs::RenameFlags::EXCHANGE,
         ) {
             Ok(()) => {
-                let displaced = fs::read(staged.path())?;
+                let displaced = fs::read(staged.path());
                 let kept = match keep_prefix {
                     Some(_) => Some(staged.into_temp_path().keep()?),
                     None => None,
                 };
-                break Ok((Some(displaced), kept));
+                break displaced
+                    .map(|displaced| (Some(displaced), kept))
+                    .map_err(Into::into);
             }
             Err(rustix::io::Errno::NOENT) => match staged.persist_noclobber(&path) {
                 Ok(_) => break Ok((None, None)),

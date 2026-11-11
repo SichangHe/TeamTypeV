@@ -259,7 +259,8 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
         .set(queue)
         .map_err(|_| anyhow::anyhow!("Git listener already started"))?;
     let worker_handle = handle.clone();
-    tokio::spawn(async move {
+    let supervisor_handle = handle.clone();
+    let worker = tokio::spawn(async move {
         let mut waiting = std::collections::VecDeque::new();
         loop {
             let job = match waiting.pop_front() {
@@ -303,6 +304,12 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
                 )
                 .await;
             }
+        }
+    });
+    // A panic in the worker would leave the daemon deferring every file write for good.
+    tokio::spawn(async move {
+        if worker.await.is_err() {
+            let _ = supervisor_handle.git_finished().await;
         }
     });
     tokio::spawn(async move {
