@@ -75,7 +75,8 @@ netwatch = "0.19"
 operational-transform = "0.6"
 path-clean = "1"
 rand = "0.10"
-ropey = "1"
+# default features add Unicode and lone-CR line breaks that no editor shares; keep `\n` only
+ropey = { version = "1", default-features = false }
 rust-ini = "0.21"
 serde_json.workspace = true
 tempfile.workspace = true

@@ -280,8 +280,9 @@ impl Position {
             bail!("Position is referencing a line that doesn't exist in the content")
         }
 
-        // Line terminators are part of lines in Ropey. Every line except the last has one;
-        // exclude its last character so a column cannot alias the next line's start.
+        // Ropey is built without its `cr_lines` and `unicode_lines` features, so a line ends
+        // at `\n` only, as in every editor. Every line except the last ends with that one
+        // character; exclude it so a column cannot alias the next line's start.
         let line = rope.line(self.line);
         let mut line_length = line.len_chars();
         if self.line + 1 < rope.len_lines() {
@@ -1242,19 +1243,82 @@ mod tests {
         }
 
         #[test]
-        fn column_past_carriage_return_fails() {
-            // Ropey treats a lone CR as a line break, so (0, 2) and (1, 0) would alias.
+        fn carriage_return_is_an_ordinary_character() {
+            // Only `\n` ends a line (see `only_line_feed_starts_a_line_for_unicode_breaks`).
             let content = "a\rb";
+            let pos = Position {
+                line: 0,
+                character: 2,
+            };
+            assert_eq!(pos.try_to_offset(content).unwrap(), 2);
+            assert_eq!(Position::try_from_offset(2, content).unwrap(), pos);
+        }
+
+        /// Editors (Neovim, Emacs, VS Code) number lines by `\n` only, except that VS Code
+        /// also breaks at `\r\n` and a lone `\r`. The daemon must not break at any other
+        /// character, or it maps editor positions to the wrong offset.
+        #[test]
+        fn only_line_feed_starts_a_line_for_unicode_breaks() {
+            for brk in ['\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}', '\r'] {
+                let content = format!("a{brk}b\nc");
+                // chars: a, brk, b, \n, c
+                assert_eq!(
+                    Position {
+                        line: 1,
+                        character: 0
+                    }
+                    .try_to_offset(&content)
+                    .unwrap(),
+                    4,
+                    "{brk:?}"
+                );
+                assert_eq!(
+                    Position::try_from_offset(4, &content).unwrap(),
+                    Position {
+                        line: 1,
+                        character: 0
+                    },
+                    "{brk:?}"
+                );
+                assert_eq!(
+                    Position {
+                        line: 0,
+                        character: 3
+                    }
+                    .try_to_offset(&content)
+                    .unwrap(),
+                    3,
+                    "{brk:?}"
+                );
+                assert!(
+                    Position {
+                        line: 2,
+                        character: 0
+                    }
+                    .try_to_offset(&content)
+                    .is_err(),
+                    "{brk:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn crlf_is_two_chars_of_line_zero() {
+            let content = "a\r\nb";
+            // VS Code reports (0, 1) for the end of "a"; (0, 2) lies between CR and LF.
+            for (line, character, offset) in [(0, 1, 1), (0, 2, 2), (1, 0, 3), (1, 1, 4)] {
+                let pos = Position { line, character };
+                assert_eq!(pos.try_to_offset(content).unwrap(), offset);
+                assert_eq!(Position::try_from_offset(offset, content).unwrap(), pos);
+            }
             assert!(
                 Position {
                     line: 0,
-                    character: 2,
+                    character: 3
                 }
                 .try_to_offset(content)
                 .is_err()
             );
-            let pos = Position::try_from_offset(2, content).unwrap();
-            assert_eq!(pos.try_to_offset(content).unwrap(), 2);
         }
     }
 }
