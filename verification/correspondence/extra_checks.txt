@@ -1,0 +1,2 @@
+# scripts run by run_all.sh (paths relative to this dir); they must exit 0
+../boundary_proof/check.sh

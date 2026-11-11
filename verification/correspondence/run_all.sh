@@ -17,4 +17,14 @@ while read -r f extra; do
   echo "$out" | grep 'verification results' || { echo "$out" | tail -5; }
   echo "$out" | grep -q 'verification results:: [0-9]* verified, 0 errors' || { echo "FAIL $f"; fail=1; }
 done < verus_targets.txt
+# trusted Ropey model tested against real Ropey with the repo's feature set
+grep -q '^ropey = { version = "1", default-features = false }' "$REPO/crates/teamtype/Cargo.toml" \
+  || { echo "FAIL crates/teamtype/Cargo.toml ropey features changed; update positions/ropey_axioms"; fail=1; }
+echo "== ropey axioms test"
+(cd ../positions/ropey_axioms && CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/ropey_axioms_target} cargo run -q --release) 2>&1 | tail -3 | grep -q "200 random" || { echo "FAIL ropey axioms"; fail=1; }
+# extra check scripts (e.g. negative controls); each must exit 0
+while read -r s; do
+  case "$s" in ''|\#*) continue;; esac
+  echo "== $s"; sh "$s" || { echo "FAIL $s"; fail=1; }
+done < extra_checks.txt
 exit $fail

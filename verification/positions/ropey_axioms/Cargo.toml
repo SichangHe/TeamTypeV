@@ -1,0 +1,10 @@
+[package]
+name = "ropey-axioms"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# keep in sync with crates/teamtype/Cargo.toml (run_all.sh checks this)
+ropey = { version = "=1.6.1", default-features = false }

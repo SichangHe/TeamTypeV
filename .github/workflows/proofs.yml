@@ -9,6 +9,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: python3 -I verification/correspondence/corr.py check --repo .
+      - run: cd verification/positions/ropey_axioms && cargo run -q --release
+      - run: grep -q '^ropey = { version = "1", default-features = false }' crates/teamtype/Cargo.toml
   verus:            # needs ~60 GiB RAM: self-hosted runner only
     if: false       # enable when a big runner exists
     runs-on: [self-hosted, verus]
