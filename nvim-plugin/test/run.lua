@@ -246,6 +246,29 @@ do
     check(#sent == before, "edits after close must not be sent")
 end
 
+-- 5. The answer to an old `open` (closed and reopened meanwhile) must not start the new session.
+do
+    local client = { files = {}, buffers = {}, sessions = {}, connection = { send_request = function() end } }
+    local buf = new_buf("ab\n")
+    vim.api.nvim_buf_set_name(buf, vim.fn.tempname())
+    local uri = vim.uri_from_bufnr(buf)
+    local lines = changetracker.get_all_lines_respecting_eol(buf)
+    local on_answer = plugin._internal.on_open_answer
+    local old, new = {}, {}
+    table.insert(client.buffers, buf)
+    client.sessions[buf] = old
+    -- close, then reopen: a new session token, the old answer still to come
+    client.sessions[buf] = new
+    on_answer(client, buf, uri, lines, old)
+    check(client.files[buf] == nil, "answer of an old open must not start the session")
+    on_answer(client, buf, uri, lines, new)
+    check(client.files[buf] ~= nil, "answer of the current open starts the session")
+    client.sessions[buf] = nil
+    client.files[buf] = nil
+    on_answer(client, buf, uri, lines, new)
+    check(client.files[buf] == nil, "answer after close must not start a session")
+end
+
 if failures > 0 then
     print(failures .. " check(s) failed")
     vim.cmd("cquit 1")

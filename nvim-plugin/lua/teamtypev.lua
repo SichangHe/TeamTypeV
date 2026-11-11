@@ -180,6 +180,7 @@ local function find_or_create_client(config_name, root_dir)
         name = config_name,
         root_dir = root_dir,
         files = {},
+        sessions = {},
         buffers = {},
         connection = nil,
     }
@@ -243,6 +244,20 @@ local function find_or_create_client(config_name, root_dir)
     return client
 end
 
+local function on_open_answer(client, buf_nr, uri, lines, session)
+    -- The buffer may have been closed (or closed and reopened) while waiting for the daemon.
+    if client.sessions[buf_nr] ~= session then
+        return
+    end
+    if not vim.api.nvim_buf_is_loaded(buf_nr) or not vim.tbl_contains(client.buffers, buf_nr) then
+        return
+    end
+    debug("Tracking Edits")
+    ensure_autoread_is_off(buf_nr)
+    disable_writing(buf_nr)
+    track_edits(client, buf_nr, uri, lines)
+end
+
 local function activate_config_for_buffer(config_name, buf_nr, root_dir)
     local client = find_or_create_client(config_name, root_dir)
     if vim.tbl_contains(client.buffers, buf_nr) then
@@ -262,6 +277,11 @@ local function activate_config_for_buffer(config_name, buf_nr, root_dir)
 
     local lines = changetracker.get_all_lines_respecting_eol(buf_nr)
     local content = table.concat(lines, "\n")
+    -- A fresh object per `open` request: the answer to an older request (the buffer was closed and reopened
+    -- meanwhile) must not start the current session, since the daemon's edits for the old session arrive
+    -- before the answer to the new `open`, and only then are they dropped.
+    local session = {}
+    client.sessions[buf_nr] = session
 
     -- Ensure that the file exists on disk before we "open" it in the daemon,
     -- to prevent a warning that the file has been created externally (W13).
@@ -272,14 +292,7 @@ local function activate_config_for_buffer(config_name, buf_nr, root_dir)
 
     client.connection:send_request("daemonWriter", { check = true }, function()
         client.connection:send_request("open", { uri = uri, content = content, daemonWrites = true }, function()
-            -- The buffer may have been closed while waiting for the daemon.
-            if not vim.api.nvim_buf_is_loaded(buf_nr) or not vim.tbl_contains(client.buffers, buf_nr) then
-                return
-            end
-            debug("Tracking Edits")
-            ensure_autoread_is_off(buf_nr)
-            disable_writing(buf_nr)
-            track_edits(client, buf_nr, uri, lines)
+            on_open_answer(client, buf_nr, uri, lines, session)
         end)
     end)
 end
@@ -335,6 +348,7 @@ local function on_buffer_close()
         for j, buffer in ipairs(client.buffers) do
             if buffer == buf_nr then
                 client.files[buf_nr] = nil
+                client.sessions[buf_nr] = nil
 
                 local uri = vim.uri_from_bufnr(buf_nr)
                 client.connection:send_notification("close", { uri = uri })
@@ -379,6 +393,7 @@ activate_plugin()
 
 -- For tests only.
 M._internal = {
+    on_open_answer = on_open_answer,
     process_operation_for_editor = process_operation_for_editor,
     track_edits = track_edits,
 }
