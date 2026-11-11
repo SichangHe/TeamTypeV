@@ -233,3 +233,61 @@ fn crash_after_writing_a_peers_edit_does_not_duplicate_it_on_restart() -> Result
     );
     Ok(())
 }
+
+/// A daemon over a persisted, shared file "shared" holding "line1\n", with a peer's edit applied
+/// to the document and recorded as pending (the state right after `mark_pending`).
+fn actor_with_pending_peer_edit(dir: &TempDir) -> Result<DocumentActor> {
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.persist()?;
+    let path = RelativePath::new("shared");
+    actor.crdt_doc.update_text("line1\npeer\n", &path);
+    actor.mark_pending([path]);
+    Ok(actor)
+}
+
+#[test]
+fn crash_after_saving_the_document_before_writing_finishes_the_write() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    actor.persist()?;
+    drop(actor);
+    assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\n");
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&RelativePath::new("shared"), "line1\npeer\n");
+    assert_eq!(
+        std::fs::read(dir.path().join("shared"))?,
+        b"line1\npeer\n",
+        "the interrupted write is finished, not read as an outside edit that reverts the peer"
+    );
+    Ok(())
+}
+
+#[test]
+fn crash_before_saving_the_document_keeps_the_old_state() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    drop(actor_with_pending_peer_edit(&dir)?);
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&RelativePath::new("shared"), "line1\n");
+    assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\n");
+    Ok(())
+}
+
+#[test]
+fn crash_with_git_changes_during_pending_peer_edit_merges_both() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    actor.persist()?;
+    drop(actor);
+    // Git rewrote the file while the peer's edit was still waiting to be written.
+    std::fs::write(dir.path().join("shared"), "git\nline1\n")?;
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&RelativePath::new("shared"), "git\nline1\npeer\n");
+    assert_eq!(
+        std::fs::read(dir.path().join("shared"))?,
+        b"git\nline1\npeer\n"
+    );
+    Ok(())
+}
