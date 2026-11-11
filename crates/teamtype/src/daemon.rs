@@ -516,17 +516,22 @@ impl DocumentActor {
         self.app_config.base_dir.join(".teamtypev/pending-writes")
     }
 
-    /// Records the files the shared document changed but the disk may not yet reflect. Saved
+    /// Records the files the shared document changed but the disk may not yet reflect, with the
+    /// bytes the disk had when the document last agreed with it (`None`: no such file). Saved
     /// before any later save of the document, so that a crash never leaves the document ahead of
     /// the disk without this record: restarting would otherwise read the stale files as outside
-    /// edits that undo peers' changes, or recreate files peers deleted.
+    /// edits that undo peers' changes, or recreate files peers deleted. The kept bytes are the
+    /// base for merging whatever changed on disk meanwhile (for example by a Git command).
     fn mark_pending(&self, paths: impl IntoIterator<Item = RelativePath>) {
         if !self.persist {
             return;
         }
         let mut list = self.read_pending();
         let before = list.len();
-        list.extend(paths);
+        for path in paths {
+            let base = self.disk_content.get(&path).cloned();
+            list.entry(path).or_insert(base);
+        }
         if list.len() != before {
             self.write_pending(&list);
         }
@@ -537,44 +542,64 @@ impl DocumentActor {
             return;
         }
         let mut list = self.read_pending();
-        if list.remove(path) {
+        if list.remove(path).is_some() {
             self.write_pending(&list);
         }
     }
 
-    fn read_pending(&self) -> HashSet<RelativePath> {
+    fn read_pending(&self) -> HashMap<RelativePath, Option<Vec<u8>>> {
         sandbox::read_file(&self.app_config.base_dir, &self.pending_list())
-            .map(|bytes| {
-                String::from_utf8_lossy(&bytes)
-                    .lines()
-                    .map(RelativePath::new)
-                    .collect()
-            })
+            .ok()
+            .and_then(|bytes| postcard::from_bytes::<Vec<(String, Option<Vec<u8>>)>>(&bytes).ok())
             .unwrap_or_default()
+            .into_iter()
+            .map(|(path, base)| (RelativePath::new(&path), base))
+            .collect()
     }
 
-    fn write_pending(&self, list: &HashSet<RelativePath>) {
-        let mut text = String::new();
-        for path in list {
-            text.push_str(&path.display().to_string());
-            text.push('\n');
-        }
-        if let Err(error) = sandbox::replace_file(
-            &self.app_config.base_dir,
-            &self.pending_list(),
-            text.as_bytes(),
-        ) {
+    fn write_pending(&self, list: &HashMap<RelativePath, Option<Vec<u8>>>) {
+        let entries: Vec<(String, Option<Vec<u8>>)> = list
+            .iter()
+            .map(|(path, base)| (path.display().to_string(), base.clone()))
+            .collect();
+        let result = postcard::to_allocvec(&entries)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| {
+                sandbox::replace_file(&self.app_config.base_dir, &self.pending_list(), &bytes)
+            });
+        if let Err(error) = result {
             error!("Could not record pending file writes: {error:#}");
         }
     }
 
     /// After a restart, brings files the document is ahead on up to date, before the scan could
-    /// mistake them for outside edits. Files that were open in an editor keep the disk version.
+    /// mistake them for outside edits. Whatever changed on disk since is merged with the
+    /// document first, with the recorded bytes as the base. Files that were open in an editor
+    /// keep the disk version.
     fn apply_pending_writes(&mut self, left_open: &HashSet<RelativePath>) {
-        for path in self.read_pending() {
+        for (path, base) in self.read_pending() {
             if git_forward::excluded(&path) || left_open.contains(&path) {
                 self.unmark_pending(&path);
-            } else if self.crdt_doc.file_exists(&path) {
+                continue;
+            }
+            let absolute = self.absolute_path_for_file_path(&path);
+            let on_disk = sandbox::read_file(&self.app_config.base_dir, &absolute).ok();
+            let in_document = self.crdt_doc.file_exists(&path);
+            match (on_disk, in_document) {
+                (Some(bytes), true) => {
+                    // A file that had no base was created by the peer; Git may have made one too.
+                    self.disk_content
+                        .insert(path.clone(), base.unwrap_or_default());
+                    self.merge_disk_content(&path, bytes);
+                }
+                (Some(bytes), false) if base.as_ref() != Some(&bytes) => {
+                    // Changed on disk while peers deleted it: the edit wins and is shared again.
+                    self.unmark_pending(&path);
+                    continue;
+                }
+                _ => {}
+            }
+            if in_document {
                 if let Err(error) = self.try_write_file(&path) {
                     warn!("Could not finish a write interrupted by a restart: {error:#}");
                 }
@@ -1861,9 +1886,12 @@ mod tests {
             assert!(actor.crdt_doc.file_exists(&new_file));
             actor.persist().unwrap();
             drop(actor);
+            // Git changed another file and a different line meanwhile.
+            std::fs::write(dir.path().join("file2"), "git made this").unwrap();
+            std::fs::write(dir.path().join("file1"), "local content1").unwrap();
 
             let actor = restart(&dir);
-            actor.assert_file_content(&file1, "content1 plus peer");
+            actor.assert_file_content(&RelativePath::new("file2"), "git made this");
             actor.assert_file_content(&new_file, "fresh");
         }
 
