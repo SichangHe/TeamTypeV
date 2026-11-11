@@ -188,3 +188,48 @@ fn displaced_binary_bytes_are_reconciled() -> Result<()> {
     assert_eq!(std::fs::read(dir.path().join("file1"))?, [0xff, 2]);
     Ok(())
 }
+
+/// Starts a daemon over `dir` the way a restart after a crash does.
+fn restarted_actor(dir: &TempDir) -> DocumentActor {
+    let (_doc_message_tx, doc_message_rx) = mpsc::channel(1);
+    let (doc_changed_ping_tx, _doc_changed_ping_rx) = broadcast::channel::<()>(1);
+    let (ephemeral_message_tx, _ephemeral_message_rx) = broadcast::channel::<EphemeralMessage>(100);
+    DocumentActor::new(
+        doc_message_rx,
+        doc_changed_ping_tx,
+        ephemeral_message_tx,
+        AppConfig {
+            base_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        false,
+        true,
+        true,
+    )
+}
+
+#[test]
+fn crash_after_writing_a_peers_edit_does_not_duplicate_it_on_restart() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.persist()?;
+    // A peer's edit arrives and is applied, as in `ReceiveSyncMessage`.
+    actor.crdt_doc.update_text("line1\npeer\n", &path);
+    actor.mark_pending([path.clone()]);
+    // The write reaches the disk (after saving the document), then the daemon is killed before
+    // it clears the pending record.
+    actor.ensure_file_has_bytes(&path, b"line1\npeer\n")?;
+    drop(actor);
+    assert!(dir.path().join(".teamtypev/pending-writes").exists());
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&path, "line1\npeer\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("shared"))?,
+        "line1\npeer\n"
+    );
+    Ok(())
+}

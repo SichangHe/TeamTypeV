@@ -586,6 +586,20 @@ impl DocumentActor {
             let on_disk = sandbox::read_file(&self.app_config.base_dir, &absolute).ok();
             let in_document = self.crdt_doc.file_exists(&path);
             match (on_disk, in_document) {
+                (Some(bytes), true)
+                    if self
+                        .current_file_content(&path)
+                        .is_some_and(|content| match content {
+                            document::Content::String(text) => text.as_bytes() == bytes.as_slice(),
+                            document::Content::Bytes(shared) => shared == &bytes,
+                        }) =>
+                {
+                    // The write finished; only clearing the record was interrupted. Merging
+                    // would apply the document's own change to itself a second time.
+                    self.disk_content.insert(path.clone(), bytes);
+                    self.unmark_pending(&path);
+                    continue;
+                }
                 (Some(bytes), true) => {
                     // A file that had no base was created by the peer; Git may have made one too.
                     self.disk_content
