@@ -314,12 +314,10 @@ impl DocumentActor {
 
     async fn handle_message(&mut self, message: DocMessage) {
         debug!("Handling doc message: {message:?}");
-        // Proof assumption (verification/editor_conn_proof): nothing is queued between messages, so
-        // deltas reach editors in the order the document changed.
-        debug_assert!(
-            self.disk_edits.is_empty(),
-            "disk edits left queued from the previous message"
-        );
+        // Proof assumption (verification/editor_conn_proof): nothing is queued when a message is
+        // handled, so deltas reach editors in the order the document changed. Startup (loading,
+        // crash recovery) can leave edits queued before the first message, so flush them first.
+        self.send_disk_edits().await;
         match message {
             DocMessage::GetContent { response_tx } => {
                 response_tx
