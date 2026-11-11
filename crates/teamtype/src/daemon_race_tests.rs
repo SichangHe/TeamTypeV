@@ -796,3 +796,32 @@ fn outside_created_file_displaced_before_its_watcher_event_is_merged() {
         assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap(), shared);
     }
 }
+
+// A peer deletes a file while an outside process on this peer has rewritten it and the watcher
+// event for that write is not yet handled. Applying the peer's delete removes the disk file
+// without comparing it to `disk_content`, so the outside text is gone from disk and from every
+// document; the late watcher event finds no file. (On restart the same race is resolved the other
+// way: "Changed on disk while peers deleted it: the edit wins and is shared again.")
+// Failed before the fix on branch tvd-review.
+#[tokio::test]
+async fn peer_delete_keeps_an_unhandled_outside_write() {
+    let mut w = World::new(1, 2).await;
+    let file1 = w.peers[1].dir.path().join("a");
+    assert_eq!(std::fs::read_to_string(&file1).unwrap(), "one\ntwo\nthree\n");
+    // Peer 0 deletes the file.
+    std::fs::remove_file(w.peers[0].dir.path().join("a")).unwrap();
+    let path = w.path.clone();
+    w.peers[0].actor.file_created_or_changed(&path);
+    // Peer 1: an outside write whose watcher event is still queued.
+    std::fs::write(&file1, "one\ntwo\nthree\nunsaved work\n").unwrap();
+    w.sync_all().await;
+    w.peers[1].actor.file_created_or_changed(&path);
+    w.sync_all().await;
+    let on_disk = std::fs::read_to_string(&file1).ok();
+    let shared = w.peers[1].actor.current_file_content(&path).cloned();
+    assert!(
+        on_disk.as_deref().is_some_and(|t| t.contains("unsaved work"))
+            || matches!(&shared, Some(Content::String(t)) if t.contains("unsaved work")),
+        "outside write lost: disk {on_disk:?}, shared {shared:?}"
+    );
+}

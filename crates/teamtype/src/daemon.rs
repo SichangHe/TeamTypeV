@@ -396,6 +396,11 @@ impl DocumentActor {
                                 info!("Removing file {file_path}.");
                                 if self.git_running {
                                     self.deferred_removals.insert(file_path);
+                                } else if let Some(bytes) = self.unhandled_outside_write(&file_path)
+                                {
+                                    // Changed on disk while a peer deleted it: the edit wins and is
+                                    // shared again (as on restart, `apply_pending_writes`).
+                                    self.merge_disk_content(&file_path, bytes);
                                 } else {
                                     self.remove_disk_file(&file_path);
                                 }
@@ -1421,6 +1426,13 @@ impl DocumentActor {
         }
         self.flush_git_files()?;
         result
+    }
+
+    /// The disk bytes, if they differ from what the daemon last saw there.
+    fn unhandled_outside_write(&self, file_path: &RelativePath) -> Option<Vec<u8>> {
+        let absolute = self.absolute_path_for_file_path(file_path);
+        let bytes = sandbox::read_file(&self.app_config.base_dir, &absolute).ok()?;
+        (self.disk_content.get(file_path) != Some(&bytes)).then_some(bytes)
     }
 
     fn remove_disk_file(&mut self, file_path: &RelativePath) {
