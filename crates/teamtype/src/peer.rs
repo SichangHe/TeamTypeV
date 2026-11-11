@@ -6,7 +6,7 @@
 
 //! This module provides a [`ConnectionManager`], which can be used to connect to other daemons.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::future::IntoFuture;
 use std::io::{Read, Write};
@@ -374,8 +374,9 @@ struct EndpointActor {
     my_passphrase: SecretKey,
     peer_tasks: HashMap<PublicKey, JoinHandle<()>>,
     peer_generations: HashMap<PublicKey, u64>,
-    /// Peers this daemon was told to connect to (it keeps reconnecting to them).
-    dialed: HashSet<PublicKey>,
+    /// Peers this daemon was told to connect to (it keeps reconnecting to them), with the number
+    /// of consecutive failed attempts.
+    dialed: HashMap<PublicKey, usize>,
     connecting: HashMap<PublicKey, JoinHandle<()>>,
     next_generation: u64,
     forward_port: Option<u16>,
@@ -401,7 +402,7 @@ impl EndpointActor {
             my_passphrase,
             peer_tasks: HashMap::new(),
             peer_generations: HashMap::new(),
-            dialed: HashSet::new(),
+            dialed: HashMap::new(),
             connecting: HashMap::new(),
             next_generation: 0,
             forward_port: None,
@@ -424,7 +425,7 @@ impl EndpointActor {
                     debug!("Ignoring stale reconnect attempt for peer {peer_id}.");
                     return Ok(());
                 }
-                self.dialed.insert(peer_id);
+                self.dialed.entry(peer_id).or_insert(0);
                 let generation = self.start_peer_generation(peer_id);
                 if previous_attempts > 0 && previous_attempts.is_multiple_of(3) {
                     self.endpoint.dns_resolver()?.reset();
@@ -474,8 +475,12 @@ impl EndpointActor {
                 }
                 self.connecting.remove(&peer_id);
                 let conn = match result {
-                    Ok(conn) => conn,
+                    Ok(conn) => {
+                        self.dialed.insert(peer_id, 0);
+                        conn
+                    }
                     Err(err) => {
+                        self.dialed.insert(peer_id, previous_attempts + 1);
                         if format!("{err:#}").contains("known protocol") {
                             warn!(
                                 "The peer runs a teamtypev version that cannot sync with yours; install the same build on both sides."
@@ -555,6 +560,15 @@ impl EndpointActor {
 
     /// Two processes with the same `.teamtypev/key`, for example in a copied `.teamtypev`
     /// directory, keep replacing each other's connection.
+    fn refuses_duplicate(&self, peer_id: PublicKey) -> bool {
+        const FAILURES_BEFORE_ACCEPTING: usize = 3;
+        self.endpoint.id().as_bytes() < peer_id.as_bytes()
+            && self
+                .dialed
+                .get(&peer_id)
+                .is_some_and(|failures| *failures < FAILURES_BEFORE_ACCEPTING)
+    }
+
     fn warn_if_flapping(&mut self, peer_id: PublicKey) {
         let now = std::time::Instant::now();
         let times = self.recent_connections.entry(peer_id).or_default();
@@ -721,17 +735,18 @@ impl EndpointActor {
 
     fn handle_incoming_connection(&mut self, conn: IrohEndpointConnection) {
         let endpoint_id = conn.remote_id();
-        if self.dialed.contains(&endpoint_id)
-            && self.endpoint.id().as_bytes() < endpoint_id.as_bytes()
-        {
+        if self.refuses_duplicate(endpoint_id) {
             // Both daemons were told to connect to each other. Accepting the other's connection
             // would cancel our own, and theirs cancels ours: no connection would be left, and
             // neither side would retry. The daemon with the smaller id keeps the connection it
-            // dialed (and its reconnect loop); the other accepts it.
+            // dialed (and its reconnect loop) while that works; the other accepts. If our dial
+            // keeps failing (the peer is unreachable from here), we accept theirs instead.
             debug!("Refusing a duplicate connection from {endpoint_id}.");
             conn.close(0u32.into(), b"duplicate connection");
             return;
         }
+        // Their connection replaces our dial, so we stop dialing; they keep reconnecting.
+        self.dialed.remove(&endpoint_id);
         info!("Peer connected: {}", &endpoint_id);
         self.warn_if_flapping(endpoint_id);
         self.start_peer_generation(endpoint_id);
@@ -1302,95 +1317,208 @@ mod tests {
         }).await?
     }
 
-    /// Two daemons that were each told to connect to the other, at the same moment, must end up
-    /// connected (each connection attempt used to cancel the other side's, leaving none).
-    #[tokio::test]
-    async fn mutual_joins_end_up_connected() -> Result<()> {
+    struct TestPeer {
+        _dir: tempfile::TempDir,
+        message_tx: mpsc::Sender<EndpointMessage>,
+        address: SecretAddress,
+        task: JoinHandle<()>,
+    }
+
+    async fn test_peer() -> Result<TestPeer> {
         use crate::daemon::DocumentActorHandle;
-        for _ in 0..8 {
-            let mut sides = vec![];
-            for _ in 0..2 {
-                let dir = tempfile::tempdir()?;
-                let app_config = AppConfig {
-                    base_dir: dir.path().to_path_buf(),
-                    ..Default::default()
-                };
-                let handle = DocumentActorHandle::new(&app_config, false, false, false);
-                let endpoint = Endpoint::builder(presets::Minimal)
-                    .alpns(vec![ALPN.to_vec()])
-                    .bind()
-                    .await?;
-                let passphrase = SecretKey::generate();
-                let (message_tx, message_rx) = mpsc::channel(8);
-                let address = SecretAddress {
-                    endpoint_addr: endpoint.addr(),
-                    passphrase: passphrase.clone(),
-                };
-                let mut actor = EndpointActor::new(
-                    endpoint,
-                    message_rx,
-                    message_tx.clone(),
-                    handle,
-                    passphrase,
-                    app_config,
-                );
-                let task = tokio::spawn(async move { actor.run().await });
-                sides.push((dir, message_tx, address, task));
-            }
-            for (me, other) in [(0, 1), (1, 0)] {
-                sides[me]
-                    .1
-                    .send(EndpointMessage::Connect {
-                        secret_address: SecretAddress {
-                            endpoint_addr: sides[other].2.endpoint_addr.clone(),
-                            passphrase: sides[other].2.passphrase.clone(),
-                        },
-                        response_tx: None,
-                        previous_attempts: 0,
-                        generation: None,
-                    })
-                    .await?;
-            }
-            let mut connected = false;
-            for _ in 0..100 {
-                sleep(Duration::from_millis(100)).await;
-                let mut both = true;
-                for (me, other) in [(0, 1), (1, 0)] {
-                    let (response_tx, response_rx) = oneshot::channel();
-                    sides[me]
-                        .1
-                        .send(EndpointMessage::Live {
-                            peer_id: sides[other].2.endpoint_addr.id,
-                            response_tx,
-                        })
-                        .await?;
-                    both &= response_rx.await?;
+        let dir = tempfile::tempdir()?;
+        let app_config = AppConfig {
+            base_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let handle = DocumentActorHandle::new(&app_config, false, false, false);
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await?;
+        let passphrase = SecretKey::generate();
+        let (message_tx, message_rx) = mpsc::channel(8);
+        let address = SecretAddress {
+            endpoint_addr: endpoint.addr(),
+            passphrase: passphrase.clone(),
+        };
+        let mut actor = EndpointActor::new(
+            endpoint,
+            message_rx,
+            message_tx.clone(),
+            handle,
+            passphrase,
+            app_config,
+        );
+        let task = tokio::spawn(async move { actor.run().await });
+        Ok(TestPeer {
+            _dir: dir,
+            message_tx,
+            address,
+            task,
+        })
+    }
+
+    async fn dial(from: &TestPeer, to: &TestPeer) -> Result<()> {
+        from.message_tx
+            .send(EndpointMessage::Connect {
+                secret_address: SecretAddress {
+                    endpoint_addr: to.address.endpoint_addr.clone(),
+                    passphrase: to.address.passphrase.clone(),
+                },
+                response_tx: None,
+                previous_attempts: 0,
+                generation: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn live(from: &TestPeer, to: &TestPeer) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        from.message_tx
+            .send(EndpointMessage::Live {
+                peer_id: to.address.endpoint_addr.id,
+                response_tx,
+            })
+            .await?;
+        Ok(response_rx.await?)
+    }
+
+    /// All pairs of `peers` are connected on both sides, and stay so for a moment.
+    async fn all_connected(peers: &[TestPeer]) -> Result<bool> {
+        for round in 0..2 {
+            let mut ok = false;
+            for _ in 0..if round == 0 { 150 } else { 1 } {
+                ok = true;
+                for (i, a) in peers.iter().enumerate() {
+                    for (j, b) in peers.iter().enumerate() {
+                        ok &= i == j || live(a, b).await?;
+                    }
                 }
-                if both {
-                    // still connected a moment later: not a connection that is about to be cancelled
-                    sleep(Duration::from_millis(500)).await;
-                    connected = true;
+                if ok {
                     break;
                 }
+                sleep(Duration::from_millis(100)).await;
             }
-            assert!(connected, "mutually joined daemons never connected");
-            let mut both = true;
-            for (me, other) in [(0, 1), (1, 0)] {
-                let (response_tx, response_rx) = oneshot::channel();
-                sides[me]
-                    .1
-                    .send(EndpointMessage::Live {
-                        peer_id: sides[other].2.endpoint_addr.id,
-                        response_tx,
-                    })
-                    .await?;
-                both &= response_rx.await?;
+            if !ok {
+                return Ok(false);
             }
-            assert!(both, "connection was cancelled after connecting");
-            for side in sides {
-                side.3.abort();
+            // a connection about to be cancelled does not survive this
+            sleep(Duration::from_millis(700)).await;
+        }
+        Ok(true)
+    }
+
+    /// Daemons that were told to connect to each other, at the same moment, must end up connected
+    /// (each connection attempt used to cancel the other side's, leaving none): two daemons, and
+    /// three or four with every pair joined in both directions (cycles included).
+    #[tokio::test]
+    async fn simultaneous_mutual_joins_end_up_connected() -> Result<()> {
+        for (size, rounds) in [(2, 6), (3, 3), (4, 2)] {
+            for round in 0..rounds {
+                let mut peers = vec![];
+                for _ in 0..size {
+                    peers.push(test_peer().await?);
+                }
+                for (i, from) in peers.iter().enumerate() {
+                    for (j, to) in peers.iter().enumerate() {
+                        if i != j {
+                            dial(from, to).await?;
+                        }
+                    }
+                }
+                assert!(
+                    all_connected(&peers).await?,
+                    "{size} mutually joined daemons did not all connect (round {round})"
+                );
+                for peer in peers {
+                    peer.task.abort();
+                }
             }
         }
+        Ok(())
+    }
+
+    /// A ring (each daemon dials the next, so every pair has one dialer or two) and a daemon that
+    /// restarts with a new id and dials in again.
+    #[tokio::test]
+    async fn ring_and_restart_with_new_id_connect() -> Result<()> {
+        let mut peers = vec![];
+        for _ in 0..3 {
+            peers.push(test_peer().await?);
+        }
+        for i in 0..3 {
+            dial(&peers[i], &peers[(i + 1) % 3]).await?;
+        }
+        assert!(all_connected(&peers).await?, "ring did not connect");
+        // peer 2 restarts under a new id; it dials the other two, which still hold a dead entry
+        let old = peers.pop().expect("three peers");
+        old.task.abort();
+        let restarted = test_peer().await?;
+        dial(&restarted, &peers[0]).await?;
+        dial(&restarted, &peers[1]).await?;
+        peers.push(restarted);
+        for _ in 0..100 {
+            if live(&peers[2], &peers[0]).await?
+                && live(&peers[0], &peers[2]).await?
+                && live(&peers[2], &peers[1]).await?
+                && live(&peers[1], &peers[2]).await?
+            {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        panic!("restarted daemon did not connect");
+    }
+
+    /// The tie-break only holds back an incoming connection while our own dial can still work.
+    #[tokio::test]
+    async fn duplicate_refusal_depends_on_ids_and_dial_health() -> Result<()> {
+        let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
+        let mine = endpoint.id();
+        let (message_tx, message_rx) = mpsc::channel(1);
+        let dir = tempfile::tempdir()?;
+        let app_config = AppConfig {
+            base_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let handle = DocumentActorHandle::new(&app_config, false, false, false);
+        let mut actor = EndpointActor::new(
+            endpoint,
+            message_rx,
+            message_tx,
+            handle,
+            SecretKey::generate(),
+            app_config,
+        );
+        let mut smaller = None;
+        let mut larger = None;
+        while smaller.is_none() || larger.is_none() {
+            let other = SecretKey::generate().public();
+            if other.as_bytes() < mine.as_bytes() {
+                smaller = Some(other);
+            } else {
+                larger = Some(other);
+            }
+        }
+        let (smaller, larger) = (smaller.expect("smaller"), larger.expect("larger"));
+        assert!(!actor.refuses_duplicate(larger), "not dialed: accept");
+        actor.dialed.insert(larger, 0);
+        actor.dialed.insert(smaller, 0);
+        assert!(
+            actor.refuses_duplicate(larger),
+            "we are smaller and our dial works"
+        );
+        assert!(
+            !actor.refuses_duplicate(smaller),
+            "they are smaller: accept theirs"
+        );
+        actor.dialed.insert(larger, 3);
+        assert!(
+            !actor.refuses_duplicate(larger),
+            "our dial keeps failing: accept"
+        );
         Ok(())
     }
 }
