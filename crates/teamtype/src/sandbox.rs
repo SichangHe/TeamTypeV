@@ -63,18 +63,21 @@ pub fn replace_file(
     absolute_file_path: &Path,
     content: &[u8],
 ) -> Result<Option<Vec<u8>>> {
-    replace_file_keeping(absolute_base_dir, absolute_file_path, content, None)
+    replace_file_keeping(absolute_base_dir, absolute_file_path, content, None, None)
         .map(|(displaced, _)| displaced)
 }
 
 /// Like `replace_file`. With a `keep_prefix`, the displaced file also stays in `.teamtypev` under
 /// a name starting with it, and its path is returned: a kill before the caller has saved the
-/// displaced bytes elsewhere then cannot lose them. The caller removes the file afterwards.
+/// displaced bytes elsewhere then cannot lose them. `base` (the content the caller last read) is
+/// stored next to it as `<name>.base` before the swap. The caller removes both afterwards
+/// (`remove_displaced`).
 pub fn replace_file_keeping(
     absolute_base_dir: &Path,
     absolute_file_path: &Path,
     content: &[u8],
     keep_prefix: Option<&str>,
+    base: Option<&[u8]>,
 ) -> Result<(Option<Vec<u8>>, Option<PathBuf>)> {
     let path = check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
     let parent = path.parent().context("File has no parent")?;
@@ -85,6 +88,16 @@ pub fn replace_file_keeping(
         .prefix(keep_prefix.unwrap_or(".tmp"))
         .tempfile_in(&metadata_dir)?;
     staged.write_all(content)?;
+    let sidecar = match (keep_prefix, base) {
+        (Some(_), Some(base)) => {
+            let mut name = staged.path().as_os_str().to_owned();
+            name.push(".base");
+            let sidecar = PathBuf::from(name);
+            fs::write(&sidecar, base)?;
+            Some(sidecar)
+        }
+        _ => None,
+    };
     if let Ok(metadata) = fs::metadata(&path) {
         staged.as_file().set_permissions(metadata.permissions())?;
     }
@@ -94,7 +107,7 @@ pub fn replace_file_keeping(
         target_vendor = "apple",
         target_os = "redox"
     ))]
-    loop {
+    let result = loop {
         match rustix::fs::renameat_with(
             rustix::fs::CWD,
             staged.path(),
@@ -121,16 +134,30 @@ pub fn replace_file_keeping(
             },
             Err(error) => break Err(error.into()),
         }
-    }
+    };
     #[cfg(not(any(
         target_os = "linux",
         target_os = "android",
         target_vendor = "apple",
         target_os = "redox"
     )))]
+    let result: Result<(Option<Vec<u8>>, Option<PathBuf>)> = Err(anyhow::anyhow!(
+        "Atomic file exchange is unsupported on this platform"
+    ));
+    if !matches!(result, Ok((_, Some(_))))
+        && let Some(sidecar) = sidecar
     {
-        bail!("Atomic file exchange is unsupported on this platform")
+        let _ = fs::remove_file(sidecar);
     }
+    result
+}
+
+/// Removes a displaced file kept by `replace_file_keeping` and its stored base.
+pub fn remove_displaced(kept: &Path) {
+    let _ = fs::remove_file(kept);
+    let mut name = kept.as_os_str().to_owned();
+    name.push(".base");
+    let _ = fs::remove_file(PathBuf::from(name));
 }
 
 pub fn append_file(

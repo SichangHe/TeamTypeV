@@ -56,6 +56,36 @@ const INITIAL_CONNECT_ATTEMPTS: usize = 5;
 /// Identifies the sharer's history; set when the sharer starts a new one.
 /// This CRDT key is not a disk path; keeping it preserves existing fork histories.
 const HISTORY_ID: &str = ".teamtype/history";
+/// Document entries recording which displaced files were already merged into the document, so
+/// that saving the document and recording the merge are one atomic step.
+const MERGED_DIR: &str = ".teamtype/merged/";
+/// Document entries holding the disk bytes last merged into the document while a file's write is
+/// pending. Saved with the merge, they are the exact base for merging again after a kill.
+const BASE_DIR: &str = ".teamtype/base/";
+
+fn is_internal_entry(path: &RelativePath) -> bool {
+    let name = path.display().to_string();
+    *path == RelativePath::new(HISTORY_ID)
+        || name.starts_with(MERGED_DIR)
+        || name.starts_with(BASE_DIR)
+}
+
+fn base_marker(path: &RelativePath) -> RelativePath {
+    let hex = path
+        .display()
+        .to_string()
+        .bytes()
+        .fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    RelativePath::new(&format!("{BASE_DIR}{hex}"))
+}
+
+fn merged_marker(token: &str) -> RelativePath {
+    RelativePath::new(&format!("{MERGED_DIR}{token}"))
+}
 const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub const TEST_FILE_PATH: &str = "text";
@@ -161,6 +191,10 @@ pub struct DocumentActor {
     deferred_removals: HashSet<RelativePath>,
     /// Displaced files whose bytes are merged into the document but not yet saved with it.
     displaced_unsaved: Vec<PathBuf>,
+    /// Test fault injection: pretend the process is killed right after a save, before the
+    /// displaced files it covers are cleaned up.
+    #[cfg(test)]
+    kill_before_displaced_cleanup: Option<()>,
 }
 
 impl DocumentActor {
@@ -219,10 +253,12 @@ impl DocumentActor {
             deferred_writes: HashSet::new(),
             deferred_removals: HashSet::new(),
             displaced_unsaved: Vec::new(),
+            #[cfg(test)]
+            kill_before_displaced_cleanup: None,
         };
         git_forward::remove_old_hook(&s.app_config.base_dir);
         for path in s.crdt_doc.files() {
-            if git_forward::excluded(&path) && path != RelativePath::new(HISTORY_ID) {
+            if git_forward::excluded(&path) && !is_internal_entry(&path) {
                 s.crdt_doc.remove_file(&path);
             }
         }
@@ -540,8 +576,15 @@ impl DocumentActor {
         self.save_fully = result.is_err();
         if result.is_ok() {
             // The document now holds what the displaced files held.
+            #[cfg(test)]
+            if self.kill_before_displaced_cleanup.is_some() {
+                return Ok(());
+            }
             for kept in std::mem::take(&mut self.displaced_unsaved) {
-                let _ = std::fs::remove_file(kept);
+                sandbox::remove_displaced(&kept);
+                if let Some(token) = kept.file_name().and_then(|name| name.to_str()) {
+                    self.crdt_doc.remove_file(&merged_marker(token));
+                }
             }
         }
         result.with_context(|| format!("Failed to persist to '{}'", persistence_file.display()))
@@ -569,6 +612,32 @@ impl DocumentActor {
         }
         if list.len() != before {
             self.write_pending(&list);
+        }
+    }
+
+    /// Makes the pending record's base the bytes the disk now holds (creating the record if needed).
+    fn rebase_pending(&self, path: &RelativePath, base: &[u8]) {
+        if !self.persist {
+            return;
+        }
+        let mut list = self.read_pending();
+        list.insert(path.clone(), Some(base.to_vec()));
+        self.write_pending(&list);
+    }
+
+    /// While a write is pending, saves the disk bytes just merged into the document together with
+    /// the merge, so that after a kill the same bytes are not merged in a second time.
+    fn record_merged_base(&mut self, path: &RelativePath, bytes: &[u8]) {
+        if self.persist && self.read_pending().contains_key(path) {
+            self.crdt_doc
+                .set_file(document::Content::Bytes(bytes.to_vec()), &base_marker(path));
+        }
+    }
+
+    fn merged_base(&self, path: &RelativePath) -> Option<Vec<u8>> {
+        match self.current_file_content(&base_marker(path))? {
+            document::Content::String(text) => Some(text.as_bytes().to_vec()),
+            document::Content::Bytes(bytes) => Some(bytes.clone()),
         }
     }
 
@@ -633,10 +702,14 @@ impl DocumentActor {
                     // would apply the document's own change to itself a second time.
                     self.disk_content.insert(path.clone(), bytes);
                     self.unmark_pending(&path);
+                    self.crdt_doc.remove_file(&base_marker(&path));
                     continue;
                 }
                 (Some(bytes), true) => {
                     // A file that had no base was created by the peer; Git may have made one too.
+                    // A saved merge base is newer than the record's: the document already has
+                    // everything up to it.
+                    let base = self.merged_base(&path).or(base);
                     self.disk_content
                         .insert(path.clone(), base.unwrap_or_default());
                     self.merge_disk_content(&path, bytes);
@@ -1006,6 +1079,7 @@ impl DocumentActor {
             } else {
                 new_content.clone()
             };
+            self.record_merged_base(relative_file_path, new_content.as_bytes());
             self.disk_content
                 .insert(relative_file_path.clone(), new_content.into_bytes());
             if let Some(delta) = self.crdt_doc.update_text(&desired, relative_file_path) {
@@ -1016,6 +1090,7 @@ impl DocumentActor {
             }
         } else {
             self.invalidate_editor_file(relative_file_path);
+            self.record_merged_base(relative_file_path, &new_content);
             self.disk_content
                 .insert(relative_file_path.clone(), new_content.clone());
             self.crdt_doc
@@ -1157,6 +1232,7 @@ impl DocumentActor {
             }
         }
         self.unmark_pending(file_path);
+        self.crdt_doc.remove_file(&base_marker(file_path));
         Ok(())
     }
 
@@ -1199,6 +1275,7 @@ impl DocumentActor {
             &abs_path,
             bytes,
             prefix.as_deref(),
+            self.disk_content.get(file_path).map(Vec::as_slice),
         )
         .with_context(|| format!("Failed to write to file {abs_path}"))?;
         if let Some(displaced) = displaced {
@@ -1207,6 +1284,22 @@ impl DocumentActor {
                 self.merge_disk_content(file_path, displaced);
             }
             if outside && self.persist {
+                // The disk now holds our bytes, a state older than the document will be after
+                // this merge. Until the write catches up, the record's base must be that state,
+                // or a restart would read our own bytes as an outside edit and apply it twice.
+                self.rebase_pending(file_path, bytes);
+                // The saved base must describe the disk as it is now, not the displaced bytes.
+                self.record_merged_base(file_path, bytes);
+                if let Some(token) = kept
+                    .as_ref()
+                    .and_then(|kept| kept.file_name())
+                    .and_then(|name| name.to_str())
+                {
+                    self.crdt_doc.set_file(
+                        document::Content::String(String::new()),
+                        &merged_marker(token),
+                    );
+                }
                 self.displaced_unsaved.extend(kept);
                 self.persist()?;
                 self.disk_content.insert(file_path.clone(), bytes.to_vec());
@@ -1214,7 +1307,7 @@ impl DocumentActor {
             }
         }
         if let Some(kept) = kept {
-            let _ = std::fs::remove_file(kept);
+            sandbox::remove_displaced(&kept);
         }
         self.disk_content.insert(file_path.clone(), bytes.to_vec());
         Ok(())
@@ -1228,6 +1321,12 @@ impl DocumentActor {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
+            if Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext == "base")
+            {
+                continue;
+            }
             let Some(path) = name
                 .strip_prefix("displaced-")
                 .and_then(|rest| rest.split('-').next())
@@ -1242,7 +1341,7 @@ impl DocumentActor {
                     document::Content::Bytes(bytes) => bytes.clone(),
                 });
             if std::fs::read(entry.path()).ok() == shared {
-                let _ = std::fs::remove_file(entry.path());
+                sandbox::remove_displaced(&entry.path());
             }
         }
     }
@@ -1257,6 +1356,12 @@ impl DocumentActor {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
+            if Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext == "base")
+            {
+                continue;
+            }
             let Some(rest) = name.strip_prefix("displaced-") else {
                 continue;
             };
@@ -1278,19 +1383,38 @@ impl DocumentActor {
                     document::Content::String(text) => text.as_bytes().to_vec(),
                     document::Content::Bytes(bytes) => bytes.clone(),
                 });
-            // Equal to what we were writing (killed before the swap) or already merged.
-            if shared.as_ref() == Some(&bytes) || on_disk.as_ref() == Some(&bytes) {
-                let _ = std::fs::remove_file(entry.path());
+            // The saved document records that this file was merged: only the cleanup is left.
+            if self.crdt_doc.file_exists(&merged_marker(&name)) {
+                sandbox::remove_displaced(&entry.path());
+                self.crdt_doc.remove_file(&merged_marker(&name));
                 continue;
             }
-            if let (Some(base), true, Some(on_disk)) =
-                (pending_before.get(&path), shared.is_some(), on_disk)
-            {
+            // Equal to what we were writing (killed before the swap).
+            if shared.as_ref() == Some(&bytes) || on_disk.as_ref() == Some(&bytes) {
+                sandbox::remove_displaced(&entry.path());
+                continue;
+            }
+            // The base is what the daemon had last read from the file; the pending record's base
+            // is older and would apply edits the daemon had already merged a second time.
+            let stored_base = {
+                let mut base = entry.path().into_os_string();
+                base.push(".base");
+                std::fs::read(base).ok().map(Some)
+            };
+            if let (Some(base), true, Some(on_disk)) = (
+                stored_base.as_ref().or_else(|| pending_before.get(&path)),
+                shared.is_some(),
+                on_disk,
+            ) {
                 {
                     self.disk_content
                         .insert(path.clone(), base.clone().unwrap_or_default());
                     self.merge_disk_content(&path, bytes);
                     self.disk_content.insert(path.clone(), on_disk);
+                    self.crdt_doc.set_file(
+                        document::Content::String(String::new()),
+                        &merged_marker(&name),
+                    );
                     // Removed once a save of the document includes the merge.
                     self.displaced_unsaved.push(entry.path());
                     if let Err(error) = self.try_write_file(&path) {
@@ -1432,6 +1556,7 @@ impl DocumentActor {
             Ok(true)
         ) {
             self.unmark_pending(file_path);
+            self.crdt_doc.remove_file(&base_marker(file_path));
         }
     }
 

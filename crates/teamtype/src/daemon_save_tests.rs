@@ -364,6 +364,7 @@ fn kill_while_replacing_keeps_an_outside_write_made_since_the_last_read() -> Res
         &actor.absolute_path_for_file_path(&path),
         b"line1\npeer\n",
         Some(&prefix),
+        None,
     )?;
     assert_eq!(displaced.as_deref(), Some(b"outside\nline1\n".as_slice()));
     assert!(kept.is_some());
@@ -587,5 +588,116 @@ fn skipping_a_write_that_is_already_on_disk_still_saves_the_document() -> Result
         saved.current_file_content(&path),
         Some(&document::Content::String("line1\npeer\n".into()))
     );
+    Ok(())
+}
+
+fn displaced_files(dir: &TempDir) -> Vec<String> {
+    std::fs::read_dir(dir.path().join(".teamtypev"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("displaced-"))
+        .collect()
+}
+
+#[test]
+fn kill_after_saving_a_displaced_merge_does_not_merge_it_again() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    actor.persist()?;
+    actor.kill_before_displaced_cleanup = Some(());
+    // An outside write lands after the scan and before the swap.
+    std::fs::write(dir.path().join("shared"), "outside\nline1\n")?;
+    actor.ensure_file_has_bytes(&path, b"line1\npeer\n")?;
+    assert_eq!(displaced_files(&dir).len(), 2, "displaced file and its base");
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&path, "outside\nline1\npeer\n");
+    assert_eq!(displaced_files(&dir), Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn kill_after_a_second_outside_write_merges_against_the_scanned_base() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    // First outside write: scanned and merged before the swap, then saved.
+    std::fs::write(dir.path().join("shared"), "X\nline1\n")?;
+    actor.file_created_or_changed(&path);
+    actor.persist()?;
+    // A second outside write lands before the swap; the daemon is killed right after it.
+    std::fs::write(dir.path().join("shared"), "X\nline1\nY\n")?;
+    let base = actor.disk_content.get(&path).cloned();
+    let content = actor.current_file_content(&path).cloned();
+    let Some(document::Content::String(content)) = content else {
+        panic!("text file")
+    };
+    let (displaced, kept) = sandbox::replace_file_keeping(
+        &actor.app_config.base_dir,
+        &actor.absolute_path_for_file_path(&path),
+        content.as_bytes(),
+        Some(&displaced_prefix(&path)),
+        base.as_deref(),
+    )?;
+    assert_eq!(displaced.as_deref(), Some(b"X\nline1\nY\n".as_slice()));
+    assert!(kept.is_some());
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    let Some(document::Content::String(text)) = restarted.current_file_content(&path) else {
+        panic!("text file")
+    };
+    assert_eq!(text.matches("X\n").count(), 1, "first outside edit applied twice: {text:?}");
+    assert!(text.contains("peer\n") && text.contains("Y\n"), "{text:?}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("shared"))?, *text);
+    Ok(())
+}
+
+#[test]
+fn kill_after_a_displaced_merge_without_a_prior_record_keeps_the_outside_edit() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.persist()?;
+    // The document changed without a pending record (for example from the watcher).
+    actor.crdt_doc.update_text("line1\nlocal\n", &path);
+    actor.kill_before_displaced_cleanup = None;
+    std::fs::write(dir.path().join("shared"), "outside\nline1\n")?;
+    actor.ensure_file_has_bytes(&path, b"line1\nlocal\n")?;
+    // Killed before the write that follows the merge.
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    let Some(document::Content::String(text)) = restarted.current_file_content(&path) else {
+        panic!("text file")
+    };
+    assert!(text.contains("outside\n") && text.contains("local\n"), "{text:?}");
+    assert_eq!(text.matches("local\n").count(), 1, "{text:?}");
+    Ok(())
+}
+
+#[test]
+fn kill_after_scanning_git_changes_before_the_pending_write_does_not_apply_them_twice() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    assert!(actor.start_git(&[])?);
+    // Git rewrites the file while the peer's edit waits; Git finishes and the daemon scans it, then
+    // saves the document (the persister) before the deferred write.
+    std::fs::write(dir.path().join("shared"), "git\nline1\n")?;
+    actor.git_running = false;
+    actor.read_current_content_from_dir(false);
+    actor.persist()?;
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    let Some(document::Content::String(text)) = restarted.current_file_content(&path) else {
+        panic!("text file")
+    };
+    assert_eq!(text.matches("git\n").count(), 1, "Git's change applied twice: {text:?}");
+    assert!(text.contains("peer\n"), "{text:?}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("shared"))?, *text);
     Ok(())
 }

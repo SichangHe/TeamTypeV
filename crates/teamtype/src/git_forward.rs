@@ -30,6 +30,12 @@ use crate::daemon::DocumentActorHandle;
 #[path = "git_terminal.rs"]
 mod terminal;
 
+/// Test fault injection: `execute` panics for the job with this id once Git is marked started.
+#[cfg(test)]
+static PANIC_JOB_ID: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const OUTPUT_TIMEOUT: Duration = Duration::from_mins(3);
@@ -475,6 +481,11 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     })
     .await
     .context("The joiner's edits did not reach the sharer; Git was not run")??;
+    #[cfg(test)]
+    if job.request.id == PANIC_JOB_ID.load(Ordering::SeqCst) {
+        PANICKED.store(true, Ordering::SeqCst);
+        std::panic::panic_any("injected panic after Git started");
+    }
     let root = handle.base_dir().canonicalize()?;
     remove_old_hook(&root);
     let repository = git2::Repository::open(&root)
@@ -1006,6 +1017,51 @@ mod tests {
         .await;
         actor.abort();
         result??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_panicking_git_worker_does_not_leave_file_writes_deferred() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
+        git2::Repository::init(root.path())?;
+        std::fs::write(root.path().join("file"), "initial")?;
+        let config = crate::config::AppConfig {
+            base_dir: root.path().to_path_buf(),
+            ..Default::default()
+        };
+        let host = DocumentActorHandle::new(&config, true, true, false);
+        start(host.clone())?;
+        let heads = host.git_heads().await;
+        PANIC_JOB_ID.store(987_654, Ordering::SeqCst);
+        let (input, _input_writer) = Input::new()?;
+        let (response, _responses) = mpsc::channel(8);
+        host.git
+            .enqueue(Job {
+                request: Request {
+                    id: 987_654,
+                    args: vec![b"status".to_vec()],
+                    cwd: vec![],
+                    heads: heads.clone(),
+                    terminal: None,
+                },
+                response,
+                input,
+            })
+            .await?;
+        // The panic happens after `git_running` was set; the supervisor must clear it.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if PANICKED.load(Ordering::SeqCst)
+                    && host.git_started(heads.clone()).await.unwrap_or(false)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("git_running stayed set after the worker panicked")?;
         Ok(())
     }
 
