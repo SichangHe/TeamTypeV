@@ -547,16 +547,15 @@ impl From<TextDelta> for OperationSeq {
 }
 
 impl TextDelta {
-    /// # Panics
+    /// # Errors
     ///
-    /// Will panic if the delta contains multiple operations.
+    /// Fails if the delta contains multiple operations or does not fit `content`.
     pub fn try_from_ed_delta(ed_delta: EditorTextDelta, content: &str) -> Result<Self> {
         let mut delta = Self::default();
         // TODO: add support, when needed
-        assert!(
-            ed_delta.0.len() <= 1,
-            "We don't yet support EditorTextDelta with multiple operations."
-        );
+        if ed_delta.0.len() > 1 {
+            bail!("We don't yet support EditorTextDelta with multiple operations.");
+        }
         for ed_op in ed_delta {
             let mut delta_step = Self::default();
             if ed_op.range.is_empty() {
@@ -778,6 +777,13 @@ mod tests {
         let mut expected_delta = TextDelta::default();
         expected_delta.delete(2);
         assert_eq!(expected_delta, delta);
+    }
+
+    #[test]
+    fn conversion_editor_to_text_delta_multiple_operations_is_an_error_not_a_panic() {
+        let mut ed_delta = ed_delta_single((0, 0), (0, 0), "a");
+        ed_delta.0.push(ed_delta_single((0, 1), (0, 1), "b").0.remove(0));
+        assert!(TextDelta::try_from_ed_delta(ed_delta, "foo").is_err());
     }
 
     #[test]
