@@ -9,9 +9,12 @@
 +        final(self).editor_revision == old(self).editor_revision + 1,
 +        final(self).daemon_revision == old(self).daemon_revision,
 +        wf(final(self)@),
++        wf2(old(self)@) ==> wf2(final(self)@),
 +        r is Err ==> final(self).current_content@ == old(self).current_content@,
 +        r is Ok ==> {
 +            &&& confirmed(old(self)@) <= rev_editor_delta.revision <= old(self).daemon_revision
++            &&& base_len_of(ed_op(rev_editor_delta.delta)) <=
++                    fold(old(self)@.lc, old(self)@.q.subrange(0, (rev_editor_delta.revision - confirmed(old(self)@)) as int)).len()
 +            &&& final(self)@ == srv_edit(old(self)@, rev_editor_delta.revision as nat, ed_op(rev_editor_delta.delta)).0
 +            &&& delta_op(r->Ok_0.0) == tt(ed_op(rev_editor_delta.delta),
 +                    old(self).editor_queue@.map_values(|o: OperationSeq| o@).subrange(
@@ -27,13 +30,13 @@
      let mut op_seq: OperationSeq;
      if daemon_revision > self.daemon_revision {
 -        bail!("Editor has seen a daemon revision from the future.");
-+        proof { lemma_wf_er_only(old(self)@, self@); }
++        proof { lemma_wf_er_only(old(self)@, self@); lemma_wf2_er_only(old(self)@, self@); }
 +        return Err(Error); // bail!
      }
      let daemon_operations_to_transform = self.daemon_revision - daemon_revision;
      if self.editor_queue.len() < daemon_operations_to_transform {
 -        bail!("We don't have enough operations cached. Was this already processed?");
-+        proof { lemma_wf_er_only(old(self)@, self@); }
++        proof { lemma_wf_er_only(old(self)@, self@); lemma_wf2_er_only(old(self)@, self@); }
 +        return Err(Error); // bail!
      }
      let seen_operations = self.editor_queue.len() - daemon_operations_to_transform;
@@ -100,7 +103,7 @@
 +        Err(e) => {
 +            proof {
 +                assert(ops(self.editor_queue@) =~= q0.subrange(seen_operations as int, q0.len() as int));
-+                lemma_wf_after_confirm(old(self)@, seen_operations as int, self@);
++                lemma_wf_after_confirm(old(self)@, seen_operations as int, self@); lemma_wf2_after_confirm(old(self)@, seen_operations as int, self@);
 +            }
 +            return Err(e)
 +        },
@@ -128,6 +131,10 @@
 +        let k = seen_operations as int;
 +        assert(k == (rev_editor_delta.revision - confirmed(s0)) as int);
 +        lemma_srv_edit_wf(s0, rev_editor_delta.revision as nat, e);
++        if wf2(s0) {
++            assert(l1 == fold(s0.lc, s0.q.subrange(0, k)));
++            lemma_edit_wf2(s0, rev_editor_delta.revision as nat, e);
++        }
 +        assert(self@ == srv_edit(s0, rev_editor_delta.revision as nat, e).0);
 +    }
 +    Ok((delta_from_op(op_seq), deltas_for_editor))

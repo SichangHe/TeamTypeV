@@ -12,6 +12,26 @@ pub uninterp spec fn tr_my(m: int, t: int) -> int;    // m' of m.transform(t)
 pub uninterp spec fn tr_their(m: int, t: int) -> int; // t' of m.transform(t)
 pub uninterp spec fn pad(o: int, n: nat) -> int;      // o after o.retain(n)
 pub uninterp spec fn base_len_of(o: int) -> nat;
+pub uninterp spec fn tgt_len_of(o: int) -> nat;       // length of the result of o on a text of exactly base_len_of(o)
+
+// LENGTH AXIOMS (ASSUMED; facts of the operational-transform crate)
+// force_apply keeps the untouched suffix: an op whose base fits the text changes the length by tgt - base
+#[verifier::external_body]
+pub proof fn axiom_len_ap(d: Seq<char>, o: int)
+    requires base_len_of(o) <= d.len(),
+    ensures ap(d, o).len() == d.len() - base_len_of(o) + tgt_len_of(o),
+{}
+// `retain(n)` extends base and target by n
+#[verifier::external_body]
+pub proof fn axiom_len_pad(o: int, n: nat)
+    ensures base_len_of(pad(o, n)) == base_len_of(o) + n, tgt_len_of(pad(o, n)) == tgt_len_of(o) + n,
+{}
+// transform of two ops with equal base: each result is based on the other's target
+#[verifier::external_body]
+pub proof fn axiom_len_tr(m: int, t: int)
+    requires base_len_of(m) == base_len_of(t),
+    ensures base_len_of(tr_their(m, t)) == tgt_len_of(m), base_len_of(tr_my(m, t)) == tgt_len_of(t),
+{}
 
 // TP1: m then t' == t then m'   (ASSUMED; unconditional in this model, the real crate needs
 // equal base lengths, which `transform_through_operations` establishes by padding)
@@ -174,6 +194,116 @@ pub proof fn lemma_srv_crdt_wf(s: Srv, o: int)
     ensures wf(srv_crdt(s, o).0),
 {
     lemma_fold_snoc(s.lc, s.q, o);
+}
+
+
+// ---------- length-fit invariant (new): every queued op fits the text it is applied to ----------
+// `fits(d, o)`: the op's base does not reach past the text (the CRDT/`apply_to` success condition)
+pub open spec fn fits(d: Seq<char>, o: int) -> bool { base_len_of(o) <= d.len() }
+
+pub open spec fn fitq(d: Seq<char>, q: Seq<int>) -> bool
+    decreases q.len(),
+{
+    q.len() == 0 || (fits(d, q[0]) && fitq(ap(d, q[0]), q.drop_first()))
+}
+pub open spec fn wf2(s: Srv) -> bool { wf(s) && fitq(s.lc, s.q) }
+
+pub proof fn lemma_fitq_snoc(d: Seq<char>, q: Seq<int>, x: int)
+    requires fitq(d, q), fits(fold(d, q), x),
+    ensures fitq(d, q.push(x)),
+    decreases q.len(),
+{
+    if q.len() == 0 {
+        assert(q.push(x).drop_first() =~= Seq::<int>::empty());
+        assert(q.push(x)[0] == x);
+        assert(fold(d, q) == d);
+        assert(fitq(ap(d, x), Seq::<int>::empty()));
+    } else {
+        assert(q.push(x).drop_first() =~= q.drop_first().push(x));
+        assert(q.push(x)[0] == q[0]);
+        assert(fold(d, q) == fold(ap(d, q[0]), q.drop_first()));
+        lemma_fitq_snoc(ap(d, q[0]), q.drop_first(), x);
+    }
+}
+
+pub proof fn lemma_fitq_split(d: Seq<char>, q: Seq<int>, k: int)
+    requires fitq(d, q), 0 <= k <= q.len(),
+    ensures fitq(d, q.subrange(0, k)), fitq(fold(d, q.subrange(0, k)), q.subrange(k, q.len() as int)),
+    decreases q.len(),
+{
+    if k == 0 {
+        assert(q.subrange(0, 0) =~= Seq::<int>::empty());
+        assert(q.subrange(0, q.len() as int) =~= q);
+    } else {
+        let df = q.drop_first();
+        let d1 = ap(d, q[0]);
+        lemma_fitq_split(d1, df, k - 1);
+        let qk = q.subrange(0, k);
+        assert(qk[0] == q[0]);
+        assert(qk.drop_first() =~= df.subrange(0, k - 1));
+        assert(fold(d, qk) == fold(d1, df.subrange(0, k - 1)));
+        assert(q.subrange(k, q.len() as int) =~= df.subrange(k - 1, df.len() as int));
+    }
+}
+
+// the lengths of the transformed ops fit: tt keeps both the editor op and the queue fitting
+pub proof fn lemma_tt_fit(d: Seq<char>, o: int, q: Seq<int>)
+    requires fitq(d, q), fits(d, o),
+    ensures fitq(ap(d, o), tt(o, q).1), fits(fold(d, q), tt(o, q).0),
+    decreases q.len(),
+{
+    if q.len() > 0 {
+        let q0 = q[0];
+        let df = q.drop_first();
+        let fm = fix_m(q0, o);
+        let ft = fix_t(q0, o);
+        let o2 = tr_their(fm, ft);
+        let my = tr_my(fm, ft);
+        let d1 = ap(d, q0);
+        axiom_len_ap(d, q0);
+        axiom_len_ap(d, o);
+        if base_len_of(q0) < base_len_of(o) {
+            axiom_len_pad(q0, (base_len_of(o) - base_len_of(q0)) as nat);
+        } else {
+            axiom_len_pad(o, (base_len_of(q0) - base_len_of(o)) as nat);
+        }
+        axiom_len_tr(fm, ft);
+        axiom_tp1(d, fm, ft);
+        lemma_fix(d, q0, o);
+        assert(ap(ap(d, o), my) == ap(d1, o2));
+        assert(fits(d1, o2));
+        assert(fits(ap(d, o), my));
+        lemma_tt_fit(d1, o2, df);
+        let rest = tt(o2, df).1;
+        assert(seq![my].add(rest).drop_first() =~= rest);
+        assert(seq![my].add(rest)[0] == my);
+    }
+}
+
+pub proof fn lemma_crdt_wf2(s: Srv, o: int)
+    requires wf2(s), fits(s.cur, o),
+    ensures wf2(srv_crdt(s, o).0),
+{
+    lemma_srv_crdt_wf(s, o);
+    lemma_fitq_snoc(s.lc, s.q, o);
+}
+
+pub proof fn lemma_edit_wf2(s: Srv, rev: nat, o: int)
+    requires
+        wf2(s), confirmed(s) <= rev <= s.dr,
+        fits(fold(s.lc, s.q.subrange(0, (rev - confirmed(s)) as int)), o),
+    ensures
+        wf2(srv_edit(s, rev, o).0),
+        // the op the CRDT receives fits the text the CRDT holds (= the server's text)
+        fits(s.cur, tt(o, s.q.subrange((rev - confirmed(s)) as int, s.q.len() as int)).0),
+{
+    let k = (rev - confirmed(s)) as int;
+    let lc1 = fold(s.lc, s.q.subrange(0, k));
+    let q1 = s.q.subrange(k, s.q.len() as int);
+    lemma_srv_edit_wf(s, rev, o);
+    lemma_fitq_split(s.lc, s.q, k);
+    lemma_fold_split(s.lc, s.q, k);
+    lemma_tt_fit(lc1, o, q1);
 }
 
 // ---------- the world ----------
@@ -525,6 +655,8 @@ pub struct RevisionedTextDelta { pub revision: usize, pub delta: TextDelta }
 #[verifier::external_body]
 pub fn try_from_rev_ed_delta(r: RevisionedEditorTextDelta, content: &str) -> (o: Result<RevisionedTextDelta>)
     ensures o is Ok ==> delta_op(o->Ok_0.delta) == ed_op(r.delta) && o->Ok_0.revision == r.revision
+        // ASSUMED: a successful conversion only reads positions inside the content (Position::try_from_offset)
+        && base_len_of(delta_op(o->Ok_0.delta)) <= content@.len()
 { unimplemented!() }
 
 // `Vec::drain(..n)` collected
@@ -706,12 +838,17 @@ impl OTServer {
             final(self).daemon_revision == old(self).daemon_revision,
             // no error path breaks the server invariant
             wf(final(self)@),
+            // ... nor the length-fit invariant
+            wf2(old(self)@) ==> wf2(final(self)@),
             // a rejected edit never changes the daemon text
             r is Err ==> final(self).current_content@ == old(self).current_content@,
             // an accepted edit is exactly the model's `srv_edit` with the editor's op,
             // and returns the transformed op for the CRDT and the model's batch for the editor
             r is Ok ==> {
                 &&& confirmed(old(self)@) <= rev_editor_delta.revision <= old(self).daemon_revision
+                // the editor's op fits the confirmed text it was made against
+                &&& base_len_of(ed_op(rev_editor_delta.delta)) <=
+                        fold(old(self)@.lc, old(self)@.q.subrange(0, (rev_editor_delta.revision - confirmed(old(self)@)) as int)).len()
                 &&& final(self)@ == srv_edit(old(self)@, rev_editor_delta.revision as nat, ed_op(rev_editor_delta.delta)).0
                 &&& delta_op(r->Ok_0.0) == tt(ed_op(rev_editor_delta.delta),
                         old(self).editor_queue@.map_values(|o: OperationSeq| o@).subrange(
@@ -728,7 +865,7 @@ impl OTServer {
         let mut op_seq: OperationSeq;
 
         if daemon_revision > self.daemon_revision {
-            proof { lemma_wf_er_only(old(self)@, self@); }
+            proof { lemma_wf_er_only(old(self)@, self@); lemma_wf2_er_only(old(self)@, self@); }
             return Err(Error); // bail!
         }
 
@@ -739,7 +876,7 @@ impl OTServer {
         // daemon_revision. So we can remove them from the editor queue.
         let daemon_operations_to_transform = self.daemon_revision - daemon_revision;
         if self.editor_queue.len() < daemon_operations_to_transform {
-            proof { lemma_wf_er_only(old(self)@, self@); }
+            proof { lemma_wf_er_only(old(self)@, self@); lemma_wf2_er_only(old(self)@, self@); }
             return Err(Error); // bail!
         }
         let seen_operations = self.editor_queue.len() - daemon_operations_to_transform;
@@ -778,7 +915,7 @@ impl OTServer {
                 // the queue was drained and the confirmed text advanced: still consistent
                 proof {
                     assert(ops(self.editor_queue@) =~= q0.subrange(seen_operations as int, q0.len() as int));
-                    lemma_wf_after_confirm(old(self)@, seen_operations as int, self@);
+                    lemma_wf_after_confirm(old(self)@, seen_operations as int, self@); lemma_wf2_after_confirm(old(self)@, seen_operations as int, self@);
                 }
                 return Err(e)
             },
@@ -804,6 +941,11 @@ impl OTServer {
             let k = seen_operations as int;
             assert(k == (rev_editor_delta.revision - confirmed(s0)) as int);
             lemma_srv_edit_wf(s0, rev_editor_delta.revision as nat, e);
+            if wf2(s0) {
+                // `op_seq` fits the confirmed text (try_from_rev_ed_delta), which is `l1`
+                assert(l1 == fold(s0.lc, s0.q.subrange(0, k)));
+                lemma_edit_wf2(s0, rev_editor_delta.revision as nat, e);
+            }
             assert(self@ == srv_edit(s0, rev_editor_delta.revision as nat, e).0);
         }
 
@@ -906,6 +1048,20 @@ pub proof fn example_run(content: Seq<char>, o1: int, o2: int)
     assert(w4.down.len() == 1);
     assert(w5.down.len() == 0);
     theorem_quiescent_agreement(w5);
+}
+
+pub proof fn lemma_wf2_er_only(s0: Srv, s1: Srv)
+    requires s1.dr == s0.dr, s1.q == s0.q, s1.lc == s0.lc, s1.cur == s0.cur,
+    ensures wf2(s0) ==> wf2(s1),
+{}
+
+pub proof fn lemma_wf2_after_confirm(s0: Srv, k: int, s1: Srv)
+    requires wf(s0), 0 <= k <= s0.q.len(), s1.dr == s0.dr,
+        s1.q == s0.q.subrange(k, s0.q.len() as int), s1.lc == fold(s0.lc, s0.q.subrange(0, k)), s1.cur == s0.cur,
+    ensures wf2(s0) ==> wf2(s1),
+{
+    lemma_wf_after_confirm(s0, k, s1);
+    if wf2(s0) { lemma_fitq_split(s0.lc, s0.q, k); }
 }
 
 // =====================================================================================
@@ -1055,6 +1211,7 @@ pub open spec fn err_edit_effect(old_m: Map<int, Srv>, new_m: Map<int, Srv>) -> 
         &&& new_m[k].cur == old_m[k].cur && new_m[k].dr == old_m[k].dr
         &&& new_m[k].er <= old_m[k].er + 1 && new_m[k].er >= old_m[k].er
         &&& wf(new_m[k])
+        &&& (wf2(old_m[k]) ==> wf2(new_m[k]))
     }
 }
 
@@ -1244,6 +1401,8 @@ impl EditorConnection {
                             let (s1, batch) = srv_edit(s0, *revision as nat, ed_op(*delta));
                             &&& final(self).ot_servers@ == old(self).ot_servers@.insert(k, s1)
                             &&& confirmed(s0) <= *revision <= s0.dr
+                            // the editor's op fits the confirmed text it was made against
+                            &&& base_len_of(ed_op(*delta)) <= fold(s0.lc, s0.q.subrange(0, *revision - confirmed(s0))).len()
                             // the CRDT receives the model's transformed op
                             &&& delta_op(cm->Edit_delta) == tt(ed_op(*delta),
                                     s0.q.subrange(*revision - confirmed(s0), s0.q.len() as int)).0
@@ -1347,6 +1506,7 @@ impl EditorConnection {
                                 &&& nm[k].cur == old_map[k].cur && nm[k].dr == old_map[k].dr
                                 &&& nm[k].er <= old_map[k].er + 1 && nm[k].er >= old_map[k].er
                                 &&& wf(nm[k])
+                                &&& (wf2(old_map[k]) ==> wf2(nm[k]))
                             } by {
                                 if k == relative_path@ { assert(nm[k] == ot_server@); } else { assert(nm[k] == old_map[k]); }
                             }
@@ -1411,6 +1571,581 @@ impl EditorConnection {
         }
     }
     // corr-end
+}
+
+// =====================================================================================
+// DAEMON MODEL (new). An abstract state machine of crates/teamtype/src/daemon.rs + document.rs, restricted to
+// what decides whether `EditorConnection::message_from_inside` is only ever called with an Edit that fits the
+// connection's server text (`inside_ok`). It is NOT a refinement of the Rust: each `Step` below is a hand-written
+// abstraction of the code paths named in its comment; the mapping is a claim checked by reading (see STATUS.md).
+// The editor side IS refined: `message_from_inside`/`message_from_editor` (above) match `srv_crdt`/`srv_edit`.
+// =====================================================================================
+
+// ASSUMED: the CRDT/`apply_to` success condition for a delta is exactly that it does not reach past the text
+// (TextDelta::apply_to bails on Retain/Delete past the end; Position::try_from_offset likewise).
+#[verifier::external_body]
+pub proof fn axiom_crdt_ok_iff(d: Seq<char>, t: TextDelta)
+    ensures crdt_ok(d, t) <==> fits(d, delta_op(t)),
+{}
+
+// `TextDelta::delete(n)` on a text of exactly n chars empties it (the "peer deleted your open file" delta)
+pub uninterp spec fn del_all(n: nat) -> int;
+#[verifier::external_body]
+pub proof fn axiom_del_all(d: Seq<char>)
+    ensures base_len_of(del_all(d.len())) == d.len(), ap(d, del_all(d.len())) == Seq::<char>::empty(),
+{}
+
+// bridge to the real contract: the model's `fits` is the real `inside_ok` for a CRDT Edit
+pub proof fn lemma_inside_ok_bridge(ec: &EditorConnection, f: RelativePath, delta: TextDelta)
+    requires ec.ot_servers@.contains_key(f@) ==> fits(ec.ot_servers@[f@].cur, delta_op(delta)),
+    ensures ec.inside_ok(&ComponentMessage::Edit { file_path: f, delta }),
+{
+    if ec.ot_servers@.contains_key(f@) { axiom_crdt_ok_iff(ec.ot_servers@[f@].cur, delta); }
+}
+
+pub enum DocContent { Text(Seq<char>), Bytes }
+
+// doc: the shared document per file (absent = no such file); eds: per editor connection, per open file, the
+// OTServer state (an editor with a file open owns a server); pend: edits already in the document that have not yet
+// been broadcast to the editors (daemon.rs `disk_edits`, and sync patches before `broadcast_to_editors`).
+pub struct DState {
+    pub doc: Map<int, DocContent>,
+    pub eds: Map<int, Map<int, Srv>>,
+    pub pend: Map<int, Seq<int>>,
+}
+
+pub open spec fn pq(st: DState, f: int) -> Seq<int> { if st.pend.contains_key(f) { st.pend[f] } else { Seq::empty() } }
+pub open spec fn is_open(st: DState, e: int, f: int) -> bool { st.eds.contains_key(e) && st.eds[e].contains_key(f) }
+pub open spec fn is_text(st: DState, f: int) -> bool { st.doc.contains_key(f) && st.doc[f] is Text }
+pub open spec fn doc_text(st: DState, f: int) -> Seq<char> {
+    if st.doc.contains_key(f) { match st.doc[f] { DocContent::Text(t) => t, DocContent::Bytes => Seq::empty() } } else { Seq::empty() }
+}
+pub open spec fn all_drained(st: DState) -> bool { forall|f: int| #[trigger] pq(st, f).len() == 0 }
+
+// THE INVARIANT. For every editor e with file f open:
+//  (1) its server is well-formed and every queued op fits;
+//  (2) the document holds f as text, and the server's text plus the not-yet-broadcast edits is the document text
+//      (so when nothing is pending, server text == document text);
+//  (3) all editors with f open agree on the server text.
+pub open spec fn dinv(st: DState) -> bool {
+    &&& forall|e: int, f: int| #[trigger] is_open(st, e, f) ==> wf2(st.eds[e][f])
+    &&& forall|e: int, f: int| #[trigger] is_open(st, e, f) ==> {
+        &&& is_text(st, f)
+        &&& fold(st.eds[e][f].cur, pq(st, f)) == doc_text(st, f)
+        &&& fitq(st.eds[e][f].cur, pq(st, f))
+    }
+    &&& forall|e: int, e2: int, f: int| #[trigger] is_open(st, e, f) && #[trigger] is_open(st, e2, f)
+            ==> st.eds[e][f].cur == st.eds[e2][f].cur
+}
+
+pub enum Step {
+    // doc text changed by a disk write merged by `merge_disk_content`/`update_text`, or by a peer's sync patch
+    // (FileChange). The delta is queued. Requires the delta fits the current doc text (the code `expect`s it).
+    DocEdit { f: int, o: int },
+    // sync patch FileRemoval for a file some editor has open (daemon.rs ReceiveSyncMessage, "not owned" branch):
+    // earlier queued deltas of this sync for f are dropped, a delete-all of the text before the sync is queued,
+    // the document file becomes the empty text. `c` is `file_content_at(.., heads_before_sync_message)`.
+    SyncRemoval { f: int, before: Seq<char> },
+    // text -> binary (merge_disk_content non-UTF-8 branch, patch FileBytes): `invalidate_editor_file` then doc := Bytes
+    Invalidate { f: int },
+    // doc change of a file no editor has open: removal (`remove_file` when `owns`), set_file, binary, empty text...
+    FreeDoc { f: int, nc: Option<DocContent> },
+    // `send_disk_edits` / `broadcast_to_editors(None, Edit)`: the oldest queued edit of f goes to every editor
+    Drain { f: int },
+    // `react_to_message_from_editor` with an accepted Edit: `message_from_editor` on e's connection, then
+    // `process_component_message(Some(e), Edit)` applies the transformed op to the CRDT and broadcasts it to others
+    EditorEdit { e: int, f: int, rev: nat, o: int },
+    // a rejected Edit: only e's server bookkeeping changes (no text, no doc)
+    EditorReject { e: int, f: int, s2: Srv },
+    // accepted Open: a fresh server with the editor's content c; then `process_component_message(Open)`:
+    // doc has text -> e's server gets the diff edit `d` (None when equal) via `process_in_editor`; otherwise
+    // the document takes c (`set_file`)
+    EditorOpen { e: int, f: int, c: Seq<char>, d: Option<int> },
+    EditorClose { e: int, f: int },
+    NewConn { e: int },
+    CloseConn { e: int },
+}
+
+pub open spec fn k_of(s: Srv, rev: nat) -> int { (rev - confirmed(s)) as int }
+pub open spec fn lc1_of(s: Srv, rev: nat) -> Seq<char> { fold(s.lc, s.q.subrange(0, k_of(s, rev))) }
+pub open spec fn q1_of(s: Srv, rev: nat) -> Seq<int> { s.q.subrange(k_of(s, rev), s.q.len() as int) }
+// the op the CRDT receives for an accepted editor edit
+pub open spec fn crdt_op_of(s: Srv, rev: nat, o: int) -> int { tt(o, q1_of(s, rev)).0 }
+
+pub open spec fn step_ok(st: DState, step: Step) -> bool {
+    match step {
+        Step::DocEdit { f, o } => is_text(st, f) && fits(doc_text(st, f), o),
+        Step::SyncRemoval { f, before } => forall|e: int| #[trigger] is_open(st, e, f) ==> st.eds[e][f].cur == before,
+        Step::Invalidate { f } => true,
+        Step::FreeDoc { f, nc } => forall|e: int| !(#[trigger] is_open(st, e, f)),
+        Step::Drain { f } => pq(st, f).len() > 0,
+        Step::EditorEdit { e, f, rev, o } => {
+            &&& all_drained(st)
+            &&& is_open(st, e, f)
+            &&& confirmed(st.eds[e][f]) <= rev <= st.eds[e][f].dr
+            // `message_from_editor` accepted: the editor's op fits the confirmed text (see its ensures)
+            &&& fits(lc1_of(st.eds[e][f], rev), o)
+        },
+        Step::EditorReject { e, f, s2 } => is_open(st, e, f) && s2.cur == st.eds[e][f].cur && wf2(s2),
+        Step::EditorOpen { e, f, c, d } => {
+            &&& all_drained(st)
+            &&& st.eds.contains_key(e)
+            // the diff of editor content against the document text (dissimilar::diff, ASSUMED correct)
+            &&& (is_text(st, f) ==> match d {
+                None => c == doc_text(st, f),
+                Some(dd) => fits(c, dd) && ap(c, dd) == doc_text(st, f),
+            })
+        },
+        Step::EditorClose { e, f } => true,
+        Step::NewConn { e } => true,
+        Step::CloseConn { e } => true,
+    }
+}
+
+pub open spec fn upd_eds(st: DState, f: int, g: spec_fn(Srv) -> Srv) -> Map<int, Map<int, Srv>> {
+    Map::new(
+        st.eds.dom(),
+        |e: int| if st.eds[e].contains_key(f) { st.eds[e].insert(f, g(st.eds[e][f])) } else { st.eds[e] },
+    )
+}
+
+pub open spec fn dapply(st: DState, step: Step) -> DState {
+    match step {
+        Step::DocEdit { f, o } => DState {
+            doc: st.doc.insert(f, DocContent::Text(ap(doc_text(st, f), o))),
+            pend: st.pend.insert(f, pq(st, f).push(o)),
+            ..st
+        },
+        Step::SyncRemoval { f, before } => DState {
+            doc: st.doc.insert(f, DocContent::Text(Seq::empty())),
+            pend: st.pend.insert(f, seq![del_all(before.len())]),
+            ..st
+        },
+        Step::Invalidate { f } => DState {
+            doc: st.doc.insert(f, DocContent::Bytes),
+            eds: Map::new(st.eds.dom(), |e: int| st.eds[e].remove(f)),
+            ..st
+        },
+        Step::FreeDoc { f, nc } => DState {
+            doc: match nc { Some(x) => st.doc.insert(f, x), None => st.doc.remove(f) },
+            ..st
+        },
+        Step::Drain { f } => {
+            let o = pq(st, f)[0];
+            DState {
+                eds: upd_eds(st, f, |s: Srv| srv_crdt(s, o).0),
+                pend: st.pend.insert(f, pq(st, f).drop_first()),
+                ..st
+            }
+        }
+        Step::EditorEdit { e, f, rev, o } => {
+            let s0 = st.eds[e][f];
+            let o2 = crdt_op_of(s0, rev, o);
+            DState {
+                doc: st.doc.insert(f, DocContent::Text(ap(doc_text(st, f), o2))),
+                eds: Map::new(
+                    st.eds.dom(),
+                    |e2: int| if e2 == e { st.eds[e2].insert(f, srv_edit(s0, rev, o).0) }
+                        else if st.eds[e2].contains_key(f) { st.eds[e2].insert(f, srv_crdt(st.eds[e2][f], o2).0) }
+                        else { st.eds[e2] },
+                ),
+                ..st
+            }
+        }
+        Step::EditorReject { e, f, s2 } => DState {
+            eds: st.eds.insert(e, st.eds[e].insert(f, s2)),
+            ..st
+        },
+        Step::EditorOpen { e, f, c, d } => {
+            let s = if is_text(st, f) { match d { Some(dd) => srv_crdt(fresh_srv(c), dd).0, None => fresh_srv(c) } } else { fresh_srv(c) };
+            DState {
+                doc: if is_text(st, f) { st.doc } else { st.doc.insert(f, DocContent::Text(c)) },
+                eds: st.eds.insert(e, st.eds[e].insert(f, s)),
+                ..st
+            }
+        }
+        Step::EditorClose { e, f } => DState {
+            eds: if st.eds.contains_key(e) { st.eds.insert(e, st.eds[e].remove(f)) } else { st.eds },
+            ..st
+        },
+        Step::NewConn { e } => DState { eds: st.eds.insert(e, Map::empty()), ..st },
+        Step::CloseConn { e } => DState { eds: st.eds.remove(e), ..st },
+    }
+}
+
+// Every Edit that a step hands to `message_from_inside` of some connection, as (editor, file, op): it must fit
+// that connection's server text at that moment (this is `inside_ok`), and the document must accept it.
+pub open spec fn inside_fits(st: DState, step: Step) -> bool {
+    match step {
+        Step::Drain { f } => forall|e: int| #[trigger] is_open(st, e, f) ==> fits(st.eds[e][f].cur, pq(st, f)[0]),
+        Step::EditorEdit { e, f, rev, o } => {
+            let o2 = crdt_op_of(st.eds[e][f], rev, o);
+            &&& fits(doc_text(st, f), o2)   // the CRDT apply `expect` (apply_delta_to_doc) cannot fail
+            &&& forall|e2: int| e2 != e && #[trigger] is_open(st, e2, f) ==> fits(st.eds[e2][f].cur, o2)
+        }
+        Step::EditorOpen { e, f, c, d } => is_text(st, f) ==> match d { Some(dd) => fits(c, dd), None => true },
+        _ => true,
+    }
+}
+
+// the I-clauses for st2, given a per-(e,g) justification
+pub proof fn lemma_step(st: DState, step: Step)
+    requires dinv(st), step_ok(st, step),
+    ensures dinv(dapply(st, step)), inside_fits(st, step),
+{
+    let st2 = dapply(st, step);
+    match step {
+        Step::DocEdit { f, o } => {
+            assert forall|e: int, g: int| #[trigger] is_open(st2, e, g) implies {
+                &&& wf2(st2.eds[e][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e, g));
+                if g == f {
+                    let s = st.eds[e][f];
+                    lemma_fold_snoc(s.cur, pq(st, f), o);
+                    lemma_fitq_snoc(s.cur, pq(st, f), o);
+                }
+            }
+            assert forall|e: int, e2: int, g: int| #[trigger] is_open(st2, e, g) && #[trigger] is_open(st2, e2, g)
+                implies st2.eds[e][g].cur == st2.eds[e2][g].cur by { assert(is_open(st, e, g) && is_open(st, e2, g)); }
+        }
+        Step::SyncRemoval { f, before } => {
+            assert forall|e: int, g: int| #[trigger] is_open(st2, e, g) implies {
+                &&& wf2(st2.eds[e][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e, g));
+                if g == f {
+                    let s = st.eds[e][f];
+                    assert(s.cur == before);
+                    axiom_del_all(before);
+                    assert(pq(st2, f) == seq![del_all(before.len())]);
+                    assert(pq(st2, f).drop_first() =~= Seq::<int>::empty());
+                    assert(fold(s.cur, pq(st2, f)) == fold(ap(s.cur, del_all(before.len())), Seq::<int>::empty()));
+                    assert(fitq(ap(s.cur, del_all(before.len())), Seq::<int>::empty()));
+                }
+            }
+            assert forall|e: int, e2: int, g: int| #[trigger] is_open(st2, e, g) && #[trigger] is_open(st2, e2, g)
+                implies st2.eds[e][g].cur == st2.eds[e2][g].cur by { assert(is_open(st, e, g) && is_open(st, e2, g)); }
+        }
+        Step::Invalidate { f } => {
+            assert forall|e: int, g: int| #[trigger] is_open(st2, e, g) implies {
+                &&& wf2(st2.eds[e][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e, g));
+                assert(g != f);
+            }
+            assert forall|e: int, e2: int, g: int| #[trigger] is_open(st2, e, g) && #[trigger] is_open(st2, e2, g)
+                implies st2.eds[e][g].cur == st2.eds[e2][g].cur by { assert(is_open(st, e, g) && is_open(st, e2, g)); }
+        }
+        Step::FreeDoc { f, nc } => {
+            assert forall|e: int, g: int| #[trigger] is_open(st2, e, g) implies {
+                &&& wf2(st2.eds[e][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e, g));
+                assert(g != f);
+            }
+            assert forall|e: int, e2: int, g: int| #[trigger] is_open(st2, e, g) && #[trigger] is_open(st2, e2, g)
+                implies st2.eds[e][g].cur == st2.eds[e2][g].cur by { assert(is_open(st, e, g) && is_open(st, e2, g)); }
+        }
+        Step::Drain { f } => {
+            let o = pq(st, f)[0];
+            assert forall|e: int| #[trigger] is_open(st, e, f) implies fits(st.eds[e][f].cur, o) by {
+                assert(fitq(st.eds[e][f].cur, pq(st, f)));
+            }
+            assert forall|e: int, g: int| #[trigger] is_open(st2, e, g) implies {
+                &&& wf2(st2.eds[e][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e, g));
+                if g == f {
+                    let s = st.eds[e][f];
+                    assert(fitq(s.cur, pq(st, f)));
+                    lemma_crdt_wf2(s, o);
+                    assert(st2.eds[e][f] == srv_crdt(s, o).0);
+                    assert(srv_crdt(s, o).0.cur == ap(s.cur, o));
+                    assert(fold(s.cur, pq(st, f)) == fold(ap(s.cur, o), pq(st, f).drop_first()));
+                } else {
+                    assert(st2.eds[e][g] == st.eds[e][g]);
+                }
+            }
+            assert forall|e: int, e2: int, g: int| #[trigger] is_open(st2, e, g) && #[trigger] is_open(st2, e2, g)
+                implies st2.eds[e][g].cur == st2.eds[e2][g].cur by {
+                assert(is_open(st, e, g) && is_open(st, e2, g));
+                if g == f { assert(st.eds[e][f].cur == st.eds[e2][f].cur); }
+            }
+        }
+        Step::EditorEdit { e, f, rev, o } => {
+            let s0 = st.eds[e][f];
+            let o2 = crdt_op_of(s0, rev, o);
+            assert(pq(st, f).len() == 0);
+            assert(fold(s0.cur, pq(st, f)) == s0.cur);
+            assert(doc_text(st, f) == s0.cur);
+            lemma_edit_wf2(s0, rev, o);
+            assert(fits(s0.cur, o2));
+            assert forall|e2: int| e2 != e && #[trigger] is_open(st, e2, f) implies fits(st.eds[e2][f].cur, o2) by {
+                assert(st.eds[e2][f].cur == s0.cur);
+            }
+            assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
+                &&& wf2(st2.eds[e2][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e2][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e2, g));
+                assert(pq(st2, g).len() == 0);
+                if g == f {
+                    if e2 == e {
+                        assert(st2.eds[e2][g] == srv_edit(s0, rev, o).0);
+                    } else {
+                        let s2 = st.eds[e2][f];
+                        assert(s2.cur == s0.cur);
+                        lemma_crdt_wf2(s2, o2);
+                        assert(st2.eds[e2][g] == srv_crdt(s2, o2).0);
+                    }
+                    assert(fitq(st2.eds[e2][g].cur, Seq::<int>::empty()));
+                } else {
+                    assert(st2.eds[e2][g] == st.eds[e2][g]);
+                    assert(fitq(st2.eds[e2][g].cur, Seq::<int>::empty()));
+                }
+            }
+            assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
+                implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by {
+                assert(is_open(st, e2, g) && is_open(st, e3, g));
+                if g == f {
+                    assert(st.eds[e2][f].cur == s0.cur);
+                    assert(st.eds[e3][f].cur == s0.cur);
+                }
+            }
+        }
+        Step::EditorReject { e, f, s2 } => {
+            assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
+                &&& wf2(st2.eds[e2][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e2][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
+            } by {
+                assert(is_open(st, e2, g));
+                if e2 == e && g == f {
+                    assert(st2.eds[e2][g] == s2);
+                    assert(s2.cur == st.eds[e][f].cur);
+                    assert(fitq(st.eds[e][f].cur, pq(st, f)));
+                } else {
+                    assert(st2.eds[e2][g] == st.eds[e2][g]);
+                }
+            }
+            assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
+                implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by {
+                assert(is_open(st, e2, g) && is_open(st, e3, g));
+                if e2 == e && g == f { assert(st2.eds[e2][g] == s2); }
+                if e3 == e && g == f { assert(st2.eds[e3][g] == s2); }
+            }
+        }
+        Step::EditorOpen { e, f, c, d } => {
+            let sn = if is_text(st, f) { match d { Some(dd) => srv_crdt(fresh_srv(c), dd).0, None => fresh_srv(c) } } else { fresh_srv(c) };
+            let fr = fresh_srv(c);
+            assert(fr.q =~= Seq::<int>::empty());
+            assert(wf2(fr));
+            if is_text(st, f) {
+                if let Some(dd) = d { lemma_crdt_wf2(fr, dd); }
+            }
+            assert(wf2(sn));
+            assert(sn.cur == doc_text(st, f) || !is_text(st, f));
+            assert(sn.cur == c || is_text(st, f));
+            assert(st2.doc.contains_key(f) && st2.doc[f] is Text);
+            assert(doc_text(st2, f) == sn.cur);
+            assert(sn.q.len() == 0 || is_text(st, f));
+            assert forall|g: int| #[trigger] pq(st2, g).len() == 0 by { assert(pq(st, g).len() == 0); }
+            assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
+                &&& wf2(st2.eds[e2][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e2][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
+            } by {
+                if e2 == e && g == f {
+                    assert(st2.eds[e2][g] == sn);
+                    assert(fitq(sn.cur, Seq::<int>::empty()));
+                } else {
+                    assert(is_open(st, e2, g));
+                    if g == f { assert(is_text(st, f)); }
+                    assert(st2.eds[e2][g] == st.eds[e2][g]);
+                    assert(is_text(st2, g));
+                    assert(doc_text(st2, g) == doc_text(st, g));
+                }
+            }
+            assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
+                implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by {
+                if g == f {
+                    if e2 != e { assert(is_open(st, e2, f)); assert(is_text(st, f)); assert(st.eds[e2][f].cur == doc_text(st, f)); }
+                    if e3 != e { assert(is_open(st, e3, f)); assert(is_text(st, f)); assert(st.eds[e3][f].cur == doc_text(st, f)); }
+                    if e2 == e { assert(st2.eds[e2][g] == sn); }
+                    if e3 == e { assert(st2.eds[e3][g] == sn); }
+                } else {
+                    assert(is_open(st, e2, g) && is_open(st, e3, g));
+                }
+            }
+        }
+        Step::EditorClose { e, f } => {
+            assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
+                &&& wf2(st2.eds[e2][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e2][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
+            } by { assert(is_open(st, e2, g)); }
+            assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
+                implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by { assert(is_open(st, e2, g) && is_open(st, e3, g)); }
+        }
+        Step::NewConn { e } => {
+            assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
+                &&& wf2(st2.eds[e2][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e2][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
+            } by { assert(is_open(st, e2, g)); }
+            assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
+                implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by { assert(is_open(st, e2, g) && is_open(st, e3, g)); }
+        }
+        Step::CloseConn { e } => {
+            assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
+                &&& wf2(st2.eds[e2][g])
+                &&& is_text(st2, g)
+                &&& fold(st2.eds[e2][g].cur, pq(st2, g)) == doc_text(st2, g)
+                &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
+            } by { assert(is_open(st, e2, g)); }
+            assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
+                implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by { assert(is_open(st, e2, g) && is_open(st, e3, g)); }
+        }
+    }
+}
+
+// ---------- headline results ----------
+pub open spec fn empty_state() -> DState { DState { doc: Map::empty(), eds: Map::empty(), pend: Map::empty() } }
+
+pub proof fn lemma_dinit()
+    ensures dinv(empty_state()),
+{
+    let st = empty_state();
+    assert forall|e: int, f: int| !is_open(st, e, f) by {}
+}
+
+// any interleaving of steps, by any number of editors, keeps the invariant and never hands an editor
+// connection an edit that does not fit
+pub open spec fn run(st: DState, steps: Seq<Step>) -> DState
+    decreases steps.len(),
+{
+    if steps.len() == 0 { st } else { run(dapply(st, steps[0]), steps.drop_first()) }
+}
+pub open spec fn trace_ok(st: DState, steps: Seq<Step>) -> bool
+    decreases steps.len(),
+{
+    steps.len() == 0 || (step_ok(st, steps[0]) && trace_ok(dapply(st, steps[0]), steps.drop_first()))
+}
+pub open spec fn trace_inside_fits(st: DState, steps: Seq<Step>) -> bool
+    decreases steps.len(),
+{
+    steps.len() == 0 || (inside_fits(st, steps[0]) && trace_inside_fits(dapply(st, steps[0]), steps.drop_first()))
+}
+
+pub proof fn theorem_trace(st: DState, steps: Seq<Step>)
+    requires dinv(st), trace_ok(st, steps),
+    ensures dinv(run(st, steps)), trace_inside_fits(st, steps),
+    decreases steps.len(),
+{
+    if steps.len() > 0 {
+        lemma_step(st, steps[0]);
+        theorem_trace(dapply(st, steps[0]), steps.drop_first());
+    }
+}
+
+// `inside_ok` for the real EditorConnection: when a step broadcasts an edit (Drain, or the CRDT op of an accepted
+// editor edit), every other connection `ec` whose servers are the model's satisfies the real contract.
+pub proof fn theorem_inside_ok_drain(st: DState, f: int, e: int, ec: &EditorConnection, fp: RelativePath, delta: TextDelta)
+    requires
+        dinv(st), step_ok(st, Step::Drain { f }),
+        ec.ot_servers@ == (if st.eds.contains_key(e) { st.eds[e] } else { Map::<int, Srv>::empty() }),
+        fp@ == f, delta_op(delta) == pq(st, f)[0],
+    ensures ec.inside_ok(&ComponentMessage::Edit { file_path: fp, delta }),
+{
+    lemma_step(st, Step::Drain { f });
+    if ec.ot_servers@.contains_key(f) { assert(is_open(st, e, f)); }
+    lemma_inside_ok_bridge(ec, fp, delta);
+}
+
+pub proof fn theorem_inside_ok_editor_edit(st: DState, e: int, f: int, rev: nat, o: int, e2: int,
+    ec: &EditorConnection, fp: RelativePath, delta: TextDelta)
+    requires
+        dinv(st), step_ok(st, Step::EditorEdit { e, f, rev, o }), e2 != e,
+        ec.ot_servers@ == (if st.eds.contains_key(e2) { st.eds[e2] } else { Map::<int, Srv>::empty() }),
+        fp@ == f, delta_op(delta) == crdt_op_of(st.eds[e][f], rev, o),
+    ensures ec.inside_ok(&ComponentMessage::Edit { file_path: fp, delta }),
+{
+    lemma_step(st, Step::EditorEdit { e, f, rev, o });
+    if ec.ot_servers@.contains_key(f) { assert(is_open(st, e2, f)); }
+    lemma_inside_ok_bridge(ec, fp, delta);
+}
+
+// quiescence: with nothing pending, every open server holds exactly the document text (so all editors agree)
+pub proof fn theorem_quiescent_consistency(st: DState, e: int, f: int)
+    requires dinv(st), all_drained(st), is_open(st, e, f),
+    ensures is_text(st, f), st.eds[e][f].cur == doc_text(st, f),
+{
+    assert(pq(st, f).len() == 0);
+    assert(fold(st.eds[e][f].cur, pq(st, f)) == st.eds[e][f].cur);
+}
+
+// NON-VACUITY: two editors open the same file, one edits, the other receives the edit through
+// `srv_crdt` (daemon revision 1), all steps satisfy their preconditions, the end state is consistent.
+pub proof fn example_two_editors(f: int, o: int)
+    requires base_len_of(o) == 0,
+{
+    let st0 = empty_state();
+    let st1 = dapply(st0, Step::NewConn { e: 1 });
+    let st2 = dapply(st1, Step::NewConn { e: 2 });
+    let st3 = dapply(st2, Step::FreeDoc { f, nc: Some(DocContent::Text(Seq::empty())) });
+    let st4 = dapply(st3, Step::EditorOpen { e: 1, f, c: Seq::empty(), d: None });
+    let st5 = dapply(st4, Step::EditorOpen { e: 2, f, c: Seq::empty(), d: None });
+    let ed = Step::EditorEdit { e: 1, f, rev: 0, o };
+    assert(st2.eds.contains_key(1) && st2.eds.contains_key(2));
+    assert(st3.eds == st2.eds);
+    assert(is_text(st3, f) && doc_text(st3, f) == Seq::<char>::empty());
+    assert(step_ok(st2, Step::FreeDoc { f, nc: Some(DocContent::Text(Seq::empty())) })) by {
+        assert forall|e: int| !(#[trigger] is_open(st2, e, f)) by {}
+    }
+    assert(all_drained(st3)) by { assert forall|g: int| #[trigger] pq(st3, g).len() == 0 by {} }
+    assert(step_ok(st3, Step::EditorOpen { e: 1, f, c: Seq::empty(), d: None }));
+    assert(all_drained(st4)) by { assert forall|g: int| #[trigger] pq(st4, g).len() == 0 by {} }
+    assert(step_ok(st4, Step::EditorOpen { e: 2, f, c: Seq::empty(), d: None }));
+    assert(all_drained(st5)) by { assert forall|g: int| #[trigger] pq(st5, g).len() == 0 by {} }
+    assert(is_open(st5, 1, f) && is_open(st5, 2, f));
+    let s1 = st5.eds[1][f];
+    assert(s1 == fresh_srv(Seq::empty()));
+    assert(confirmed(s1) == 0);
+    assert(lc1_of(s1, 0) == Seq::<char>::empty()) by {
+        assert(s1.q.subrange(0, 0) =~= Seq::<int>::empty());
+    }
+    assert(step_ok(st5, ed));
+    let st6 = dapply(st5, ed);
+    let o2 = crdt_op_of(s1, 0, o);
+    assert(st6.eds[1][f] == srv_edit(s1, 0, o).0);
+    assert(st6.eds[2][f] == srv_crdt(st5.eds[2][f], o2).0);
+    assert(is_open(st6, 1, f) && is_open(st6, 2, f));
+    assert(st6.eds[1][f].er == 1 && st6.eds[1][f].dr == 0);
+    assert(st6.eds[2][f].dr == 1 && st6.eds[2][f].er == 0);
+    assert(st6.eds[1][f].cur == st6.eds[2][f].cur);
+    assert(doc_text(st6, f) == st6.eds[1][f].cur);
 }
 
 } // verus!

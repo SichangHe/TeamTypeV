@@ -51,6 +51,7 @@
 +                        let (s1, batch) = srv_edit(s0, *revision as nat, ed_op(*delta));
 +                        &&& final(self).ot_servers@ == old(self).ot_servers@.insert(k, s1)
 +                        &&& confirmed(s0) <= *revision <= s0.dr
++                        &&& base_len_of(ed_op(*delta)) <= fold(s0.lc, s0.q.subrange(0, *revision - confirmed(s0))).len()
 +                        &&& delta_op(cm->Edit_delta) == tt(ed_op(*delta),
 +                                s0.q.subrange(*revision - confirmed(s0), s0.q.len() as int)).0
 +                        &&& to_ed@.len() == batch.len()
@@ -214,6 +215,7 @@
 +                            &&& nm[k].cur == old_map[k].cur && nm[k].dr == old_map[k].dr
 +                            &&& nm[k].er <= old_map[k].er + 1 && nm[k].er >= old_map[k].er
 +                            &&& wf(nm[k])
++                            &&& (wf2(old_map[k]) ==> wf2(nm[k]))
 +                        } by {
 +                            if k == relative_path@ { assert(nm[k] == ot_server@); } else { assert(nm[k] == old_map[k]); }
 +                        }
