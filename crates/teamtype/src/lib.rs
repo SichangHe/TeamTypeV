@@ -19,6 +19,8 @@ pub mod ot;
 pub mod path;
 pub mod peer;
 pub mod sandbox;
+#[cfg(test)]
+mod sync_liveness_tests;
 pub mod types;
 pub mod watcher;
 pub mod wormhole;
