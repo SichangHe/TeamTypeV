@@ -742,3 +742,32 @@ fn reopened_session_applies_stale_daemon_edit_unless_old_messages_are_drained() 
     // With the barrier the stale message is read before the new session exists and dropped.
     assert_eq!(new_server.current_content(), "xa");
 }
+
+// Property behind the disk-coherence proof (daemon_proof/daemon_proof/disk_full.rs, `axiom_merge_clean`):
+// when the shared text still equals the last bytes seen on disk, an outside change is merged to
+// exactly the outside text, so shared text and disk agree again without a write.
+#[test]
+fn merging_an_outside_change_into_unchanged_shared_text_gives_the_outside_text() {
+    let mut rng = StdRng::seed_from_u64(7);
+    let alphabet = ["x", "y", "z", "\n", "é", "🥕", " "];
+    let random = |rng: &mut StdRng| -> String {
+        let n = rng.random_range(0..12);
+        repeat_with(|| alphabet[rng.random_range(0..alphabet.len())])
+            .take(n)
+            .collect()
+    };
+    let dir = tempdir().unwrap();
+    let mut actor = peer_actor(&dir, true);
+    let path = RelativePath::new("m");
+    for _ in 0..400 {
+        let (base, outside) = (random(&mut rng), random(&mut rng));
+        actor.crdt_doc.update_text(&base, &path);
+        actor.disk_content.insert(path.clone(), base.clone().into_bytes());
+        actor.merge_disk_content(&path, outside.clone().into_bytes());
+        assert_eq!(
+            actor.current_file_content(&path),
+            Some(&Content::String(outside.clone())),
+            "base {base:?} outside {outside:?}"
+        );
+    }
+}
