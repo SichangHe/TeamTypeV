@@ -456,7 +456,7 @@ mod tests {
         let mut two_ops = ed_delta_single((0, 0), (0, 0), "X");
         two_ops.0.extend(ed_delta_single((0, 5), (0, 5), "Y").0);
         let bad = EditorProtocolMessageFromEditor::Edit {
-            uri: uri.clone(),
+            uri,
             revision: 0,
             delta: two_ops,
         };
@@ -467,7 +467,8 @@ mod tests {
             file_path: RelativePath::new("file"),
             delta: insert(0, "!"),
         };
-        assert!(connection.message_from_inside(&from_peer).is_empty());
+        let forwarded = connection.message_from_inside(&from_peer);
+        assert_eq!(forwarded.len(), 0, "{forwarded:?}");
         // After the editor opens the file again, the daemon resynchronizes it.
         connection.message_from_editor(true, &open).expect("reopen");
         assert!(connection.owns(&RelativePath::new("file")));
