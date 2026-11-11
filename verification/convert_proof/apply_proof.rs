@@ -367,14 +367,16 @@ impl TextDelta {
 }
 
 // ======================= Ropey line model (concrete definition) =======================
-// ASSUMED (see CONTRACTS.md): Ropey 1.6.1 splits text into lines exactly as defined here.
+// ASSUMED: Ropey 1.6.1 (default-features = false) splits text into lines exactly as defined here;
+// tested by ../positions/ropey_axioms for the positions model.
 // A line starts at 0 and just after every line break, where line breaks are
-// LF, VT, FF, CR, NEL (U+85), LS (U+2028), PS (U+2029), except that CR followed by LF is one break.
+// LF only: crates/teamtype/Cargo.toml builds ropey with default-features = false (see 23c37e2),
+// so CR, VT, FF, NEL, LS and PS are ordinary characters.
 // Characters are Unicode scalar values (Rust `char`).
 
 pub open spec fn brk(c: char) -> bool {
     let u = c as u32;
-    u == 0xA || u == 0xB || u == 0xC || u == 0xD || u == 0x85 || u == 0x2028 || u == 0x2029
+    u == 0xA
 }
 
 // p is the first character offset of some line (0 <= p <= s.len())

@@ -119,6 +119,9 @@ pub struct RevisionedTextDelta { pub revision: usize, pub delta: TextDelta }
 pub fn try_from_rev_ed_delta(r: RevisionedEditorTextDelta, content: &str) -> (o: Result<RevisionedTextDelta>)
 { unimplemented!() }
 
+#[verifier::external_body]
+pub fn chars_count(s: &String) -> (r: usize) ensures r == s@.len() { unimplemented!() }
+
 // `Vec::drain(..n)` collected
 #[verifier::external_body]
 pub fn drain_front(v: &mut Vec<OperationSeq>, n: usize) -> (r: Vec<OperationSeq>)
@@ -176,23 +179,32 @@ impl OTServer {
     pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> (r: Result<RevisionedEditorTextDelta>)
         requires old(self).wf(), old(self).daemon_revision < usize::MAX,
         ensures
-            // state advances even on Err
-            final(self).daemon_revision == old(self).daemon_revision + 1,
             final(self).editor_revision == old(self).editor_revision,
-            ops(final(self).editor_queue@) == ops(old(self).editor_queue@).push(delta_op(*delta)),
-            r is Ok ==> final(self).wf() && r->Ok_0.revision == old(self).editor_revision
+            // a rejected change leaves the state untouched
+            r is Err ==> final(self).daemon_revision == old(self).daemon_revision
+                && ops(final(self).editor_queue@) == ops(old(self).editor_queue@)
+                && final(self).current_content@ == old(self).current_content@,
+            r is Ok ==> final(self).daemon_revision == old(self).daemon_revision + 1
+                && ops(final(self).editor_queue@) == ops(old(self).editor_queue@).push(delta_op(*delta))
+                && final(self).wf() && r->Ok_0.revision == old(self).editor_revision
                 && final(self).current_content@ == ap(old(self).current_content@, delta_op(*delta)),
     {
-        // We can apply the change immediately.
-        self.operations.push(op_from_delta(delta.clone()));
-        self.editor_queue.push(op_from_delta(delta.clone()));
-        self.daemon_revision += 1;
+        // Validate before mutating, so that a rejected change leaves the state untouched.
+        let op_seq: OperationSeq = op_from_delta(delta.clone());
+        if op_seq.base_len() > chars_count(&self.current_content) {
+            return Err(Error); // bail!
+        }
         // Use "previous" content to transform into editor text delta.
         let editor_delta = match try_from_delta(delta.clone(), self.current_content.as_str()) {
             Ok(x) => x,
             Err(e) => return Err(e),
         };
-        self.current_content = force_apply(self.current_content.as_str(), op_from_delta(delta.clone()));
+
+        // We can apply the change immediately.
+        self.operations.push(op_seq.clone());
+        self.editor_queue.push(op_seq.clone());
+        self.daemon_revision += 1;
+        self.current_content = force_apply(self.current_content.as_str(), op_seq);
         proof {
             assert(ops(self.editor_queue@) =~= ops(old(self).editor_queue@).push(delta_op(*delta)));
             lemma_fold_snoc(self.last_confirmed_editor_content@, ops(old(self).editor_queue@), delta_op(*delta));
