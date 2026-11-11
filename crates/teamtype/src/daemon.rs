@@ -1705,7 +1705,7 @@ mod tests {
 
         #[test]
         fn hostile_peer_paths_do_not_crash_rescan_or_escape() {
-                .join(format!("tt-escape-{}", std::process::id()));
+            let dir = setup_filesystem_for_testing();
             let mut actor = DocumentActor::setup_for_testing(&dir);
             for key in [
                 "../escape-by-dotdot",
