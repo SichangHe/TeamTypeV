@@ -1713,6 +1713,45 @@ mod tests {
             actor.assert_file_content(&RelativePath::new("sub/file3"), "content3");
         }
 
+        fn restart(dir: &TempDir) -> DocumentActor {
+            let (_tx, rx) = mpsc::channel(1);
+            let (ping, _ping_rx) = broadcast::channel::<()>(1);
+            let (eph, _eph_rx) = broadcast::channel::<EphemeralMessage>(100);
+            DocumentActor::new(
+                rx,
+                ping,
+                eph,
+                AppConfig {
+                    base_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                false,
+                true,
+                true,
+            )
+        }
+
+        /// A crash after a peer's edit was saved in the document but before it reached the file
+        /// (for example while Git ran and the write was deferred) must not revert that edit.
+        #[test]
+        fn restart_keeps_saved_edits_not_yet_on_disk() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = restart(&dir);
+            let file1 = RelativePath::new("file1");
+            let new_file = RelativePath::new("peer-new");
+            // The peer's edits arrive and are persisted, but the daemon dies before writing.
+            let _ = actor.crdt_doc.update_text("content1 plus peer", &file1);
+            actor
+                .crdt_doc
+                .set_file(document::Content::String("fresh".into()), &new_file);
+            actor.persist().unwrap();
+            drop(actor);
+
+            let actor = restart(&dir);
+            actor.assert_file_content(&file1, "content1 plus peer");
+            actor.assert_file_content(&new_file, "fresh");
+        }
+
         #[test]
         fn hostile_peer_paths_do_not_crash_rescan_or_escape() {
             let dir = setup_filesystem_for_testing();

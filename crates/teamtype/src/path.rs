@@ -98,6 +98,14 @@ impl RelativePath {
         if relative_path.iter().count() == 0 {
             bail!("base_dir was equal to path when computing relative path");
         }
+        // `/base/../x` strips to `../x`, which would become a shared document key.
+        if relative_path
+            .components()
+            .any(|component| !matches!(component, path::Component::Normal(_)))
+        {
+            bail!("The path {path} contains `.` or `..` components");
+        }
+
         Ok(Self(relative_path))
     }
 
