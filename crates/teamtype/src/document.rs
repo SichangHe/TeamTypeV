@@ -770,6 +770,91 @@ mod tests {
         }
     }
 
+    /// Delivery order and batching must not matter: the same set of changes, applied as one
+    /// batch, one by one in a random order (Automerge queues changes whose dependencies are
+    /// missing), or in random-sized batches, gives the same heads and the same file content,
+    /// and the incrementally maintained cache equals what a reload reads from the CRDT.
+    /// This exercises Automerge's convergence, which the verification track
+    /// (`teamtype_probe/automerge`) models only abstractly.
+    #[test]
+    fn fuzz_batching_and_order_do_not_change_result() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
+        let files = [RelativePath::new("a"), RelativePath::new("b")];
+        for seed in 0..300u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut docs: Vec<Document> =
+                std::iter::repeat_with(Document::default).take(3).collect();
+            for _ in 0..30 {
+                let p = rng.random_range(0..3);
+                let file = &files[rng.random_range(0..2)];
+                let text = ["", "left", "xx", "right"][rng.random_range(0..4)];
+                match rng.random_range(0..6) {
+                    0 => docs[p].remove_file(file),
+                    1 => docs[p].set_file(Content::String(text.into()), file),
+                    2 => {
+                        let q = rng.random_range(0..3);
+                        if p != q {
+                            let (mut left, mut right) = (
+                                Document::load(&docs[q].save()),
+                                Document::load(&docs[p].save()),
+                            );
+                            let _ = sync(&mut left, &mut right);
+                            docs[p] = right;
+                            docs[q] = left;
+                        }
+                    }
+                    _ => {
+                        let _ = docs[p].update_text(text, file);
+                    }
+                }
+            }
+            let mut all = Document::default();
+            for d in &mut docs {
+                let _ = sync(d, &mut all);
+            }
+            let changes: Vec<_> = all.doc.get_changes(&[]).into_iter().collect();
+            let reference_heads = all.get_heads();
+            let mut variants: Vec<Document> = vec![];
+            // One batch.
+            let mut batch = Document::default();
+            batch.doc.apply_changes(changes.clone()).unwrap();
+            variants.push(batch);
+            // One by one, shuffled.
+            let mut shuffled = Document::default();
+            let mut order = changes.clone();
+            order.shuffle(&mut rng);
+            for c in order {
+                shuffled.doc.apply_changes(vec![c]).unwrap();
+            }
+            variants.push(shuffled);
+            // Random-sized batches of a shuffled order.
+            let mut chunked = Document::default();
+            let mut order = changes.clone();
+            order.shuffle(&mut rng);
+            while !order.is_empty() {
+                let n = rng.random_range(1..=order.len());
+                let rest = order.split_off(n);
+                chunked
+                    .doc
+                    .apply_changes(std::mem::replace(&mut order, rest))
+                    .unwrap();
+            }
+            variants.push(chunked);
+            for (i, v) in variants.iter_mut().enumerate() {
+                assert_eq!(v.get_heads(), reference_heads, "seed {seed} variant {i}");
+                let reloaded = Document::load(&v.save());
+                let want = Document::load(&all.save());
+                for f in &files {
+                    assert_eq!(
+                        reloaded.current_file_content(f),
+                        want.current_file_content(f),
+                        "seed {seed} variant {i} file {f}"
+                    );
+                }
+            }
+        }
+    }
+
     /// This set of tests has some documentation character to show to ourselves,
     /// what happens under the hood when sync'ing.
     mod automerge_interna {
