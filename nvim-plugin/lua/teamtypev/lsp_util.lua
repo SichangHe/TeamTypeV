@@ -7,166 +7,153 @@ local M = {}
 -- These functions are taken from the Neovim source code:
 -- https://github.com/neovim/neovim/blob/master/runtime/lua/vim/lsp/util.lua
 
---- Gets the zero-indexed lines from the given buffer.
----
----@param bufnr integer bufnr to get the lines from
----@param rows integer[] zero-indexed line numbers
----@return table<integer, string>|string a table mapping rows to lines
-local function get_lines(bufnr, rows)
-    rows = type(rows) == "table" and rows or { rows }
+local function nchars(s)
+    return vim.fn.strchars(s)
+end
 
-    local lines = {}
-    for _, row in ipairs(rows) do
-        lines[row] = (vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false) or { "" })[1]
+-- Byte index (0-based) of the 0-based character index `ci` in `s`. Requires ci <= nchars(s).
+-- Characters are Unicode scalar values, as the daemon counts them.
+local function byte_index(s, ci)
+    local n, i = 0, 1
+    while n < ci do
+        i = i + 1
+        while i <= #s and s:byte(i) >= 0x80 and s:byte(i) < 0xC0 do
+            i = i + 1
+        end
+        n = n + 1
     end
-    return lines
+    return i - 1
 end
 
---- Gets the zero-indexed line from the given buffer.
---- Works on unloaded buffers by reading the file using libuv to bypass buf reading events.
---- Falls back to loading the buffer and nvim_buf_get_lines for buffers with non-file URI.
+--- Applies a list of text edits (all positions refer to the text before any edit), as the daemon sends them.
 ---
----@param bufnr integer
----@param row integer zero-indexed line number
----@return string the line at row in filename
-local function get_line(bufnr, row)
-    return get_lines(bufnr, { row })[row]
-end
-
---- Applies a list of text edits to a buffer.
+--- Positions are (line, character) in "logical" text: the buffer lines joined by "\n", plus one more
+--- empty line if 'eol' is on (see docs/decisions/02-working-with-vims-eol-behavior.md). `character` counts
+--- Unicode scalar values.
+---
+--- All edits are validated first. If they are not all valid, or applying throws, the buffer is left as it was
+--- and `false, reason` is returned. Otherwise returns `true`.
+---
+--- Afterwards the buffer is in canonical form: 'eol' is on iff the logical text has at least two logical
+--- lines and ends with "\n". The logical text is exactly what the edits describe.
 ---@param text_edits table list of `TextEdit` objects
 ---@param bufnr integer Buffer id
----@param offset_encoding string utf-8|utf-16|utf-32
----@see https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textEdit
+---@param offset_encoding string must be "utf-32"
+---@return boolean ok
+---@return string? reason
 function M.apply_text_edits(text_edits, bufnr, offset_encoding)
     vim.validate({
         text_edits = { text_edits, "t", false },
         bufnr = { bufnr, "number", false },
         offset_encoding = { offset_encoding, "string", false },
     })
+    if offset_encoding ~= "utf-32" then
+        return false, "only utf-32 offsets are supported"
+    end
     if not next(text_edits) then
-        return
+        return true
+    end
+    if not vim.api.nvim_buf_is_loaded(bufnr) then
+        return false, "buffer is not loaded"
+    end
+    if not vim.bo[bufnr].modifiable then
+        return false, "buffer is not modifiable"
     end
 
-    vim.bo[bufnr].buflisted = true
+    local orig_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, true)
+    local orig_eol = vim.bo[bufnr].eol
+    local logical = vim.list_extend({}, orig_lines)
+    if orig_eol then
+        table.insert(logical, "")
+    end
 
-    -- Fix reversed range and indexing each text_edits
-    local index = 0
-    text_edits = vim.tbl_map(function(text_edit)
-        index = index + 1
-        text_edit._index = index
+    -- Validate, normalize reversed ranges, and index.
+    local edits = {}
+    for index, text_edit in ipairs(text_edits) do
+        local s, e = text_edit.range.start, text_edit.range["end"]
+        if s.line > e.line or (s.line == e.line and s.character > e.character) then
+            s, e = e, s
+        end
+        for _, p in ipairs({ s, e }) do
+            local line = logical[p.line + 1]
+            if p.line < 0 or line == nil or p.character < 0 or p.character > nchars(line) then
+                return false, "position out of range"
+            end
+        end
+        table.insert(edits, {
+            index = index,
+            start_line = s.line,
+            start_char = s.character,
+            end_line = e.line,
+            end_char = e.character,
+            text = (string.gsub(text_edit.newText, "\r\n?", "\n")),
+        })
+    end
 
-        if
-            text_edit.range.start.line > text_edit.range["end"].line
-            or text_edit.range.start.line == text_edit.range["end"].line
-                and text_edit.range.start.character > text_edit.range["end"].character
-        then
-            local start = text_edit.range.start
-            text_edit.range.start = text_edit.range["end"]
-            text_edit.range["end"] = start
+    -- Order by position (ascending) and check that edits do not overlap.
+    table.sort(edits, function(a, b)
+        if a.start_line ~= b.start_line then
+            return a.start_line < b.start_line
         end
-        return text_edit
-    end, text_edits)
+        if a.start_char ~= b.start_char then
+            return a.start_char < b.start_char
+        end
+        if a.end_line ~= b.end_line then
+            return a.end_line < b.end_line
+        end
+        if a.end_char ~= b.end_char then
+            return a.end_char < b.end_char
+        end
+        return a.index < b.index
+    end)
+    for i = 2, #edits do
+        local prev, cur = edits[i - 1], edits[i]
+        if prev.end_line > cur.start_line or (prev.end_line == cur.start_line and prev.end_char > cur.start_char) then
+            return false, "overlapping edits"
+        end
+    end
 
-    -- Sort text_edits
-    table.sort(text_edits, function(a, b)
-        if a.range.start.line ~= b.range.start.line then
-            return a.range.start.line > b.range.start.line
+    local function restore()
+        vim.bo[bufnr].eol = orig_eol
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, orig_lines)
+    end
+
+    local ok, err = pcall(function()
+        -- Make the implicit final newline explicit, so that every logical position is a buffer position.
+        -- (First clear 'eol', then add the line: the last change notification then sees consistent state.)
+        if orig_eol then
+            vim.bo[bufnr].eol = false
+            vim.api.nvim_buf_set_lines(bufnr, #orig_lines, #orig_lines, true, { "" })
         end
-        if a.range.start.character ~= b.range.start.character then
-            return a.range.start.character > b.range.start.character
+
+        -- Apply from the end, so earlier positions stay valid.
+        for i = #edits, 1, -1 do
+            local e = edits[i]
+            local start_text = vim.api.nvim_buf_get_lines(bufnr, e.start_line, e.start_line + 1, true)[1]
+            local end_text = vim.api.nvim_buf_get_lines(bufnr, e.end_line, e.end_line + 1, true)[1]
+            vim.api.nvim_buf_set_text(
+                bufnr,
+                e.start_line,
+                byte_index(start_text, e.start_char),
+                e.end_line,
+                byte_index(end_text, e.end_char),
+                vim.split(e.text, "\n", { plain = true })
+            )
         end
-        if a._index ~= b._index then
-            return a._index > b._index
+
+        -- Back to canonical form: a final empty line (of at least two) becomes the implicit newline.
+        -- (First set 'eol', then remove the line, for the same reason as above.)
+        local n = vim.api.nvim_buf_line_count(bufnr)
+        if n >= 2 and vim.api.nvim_buf_get_lines(bufnr, n - 1, n, true)[1] == "" then
+            vim.bo[bufnr].eol = true
+            vim.api.nvim_buf_set_lines(bufnr, n - 1, n, true, {})
         end
     end)
-
-    -- save and restore local marks since they get deleted by nvim_buf_set_lines
-    local marks = {}
-    for _, m in pairs(vim.fn.getmarklist(bufnr)) do
-        if m.mark:match("^'[a-z]$") then
-            marks[m.mark:sub(2, 2)] = { m.pos[2], m.pos[3] - 1 } -- api-indexed
-        end
+    if not ok then
+        pcall(restore)
+        return false, tostring(err)
     end
-
-    -- Apply text edits.
-    local disable_eol = false
-    for _, text_edit in ipairs(text_edits) do
-        -- Normalize line ending
-        text_edit.newText, _ = string.gsub(text_edit.newText, "\r\n?", "\n")
-
-        -- Convert from LSP style ranges to Neovim style ranges.
-        local e = {
-            start_row = text_edit.range.start.line,
-            start_col = vim.lsp.util._get_line_byte_from_position(bufnr, text_edit.range.start, offset_encoding),
-            end_row = text_edit.range["end"].line,
-            end_col = vim.lsp.util._get_line_byte_from_position(bufnr, text_edit.range["end"], offset_encoding),
-            text = vim.split(text_edit.newText, "\n", { plain = true }),
-        }
-
-        local max = vim.api.nvim_buf_line_count(bufnr)
-        -- If the whole edit is after the lines in the buffer we can simply add the new text to the end
-        -- of the buffer.
-        if max <= e.start_row then
-            -- If the replacement text ends with a newline, drop it - we're happy with keeping the implicit
-            -- newline at the end of the buffer (which we're assuming to be there, because we're getting
-            -- an insert *after* the visible lines.
-            -- TODO: Is this always correct?
-            if #e.text > 1 and e.text[#e.text] == "" then
-                table.remove(e.text)
-            end
-            vim.api.nvim_buf_set_lines(bufnr, max, max, false, e.text)
-        else
-            local last_line_len = #(get_line(bufnr, math.min(e.end_row, max - 1)) or "")
-            -- Some LSP servers may return +1 range of the buffer content but nvim_buf_set_text can't
-            -- accept it so we should fix it here.
-            if max <= e.end_row then
-                e.end_row = max - 1
-                e.end_col = last_line_len
-                disable_eol = true
-                -- "a" + 'eol' + replace((0,1), (1,0), "") => "a" + 'noeol'
-                -- "a" + 'eol' + replace((0,1), (1,0), "\n\n") => "a\n\n" + 'noeol' (I guess?)
-            else
-                -- If the replacement is over the end of a line (i.e. e.end_col is out of bounds and the
-                -- replacement text ends with a newline We can likely assume that the replacement is assumed
-                -- to be meant to replace the newline with another newline and we need to make sure this
-                -- doesn't add an extra empty line. E.g. when the last line to be replaced contains a '\r'
-                -- in the file some servers (clangd on windows) will include that character in the line
-                -- while nvim_buf_set_text doesn't count it as part of the line.
-                if
-                    e.end_col > last_line_len
-                    and #text_edit.newText > 0
-                    and string.sub(text_edit.newText, -1) == "\n"
-                then
-                    table.remove(e.text, #e.text)
-                end
-            end
-            -- Make sure we don't go out of bounds for e.end_col
-            e.end_col = math.min(last_line_len, e.end_col)
-
-            vim.api.nvim_buf_set_text(bufnr, e.start_row, e.start_col, e.end_row, e.end_col, e.text)
-        end
-    end
-
-    local max = vim.api.nvim_buf_line_count(bufnr)
-
-    -- no need to restore marks that still exist
-    for _, m in pairs(vim.fn.getmarklist(bufnr)) do
-        marks[m.mark:sub(2, 2)] = nil
-    end
-    -- restore marks
-    for mark, pos in pairs(marks) do
-        if pos then
-            -- make sure we don't go out of bounds
-            pos[1] = math.min(pos[1], max)
-            pos[2] = math.min(pos[2], #(get_line(bufnr, pos[1] - 1) or ""))
-            vim.api.nvim_buf_set_mark(bufnr or 0, mark, pos[1], pos[2], {})
-        end
-    end
-
-    if disable_eol then
-        vim.bo.eol = false
-    end
+    return true
 end
 
 return M

@@ -62,24 +62,46 @@ function M.status()
     return result
 end
 
+-- The state of the file shown in `bufnr`, if `uri` names that buffer and the file is synced (the daemon
+-- acknowledged `open` and the buffer was not closed since). Never creates buffers.
+local function find_file_state(client, uri)
+    local ok, fname = pcall(vim.uri_to_fname, uri)
+    for bufnr, state in pairs(client.files) do
+        if state.uri == uri or (ok and vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == fname) then
+            return bufnr, state
+        end
+    end
+end
+
 -- Take an operation from the daemon and apply it to the editor.
+--
+-- Protocol: `daemon_revision` counts the daemon operations applied, `editor_revision` our own operations sent.
+-- An edit is applied iff its revision equals `editor_revision`; otherwise the daemon will send a transformed one.
+-- An edit that cannot be applied is answered with an empty delta (counted as our own operation), so that
+-- the daemon's idea of what we applied stays right.
 local function process_operation_for_editor(client, method, parameters)
     if method == "edit" then
-        local uri = parameters.uri
-        -- TODO: Determine the proper filepath (relative to project dir).
-        local filepath = vim.uri_to_fname(uri)
-        local delta = parameters.delta
-        local the_editor_revision = parameters.revision
+        -- Edits for files without synced state (not yet acknowledged, or closed) belong to no live session: drop them.
+        local bufnr, state = find_file_state(client, parameters.uri)
+        if state == nil then
+            debug("Ignoring edit for a file that is not synced: " .. tostring(parameters.uri))
+            return
+        end
 
         -- Check if operation is up-to-date to our content.
         -- If it's not, ignore it! The daemon will send a transformed one later.
-        if the_editor_revision == client.files[filepath].editor_revision then
-            -- Find correct buffer to apply edits to.
-            local bufnr = vim.uri_to_bufnr(uri)
-
-            changetracker.apply_delta(bufnr, delta)
-
-            client.files[filepath].daemon_revision = client.files[filepath].daemon_revision + 1
+        if parameters.revision == state.editor_revision then
+            local applied, reason = changetracker.apply_delta(bufnr, parameters.delta)
+            if applied then
+                state.daemon_revision = state.daemon_revision + 1
+            else
+                vim.api.nvim_err_writeln("[teamtypev] Could not apply an edit from the daemon: " .. tostring(reason))
+                state.editor_revision = state.editor_revision + 1
+                client.connection:send_request(
+                    "edit",
+                    { uri = state.uri, delta = {}, revision = state.daemon_revision }
+                )
+            end
         end
     elseif method == "cursor" then
         cursor.set_cursor(parameters.uri, parameters.userid, parameters.name, parameters.ranges)
@@ -91,16 +113,15 @@ end
 -- Disabling 'autoread' prevents Neovim from reloading the file when it changes externally,
 -- but only in the case where the buffer hasn't been modified in Neovim already.
 -- For the conflicting case, we prevent a popup dialog by setting the FileChangedShell autocommand below.
-local function ensure_autoread_is_off()
-    if vim.o.autoread then
-        vim.bo.autoread = false
+local function ensure_autoread_is_off(buf)
+    if vim.bo[buf].autoread then
+        vim.bo[buf].autoread = false
     end
 end
 
 -- In teamtypev-enabled buffers, "writing" is no longer a concept. We also want to avoid error messages
 -- when the file has changed on disk, so make all writing operations a no-op.
-local function disable_writing()
-    local buf = vim.api.nvim_get_current_buf()
+local function disable_writing(buf)
     local autocmd_arg = {
         buffer = buf,
         callback = function()
@@ -115,20 +136,24 @@ local function disable_writing()
     vim.api.nvim_create_autocmd("FileAppendCmd", autocmd_arg)
 end
 
-local function track_edits(client, filename, uri, initial_lines)
-    client.files[filename] = {
+local function track_edits(client, bufnr, uri, initial_lines)
+    local state = {
+        uri = uri,
         -- Number of operations the daemon has made.
         daemon_revision = 0,
         -- Number of operations we have made.
         editor_revision = 0,
     }
-
-    local bufnr = vim.uri_to_bufnr(uri)
+    client.files[bufnr] = state
 
     changetracker.track_changes(bufnr, initial_lines, function(delta)
-        client.files[filename].editor_revision = client.files[filename].editor_revision + 1
+        if client.files[bufnr] ~= state then
+            -- The file was closed (and maybe reopened) since: not part of this session anymore.
+            return
+        end
+        state.editor_revision = state.editor_revision + 1
 
-        local params = { uri = uri, delta = delta, revision = client.files[filename].daemon_revision }
+        local params = { uri = uri, delta = delta, revision = state.daemon_revision }
 
         client.connection:send_request("edit", params)
     end)
@@ -218,6 +243,10 @@ end
 
 local function activate_config_for_buffer(config_name, buf_nr, root_dir)
     local client = find_or_create_client(config_name, root_dir)
+    if vim.tbl_contains(client.buffers, buf_nr) then
+        -- Already tracked (e.g. the file was re-read with `:edit!`): tracking it twice would send every edit twice.
+        return
+    end
     table.insert(client.buffers, buf_nr)
 
     local filename = vim.api.nvim_buf_get_name(buf_nr)
@@ -226,7 +255,7 @@ local function activate_config_for_buffer(config_name, buf_nr, root_dir)
     -- Neovim enables eol for an empty file, but we do use this option values
     -- assuming there's a trailing newline iff eol is true.
     if vim.fn.getfsize(vim.api.nvim_buf_get_name(buf_nr)) == 0 then
-        vim.bo.eol = false
+        vim.bo[buf_nr].eol = false
     end
 
     local lines = changetracker.get_all_lines_respecting_eol(buf_nr)
@@ -241,10 +270,14 @@ local function activate_config_for_buffer(config_name, buf_nr, root_dir)
 
     client.connection:send_request("daemonWriter", { check = true }, function()
         client.connection:send_request("open", { uri = uri, content = content, daemonWrites = true }, function()
+            -- The buffer may have been closed while waiting for the daemon.
+            if not vim.api.nvim_buf_is_loaded(buf_nr) or not vim.tbl_contains(client.buffers, buf_nr) then
+                return
+            end
             debug("Tracking Edits")
-            ensure_autoread_is_off()
-            disable_writing()
-            track_edits(client, filename, uri, lines)
+            ensure_autoread_is_off(buf_nr)
+            disable_writing(buf_nr)
+            track_edits(client, buf_nr, uri, lines)
         end)
     end)
 end
@@ -299,7 +332,7 @@ local function on_buffer_close()
     for _, client in ipairs(clients) do
         for j, buffer in ipairs(client.buffers) do
             if buffer == buf_nr then
-                client.files[closed_file] = nil
+                client.files[buf_nr] = nil
 
                 local uri = vim.uri_from_bufnr(buf_nr)
                 client.connection:send_notification("close", { uri = uri })
@@ -341,5 +374,11 @@ local function activate_plugin()
 end
 
 activate_plugin()
+
+-- For tests only.
+M._internal = {
+    process_operation_for_editor = process_operation_for_editor,
+    track_edits = track_edits,
+}
 
 return M

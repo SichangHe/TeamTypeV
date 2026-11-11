@@ -31,3 +31,20 @@ jobs:
         uses: lunarmodules/luacheck@v1
         with:
           args: --config nvim-plugin/.luacheckrc nvim-plugin
+
+  test_lua:
+    name: Test editor protocol logic (Neovim ${{ matrix.nvim-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nvim-version: [v0.9.5, v0.10.4, v0.11.7, v0.12.2]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.nvim-version }}
+      - name: Run headless tests
+        working-directory: nvim-plugin
+        run: nvim --headless -u NONE -l test/run.lua

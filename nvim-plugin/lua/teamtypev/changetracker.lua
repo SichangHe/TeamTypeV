@@ -165,6 +165,84 @@ local function fix_diff(diff, prev_lines, curr_lines)
     return diff
 end
 
+-- Byte index (0-based) of the 0-based character (Unicode scalar value) index `ci` in `s`, or nil if
+-- `ci` is past the end of `s`.
+local function byte_index(s, ci)
+    if ci < 0 or ci > vim.fn.strchars(s) then
+        return nil
+    end
+    local n, i = 0, 1
+    while n < ci do
+        i = i + 1
+        while i <= #s and s:byte(i) >= 0x80 and s:byte(i) < 0xC0 do
+            i = i + 1
+        end
+        n = n + 1
+    end
+    return i - 1
+end
+
+-- The text of `lines` with the range of `diff` replaced by its text, exactly as the daemon would
+-- apply it (positions count characters, lines end at "\n"). Returns nil if the range is invalid.
+local function apply_diff_to_lines(lines, diff)
+    local s, e = diff.range["start"], diff.range["end"]
+    if s.line < 0 or e.line >= #lines or s.line > e.line or (s.line == e.line and s.character > e.character) then
+        return nil
+    end
+    local sb, eb = byte_index(lines[s.line + 1], s.character), byte_index(lines[e.line + 1], e.character)
+    if sb == nil or eb == nil then
+        return nil
+    end
+    local before = {}
+    for i = 1, s.line do
+        before[#before + 1] = lines[i]
+    end
+    before[#before + 1] = lines[s.line + 1]:sub(1, sb)
+    local after = { lines[e.line + 1]:sub(eb + 1) }
+    for i = e.line + 2, #lines do
+        after[#after + 1] = lines[i]
+    end
+    return table.concat(before, "\n") .. diff.text .. table.concat(after, "\n")
+end
+
+-- A diff that turns `prev_lines` into `curr_lines` and does not depend on Neovim's change hints:
+-- replace everything between the common prefix and the common suffix.
+local function full_diff(prev_lines, curr_lines)
+    local prev_text, curr_text = table.concat(prev_lines, "\n"), table.concat(curr_lines, "\n")
+    local plen, clen = #prev_text, #curr_text
+    local p = 0
+    while p < plen and p < clen and prev_text:byte(p + 1) == curr_text:byte(p + 1) do
+        p = p + 1
+    end
+    local q = 0
+    while q < plen - p and q < clen - p and prev_text:byte(plen - q) == curr_text:byte(clen - q) do
+        q = q + 1
+    end
+    -- Do not split a multibyte character.
+    local function is_cont(b)
+        return b ~= nil and b >= 0x80 and b < 0xC0
+    end
+    while p > 0 and (is_cont(prev_text:byte(p + 1)) or is_cont(curr_text:byte(p + 1))) do
+        p = p - 1
+    end
+    while q > 0 and (is_cont(prev_text:byte(plen - q + 1)) or is_cont(curr_text:byte(clen - q + 1))) do
+        q = q - 1
+    end
+    local function position(lines, byte_offset)
+        local rest = byte_offset
+        for i, line in ipairs(lines) do
+            if rest <= #line then
+                return { line = i - 1, character = vim.fn.strchars(line:sub(1, rest)) }
+            end
+            rest = rest - #line - 1
+        end
+    end
+    return {
+        range = { start = position(prev_lines, p), ["end"] = position(prev_lines, plen - q) },
+        text = curr_text:sub(p + 1, clen - q),
+    }
+end
+
 -- Subscribes the callback to changes for a given buffer id and reports with a delta.
 --
 -- The delta can be expected to be in the format as specified in the daemon-editor protocol.
@@ -187,44 +265,39 @@ function M.track_changes(buffer, initial_lines, callback)
             return
         end
 
-        -- This is a special case for handling a situation where deleting down to a single empty buffer line, but
-        -- 'eol' is on. In this case, the actual buffer content will be "\n", but that's not always communicated
-        -- correctly.
-        --
-        -- Case 1: Opening "\n\n" and pressing ggdd
-        --    prev = 3*""
-        --    cur = 2*""
-        --    fl = 0, ll = 1, nll = 0
-        -- Case 2: Opening "\n\n" and pressing ggdG
-        --    prev = 3*""
-        --    cur = 2*""
-        --    fl = 0, ll = 2, nll = 0
-        --    => needs to be fixed to ll = 1 OR nll = 1
-        -- Case 3: Opening "a\n" and pressing dd
-        --    prev = "a", ""
-        --    cur = 2*""
-        --    fl = 0, ll = 1, nll = 0
-        --    => needs to be fixed to nll = 1
-        --
-        -- Resulting content of all three cases should be the same: \n
-        if
-            vim.bo[buffer].eol
-            and #curr_lines == 2
-            and curr_lines[1] == ""
-            and new_last_line == 0
-            and (last_line >= 2 or #prev_lines_copy == 2)
-        then
-            new_last_line = 1
+        -- Neovim's change hints are not always consistent with the buffer contents (e.g. when deleting down to a
+        -- single empty line), and the diff computed from them is sometimes wrong. The line counts must match:
+        local hints_consistent = (new_last_line - first_line) - (last_line - first_line)
+            == #curr_lines - #prev_lines_copy
+
+        local diff
+        if hints_consistent then
+            -- When the line ranges are larger then the actual differences, compute_diff will compute
+            -- unnecessarily large diffs. We can fix this by hand.
+            first_line, last_line, new_last_line =
+                shrink_to_modified_line_range(prev_lines_copy, curr_lines, first_line, last_line, new_last_line)
+
+            local ok, computed = pcall(
+                sync.compute_diff,
+                prev_lines_copy,
+                curr_lines,
+                first_line,
+                last_line,
+                new_last_line,
+                "utf-32",
+                "\n"
+            )
+            if ok and computed then
+                diff = fix_diff(computed, prev_lines_copy, curr_lines)
+            end
         end
 
-        -- When the line ranges are larger then the actual differences, compute_diff will compute
-        -- unnecessarily large diffs. We can fix this by hand.
-        first_line, last_line, new_last_line =
-            shrink_to_modified_line_range(prev_lines_copy, curr_lines, first_line, last_line, new_last_line)
-
-        local diff =
-            sync.compute_diff(prev_lines_copy, curr_lines, first_line, last_line, new_last_line, "utf-32", "\n")
-        diff = fix_diff(diff, prev_lines_copy, curr_lines)
+        -- The daemon applies our delta to what we sent before. The delta must turn that into the current buffer
+        -- content. If it does not (or is not even a valid range), fall back to a diff that is right by construction;
+        -- a wrong delta would make this editor and the daemon silently diverge.
+        if diff == nil or apply_diff_to_lines(prev_lines_copy, diff) ~= table.concat(curr_lines, "\n") then
+            diff = full_diff(prev_lines_copy, curr_lines)
+        end
 
         if is_empty(diff) then
             return
@@ -260,12 +333,19 @@ function M.track_changes(buffer, initial_lines, callback)
     line_change(0, #prev_lines, #curr_lines)
 end
 
+-- Apply a delta from the daemon to the buffer without reporting it back as an edit.
+-- Returns true, or false and a reason if the delta could not be applied (the buffer is then unchanged).
 function M.apply_delta(buffer, delta)
     local text_edits = teamtypev_delta_to_lsp_text_edits(delta)
 
     ignore_edits = true
-    lsp_util.apply_text_edits(text_edits, buffer, "utf-32")
+    -- pcall, so that an error cannot leave `ignore_edits` set, which would silence all further edits.
+    local ok, applied, reason = pcall(lsp_util.apply_text_edits, text_edits, buffer, "utf-32")
     ignore_edits = false
+    if not ok then
+        return false, tostring(applied)
+    end
+    return applied, reason
 end
 
 return M

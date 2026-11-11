@@ -31,6 +31,20 @@
 (defvar-local teamtypev--shared nil
   "Whether native writes are forbidden for this buffer.")
 
+(defvar-local teamtypev--synced nil
+  "Non-nil once the daemon acknowledged `open' for this buffer in the session.
+Edits from the daemon are applied only then: before, or after a close,
+they belong to another session.")
+
+(defvar-local teamtypev--session nil
+  "A fresh object per `open' request.
+It tells the answer to an old request from the answer to the current one.")
+
+(defvar-local teamtypev--shadow nil
+  "The text of the buffer as the daemon knows it.
+That is the content sent at open, with every edit sent or received since
+applied.  Local changes are computed against it.")
+
 (defvar-local teamtypev--ignore-changes nil
   "When non-nil, buffer changes are ignored and not sent to daemon.")
 
@@ -41,23 +55,37 @@
   (locate-dominating-file file ".teamtypev"))
 
 (defun teamtypev--line-col-to-pos (line col)
-  "Convert zero-based LINE and character COL to buffer position."
+  "Buffer position of zero-based LINE and character COL in the whole buffer, or nil.
+Like the daemon: lines end at newline characters, COL may be at most the line length, and a
+final empty line exists only after a final newline.  Ignores narrowing."
   (save-excursion
-    (goto-char (point-min))
-    (forward-line line)
-    (+ (line-beginning-position) col)))
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (when (and (integerp line) (integerp col) (>= line 0) (>= col 0)
+                 (= 0 (forward-line line))
+                 (bolp))
+        (let ((bol (point)))
+          (when (<= col (- (line-end-position) bol))
+            (+ bol col)))))))
 
-(defun teamtypev--pos-to-line-col (pos)
-  "Convert buffer POS to zero-based line and character position.
-Returns a cons (LINE . CHARACTER)."
-  (save-excursion
-    (goto-char pos)
-    (cons (- (line-number-at-pos) 1)
-          (- pos (line-beginning-position)))))
+(defun teamtypev--advance (line col text)
+  "Zero-based (LINE . CHARACTER) reached by starting at LINE and COL and passing over TEXT."
+  (let ((last-newline (cl-position ?\n text :from-end t)))
+    (if last-newline
+        (cons (+ line (cl-count ?\n text))
+              (- (length text) last-newline 1))
+      (cons line (+ col (length text))))))
+
+(defun teamtypev--offset-to-line-col (text offset)
+  "Zero-based (LINE . CHARACTER) of the character OFFSET in TEXT."
+  (teamtypev--advance 0 0 (substring text 0 offset)))
 
 (defun teamtypev--buffer-content ()
   "Get the entire buffer content as a string."
-  (buffer-substring-no-properties (point-min) (point-max)))
+  (save-restriction
+    (widen)
+    (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun teamtypev--uri-to-path (uri)
   (url-unhex-string
@@ -138,9 +166,13 @@ Returns a cons (LINE . CHARACTER)."
   (setq-local teamtypev--client client)
   (setq-local teamtypev--editor-revision 0)
   (setq-local teamtypev--daemon-revision 0)
+  (setq-local teamtypev--synced nil)
+  (setq-local teamtypev--session (list 'session))
+  (setq-local teamtypev--shadow (teamtypev--buffer-content))
 
   (let* ((uri (teamtypev--path-to-uri filepath))
-         (content (teamtypev--buffer-content))
+         (session teamtypev--session)
+         (content teamtypev--shadow)
          (connection (plist-get client :connection))
          (process (plist-get client :process)))
 
@@ -152,13 +184,19 @@ Returns a cons (LINE . CHARACTER)."
      ;; This file is dynamically bound, so the callbacks get `filepath' by backquote.
      :success-fn `(lambda (_result)
                    (when-let ((buffer (find-buffer-visiting ,filepath)))
-                     (with-current-buffer buffer (setq-local teamtypev--shared t)))
+                     (with-current-buffer buffer
+                       (setq-local teamtypev--shared t)
+                       ;; The daemon sends this session\'s edits after the answer to `open\'.
+                       (when (eq teamtypev--session ,session)
+                         (setq-local teamtypev--synced t))))
                    (message "TeamTypeV: tracking %s" ,filepath))
      :error-fn `(lambda (err)
                   (message "TeamTypeV error opening file: %S" err)
                   (when-let ((buffer (find-buffer-visiting ,filepath)))
                     (with-current-buffer buffer
-                      (setq-local teamtypev--client nil)))))))
+                      (when (eq teamtypev--session ,session)
+                        (setq-local teamtypev--client nil)
+                        (setq-local teamtypev--synced nil))))))))
 
 (defun teamtypev--close-file ()
   "Close the current file in TeamTypeV."
@@ -166,44 +204,82 @@ Returns a cons (LINE . CHARACTER)."
     (let* ((uri (teamtypev--path-to-uri buffer-file-name))
            (connection (plist-get teamtypev--client :connection)))
       (jsonrpc-notify connection 'close `(:uri ,uri))
+      (setq-local teamtypev--synced nil)
+      (setq-local teamtypev--session nil)
       (setq-local teamtypev--client nil))))
 
 ;;; Change Tracking
 
-(defvar-local teamtypev--start-pos nil)
-(defvar-local teamtypev--end-pos nil)
+(defun teamtypev--send-edit (start end replacement)
+  "Send the edit replacing START to END (zero-based (LINE . CHARACTER) pairs) with REPLACEMENT.
+With nil START the delta is empty."
+  (let ((delta (if start
+                   `[(:range (:start (:line ,(car start) :character ,(cdr start))
+                              :end (:line ,(car end) :character ,(cdr end)))
+                      :replacement ,replacement)]
+                 []))
+        (uri (teamtypev--path-to-uri buffer-file-name))
+        (connection (plist-get teamtypev--client :connection)))
+    ;; Protocol: send with the number of daemon edits applied, then count it as ours.
+    (let ((revision teamtypev--daemon-revision))
+      (setq-local teamtypev--editor-revision (1+ teamtypev--editor-revision))
+      (jsonrpc-async-request
+       connection 'edit
+       `(:uri ,uri :revision ,revision :delta ,delta)
+       ;; The default success callback fails on the daemon\'s string result.
+       :success-fn #'ignore
+       :error-fn (lambda (err) (message "TeamTypeV edit rejected: %S" err))))))
 
-(defun teamtypev--before-change (beg end)
-  "Store the changed region."
+(defun teamtypev--send-difference (old new)
+  "Send the edit that turns the text OLD into NEW, if they differ."
+  (let* ((limit (min (length old) (length new)))
+         (prefix 0)
+         (suffix 0))
+    (while (and (< prefix limit) (eq (aref old prefix) (aref new prefix)))
+      (setq prefix (1+ prefix)))
+    (while (and (< (+ prefix suffix) limit)
+                (eq (aref old (- (length old) suffix 1)) (aref new (- (length new) suffix 1))))
+      (setq suffix (1+ suffix)))
+    (unless (and (= prefix (length old)) (= prefix (length new)))
+      (teamtypev--send-edit (teamtypev--offset-to-line-col old prefix)
+                            (teamtypev--offset-to-line-col old (- (length old) suffix))
+                            (substring new prefix (- (length new) suffix))))))
+
+(defun teamtypev--resync ()
+  "Make the daemon's text, `teamtypev--shadow', the buffer's, by sending the difference."
+  (when teamtypev--shadow
+    (let ((text (teamtypev--buffer-content)))
+      (unless (equal text teamtypev--shadow)
+        (let ((old teamtypev--shadow))
+          (setq-local teamtypev--shadow text)
+          (teamtypev--send-difference old text))))))
+
+(defun teamtypev--after-change (beg end len)
+  "Send the change of the region BEG to END, which replaced LEN characters, to the daemon.
+The old text is taken from `teamtypev--shadow', not from where Emacs says it changed: some commands
+(`upcase-region', `replace-regexp-in-region', ...) report regions that do not match, and some
+report an after-change without a before-change.  If the report does not fit what is in the buffer,
+the difference is sent instead, so that the daemon never has text other than the buffer's."
   (unless teamtypev--ignore-changes
-    (setq-local teamtypev--start-pos (teamtypev--pos-to-line-col beg))
-    (setq-local teamtypev--end-pos (teamtypev--pos-to-line-col end))))
-
-(defun teamtypev--after-change (beg end _len)
-  "Send the change to the daemon after a buffer modification."
-  (unless teamtypev--ignore-changes
-    (when teamtypev--client
-      (let* ((new-text (buffer-substring-no-properties beg end))
-             (uri (teamtypev--path-to-uri buffer-file-name))
-             (delta `[(:range (:start (:line ,(car teamtypev--start-pos)
-                                       :character ,(cdr teamtypev--start-pos))
-                               :end (:line ,(car teamtypev--end-pos)
-                                       :character ,(cdr teamtypev--end-pos)))
-                       :replacement ,new-text)])
-             (connection (plist-get teamtypev--client :connection)))
-
-        (setq-local teamtypev--editor-revision (1+ teamtypev--editor-revision))
-
-        (jsonrpc-async-request
-         connection 'edit
-         `(:uri ,uri :revision ,teamtypev--daemon-revision :delta ,delta)
-         ;; The default success callback fails on the daemon's string result.
-         :success-fn #'ignore
-         :error-fn (lambda (err) (message "TeamTypeV edit rejected: %S" err)))))))
+    (when (and teamtypev--client teamtypev--shadow)
+      (let* ((old teamtypev--shadow)
+             (text (teamtypev--buffer-content))
+             (from (1- beg))
+             (to (+ from len))
+             (replacement (and (<= 0 from) (<= end (1+ (length text))) (substring text from (1- end))))
+             (expected (and replacement (<= to (length old))
+                            (concat (substring old 0 from) replacement (substring old to)))))
+        (cond
+         ((equal old text))             ; Nothing changed.
+         ((and expected (equal expected text))
+          (teamtypev--send-edit (teamtypev--offset-to-line-col old from)
+                                (teamtypev--offset-to-line-col old to)
+                                replacement))
+         (t (teamtypev--send-difference old text)))
+        (setq-local teamtypev--shadow text)))))
 
 (defun teamtypev--track-changes ()
   "Start tracking changes for the current buffer."
-  (add-hook 'before-change-functions #'teamtypev--before-change nil t)
   (add-hook 'after-change-functions #'teamtypev--after-change nil t))
 
 ;; 🧑 "their save just tells teamtype to write"
@@ -228,7 +304,12 @@ Returns a cons (LINE . CHARACTER)."
     (message "Unknown teamtypev notification: %s" method))))
 
 (defun teamtypev--handle-edit-notification (params)
-  "Handle an 'edit' notification from the daemon."
+  "Handle an 'edit' notification from the daemon.
+
+Protocol: `teamtypev--daemon-revision' counts the daemon edits applied, `teamtypev--editor-revision' our
+own edits sent.  An edit is applied iff its revision equals `teamtypev--editor-revision'; otherwise the
+daemon will send a transformed one.  An edit that cannot be applied is answered with an empty delta
+\(counted as our own edit), so that the daemon does not think we applied it."
   (let* ((uri (plist-get params :uri))
          (revision (plist-get params :revision))
          (delta (plist-get params :delta))
@@ -237,49 +318,73 @@ Returns a cons (LINE . CHARACTER)."
 
     (when buffer
       (with-current-buffer buffer
-        ;; Only apply if revision matches our editor revision
-        (when (= revision teamtypev--editor-revision)
-          (teamtypev--apply-delta delta)
-          (setq-local teamtypev--daemon-revision (1+ teamtypev--daemon-revision)))))))
+        (when (and teamtypev--client teamtypev--synced)
+          ;; Normally a no-op: the buffer is what the daemon knows.
+          (teamtypev--resync))
+        ;; Edits for a buffer that is not synced (open not acknowledged yet, or closed) belong to
+        ;; another session.
+        (when (and teamtypev--client teamtypev--synced (eql revision teamtypev--editor-revision))
+          (if (teamtypev--apply-delta delta)
+              (progn
+                (setq-local teamtypev--daemon-revision (1+ teamtypev--daemon-revision))
+                ;; If something else changed the buffer while applying (hooks), tell the daemon.
+                (teamtypev--resync))
+            (message "TeamTypeV: could not apply an edit from the daemon, answering with an empty edit")
+            (teamtypev--send-edit nil nil nil)))))))
+
+(defun teamtypev--resolve-delta (delta)
+  "The list of (BEG END REPLACEMENT) in buffer positions for DELTA, sorted by position, or nil.
+Returns the symbol `invalid' if a position does not exist or edits overlap."
+  (let ((changes
+         (mapcar (lambda (change)
+                   (let* ((range (plist-get change :range))
+                          (start (plist-get range :start))
+                          (end (plist-get range :end))
+                          (replacement (plist-get change :replacement))
+                          (beg (teamtypev--line-col-to-pos (plist-get start :line) (plist-get start :character)))
+                          (fin (teamtypev--line-col-to-pos (plist-get end :line) (plist-get end :character))))
+                     (if (and beg fin (stringp replacement))
+                         (list (min beg fin) (max beg fin) replacement)
+                       (throw 'teamtypev-invalid 'invalid))))
+                 (append delta nil))))
+    (setq changes (sort changes (lambda (a b) (or (< (car a) (car b))
+                                                  (and (= (car a) (car b)) (< (cadr a) (cadr b)))))))
+    (cl-loop for (a b) on changes
+             when (and b (> (cadr a) (car b)))
+             do (throw 'teamtypev-invalid 'invalid))
+    changes))
 
 (defun teamtypev--apply-delta (delta)
-  "Apply DELTA to the current buffer.
-Edits are sorted by position (descending) before applying, so that
-later edits don't invalidate positions of earlier edits."
+  "Apply DELTA to the current buffer.  Return non-nil if it was applied.
+If it cannot be applied (a position does not exist, the buffer is read-only, ...) the buffer is unchanged.
+The edits refer to the buffer before any of them, so they are applied from the end."
   (setq-local teamtypev--ignore-changes t)
   ;; An error while applying must not leave local edits ignored for good.
   (unwind-protect
-      (save-excursion
-        ;; Convert all changes to buffer positions.
-        (let ((changes-with-positions
-               (mapcar (lambda (change)
-                         (let* ((range (plist-get change :range))
-                                (replacement (plist-get change :replacement))
-                                (start-info (plist-get range :start))
-                                (end-info (plist-get range :end))
-                                (start-line (plist-get start-info :line))
-                                (start-char (plist-get start-info :character))
-                                (end-line (plist-get end-info :line))
-                                (end-char (plist-get end-info :character))
-                                (beg (teamtypev--line-col-to-pos start-line start-char))
-                                (end (teamtypev--line-col-to-pos end-line end-char)))
-                           (list beg end replacement)))
-                       (append delta nil)))) ; Convert vector to list.
-          ;; Sort by start position descending, then by end position descending.
-          (setq changes-with-positions
-                (sort changes-with-positions
-                      (lambda (a b)
-                        (or (> (car a) (car b))
-                            (and (= (car a) (car b))
-                                 (> (cadr a) (cadr b)))))))
-          ;; Apply changes in descending order (from end to beginning).
-          (dolist (change changes-with-positions)
-            (let ((beg (car change))
-                  (end (cadr change))
-                  (replacement (caddr change)))
-              (delete-region beg end)
-              (goto-char beg)
-              (insert replacement)))))
+      (let ((changes (catch 'teamtypev-invalid
+                       (save-restriction (widen) (teamtypev--resolve-delta delta)))))
+        (when (and (listp changes) teamtypev--shadow
+                   (condition-case nil
+                       (progn
+                         (save-excursion
+                           ;; The daemon's positions refer to the whole buffer, whatever is narrowed.
+                           (save-restriction
+                             (widen)
+                             (atomic-change-group
+                               (dolist (change (reverse changes))
+                                 (delete-region (car change) (cadr change))
+                                 (goto-char (car change))
+                                 (insert (caddr change))))))
+                         t)
+                     (error nil)))
+          ;; What the daemon expects the buffer to be now.
+          (let ((expected teamtypev--shadow))
+            (dolist (change (reverse changes))
+              (setq expected (concat (substring expected 0 (1- (car change)))
+                                     (caddr change)
+                                     (substring expected (1- (cadr change))))))
+            (setq-local teamtypev--shadow expected)
+            t)))
     (setq-local teamtypev--ignore-changes nil)))
 
 ;;; User Interface Modifications
