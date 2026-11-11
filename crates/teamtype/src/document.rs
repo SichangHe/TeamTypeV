@@ -902,6 +902,77 @@ mod tests {
         }
     }
 
+    /// Three peers edit and exchange sync messages that stay in flight for a while. After the
+    /// network drains and every pair syncs to quiescence, all peers hold the same heads and the
+    /// same file content, and each peer's cache equals what a reload reads from its CRDT.
+    #[test]
+    fn fuzz_peers_converge_with_messages_in_flight() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+        let files = [RelativePath::new("a"), RelativePath::new("b")];
+        for seed in 0..300u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut docs: Vec<Document> =
+                std::iter::repeat_with(Document::default).take(3).collect();
+            let mut states = vec![vec![AutomergeSyncState::new(); 3]; 3];
+            let mut wire: Vec<Vec<Vec<AutomergeSyncMessage>>> = vec![vec![vec![]; 3]; 3];
+            for _ in 0..40 {
+                let (from, to) = (rng.random_range(0..3), rng.random_range(0..3));
+                let file = &files[rng.random_range(0..2)];
+                let text = ["", "x", "xx", "y"][rng.random_range(0..4)];
+                match rng.random_range(0..7) {
+                    0 => docs[from].remove_file(file),
+                    1 => docs[from].set_file(Content::String(text.into()), file),
+                    2 => {
+                        let _ = docs[from].update_text(text, file);
+                    }
+                    3 if from != to => {
+                        if let Some(m) = docs[from].generate_sync_message(&mut states[from][to]) {
+                            wire[from][to].push(m);
+                        }
+                    }
+                    _ if from != to && !wire[from][to].is_empty() => {
+                        let m = wire[from][to].remove(0);
+                        let _ = docs[to].receive_sync_message_log_patches(m, &mut states[to][from]);
+                    }
+                    _ => {}
+                }
+            }
+            // Drain what is in flight, then sync every pair repeatedly until nothing changes.
+            for from in 0..3 {
+                for to in 0..3 {
+                    for m in std::mem::take(&mut wire[from][to]) {
+                        let _ = docs[to].receive_sync_message_log_patches(m, &mut states[to][from]);
+                    }
+                }
+            }
+            for _ in 0..3 {
+                for i in 0..3 {
+                    for j in 0..3 {
+                        if i != j {
+                            let (low, high) = (i.min(j), i.max(j));
+                            let (left, right) = docs.split_at_mut(high);
+                            let _ = sync(&mut left[low], &mut right[0]);
+                        }
+                    }
+                }
+            }
+            let heads: Vec<_> = docs.iter_mut().map(Document::get_heads).collect();
+            assert_eq!(heads[0], heads[1], "seed {seed}");
+            assert_eq!(heads[1], heads[2], "seed {seed}");
+            for file in &files {
+                let want = Document::load(&docs[0].save());
+                for (n, doc) in docs.iter_mut().enumerate() {
+                    assert_eq!(
+                        doc.current_file_content(file),
+                        want.current_file_content(file),
+                        "seed {seed} peer {n} file {file}"
+                    );
+                    assert_cache_matches_crdt(doc, file);
+                }
+            }
+        }
+    }
+
     /// This set of tests has some documentation character to show to ourselves,
     /// what happens under the hood when sync'ing.
     mod automerge_interna {
