@@ -2154,5 +2154,61 @@ pub proof fn example_two_editors(f: int, o: int)
     assert(doc_text(st6, f) == st6.eds[1][f].cur);
 }
 
+// continues from any consistent state with two editors on f and nothing pending: a disk edit (DocEdit) is
+// broadcast (Drain) to both, then a peer deletes the file (SyncRemoval) and that is broadcast too (Drain);
+// every step's precondition holds, both servers end empty and equal to the document.
+pub proof fn example_disk_edit_then_peer_removal(st: DState, f: int, o3: int)
+    requires
+        dinv(st), all_drained(st), is_open(st, 1, f), is_open(st, 2, f), is_text(st, f),
+        base_len_of(o3) == 0,
+    ensures ({
+        let a = Step::DocEdit { f, o: o3 };
+        let st1 = dapply(st, a);
+        let st2 = dapply(st1, Step::Drain { f });
+        let rm = Step::SyncRemoval { f, before: doc_text(st2, f) };
+        let st3 = dapply(st2, rm);
+        let st4 = dapply(st3, Step::Drain { f });
+        &&& step_ok(st, a) && step_ok(st1, Step::Drain { f }) && step_ok(st2, rm) && step_ok(st3, Step::Drain { f })
+        &&& st2.eds[1][f].dr == st.eds[1][f].dr + 1 && st2.eds[2][f].dr == st.eds[2][f].dr + 1
+        &&& st4.eds[1][f].dr == st.eds[1][f].dr + 2 && st4.eds[2][f].dr == st.eds[2][f].dr + 2
+        &&& st4.eds[1][f].cur == Seq::<char>::empty() && st4.eds[2][f].cur == Seq::<char>::empty()
+        &&& doc_text(st4, f) == Seq::<char>::empty()
+    }),
+{
+    let a = Step::DocEdit { f, o: o3 };
+    assert(pq(st, f).len() == 0);
+    assert(fold(st.eds[1][f].cur, pq(st, f)) == st.eds[1][f].cur);
+    assert(fits(doc_text(st, f), o3));
+    lemma_step(st, a);
+    let st1 = dapply(st, a);
+    assert(pq(st1, f) == seq![o3]);
+    let d = Step::Drain { f };
+    assert(step_ok(st1, d));
+    lemma_step(st1, d);
+    let st2 = dapply(st1, d);
+    assert(pq(st2, f).len() == 0) by { assert(pq(st1, f).drop_first() =~= Seq::<int>::empty()); }
+    assert(is_open(st2, 1, f) && is_open(st2, 2, f));
+    assert(st2.eds[1][f] == srv_crdt(st.eds[1][f], o3).0);
+    assert(st2.eds[2][f] == srv_crdt(st.eds[2][f], o3).0);
+    let rm = Step::SyncRemoval { f, before: doc_text(st2, f) };
+    assert(fold(st2.eds[1][f].cur, pq(st2, f)) == st2.eds[1][f].cur);
+    assert(st2.eds[1][f].cur == doc_text(st2, f));
+    assert(st2.eds[2][f].cur == doc_text(st2, f)) by { assert(fold(st2.eds[2][f].cur, pq(st2, f)) == st2.eds[2][f].cur); }
+    assert(step_ok(st2, rm));
+    lemma_step(st2, rm);
+    let st3 = dapply(st2, rm);
+    axiom_del_all(doc_text(st2, f));
+    assert(pq(st3, f) == seq![del_all(doc_text(st2, f).len())]);
+    assert(step_ok(st3, d));
+    lemma_step(st3, d);
+    let st4 = dapply(st3, d);
+    assert(is_open(st3, 1, f) && is_open(st3, 2, f));
+    assert(st4.eds[1][f] == srv_crdt(st3.eds[1][f], del_all(doc_text(st2, f).len())).0);
+    assert(st4.eds[2][f] == srv_crdt(st3.eds[2][f], del_all(doc_text(st2, f).len())).0);
+    assert(st3.eds[1][f] == st2.eds[1][f] && st3.eds[2][f] == st2.eds[2][f]);
+    assert(st4.eds[1][f].cur == ap(st2.eds[1][f].cur, del_all(doc_text(st2, f).len())));
+    assert(st4.eds[2][f].cur == ap(st2.eds[2][f].cur, del_all(doc_text(st2, f).len())));
+}
+
 } // verus!
 fn main() {}

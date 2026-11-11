@@ -278,6 +278,12 @@ impl DocumentActor {
 
     async fn handle_message(&mut self, message: DocMessage) {
         debug!("Handling doc message: {message:?}");
+        // Proof assumption (verification/editor_conn_proof): nothing is queued between messages, so
+        // deltas reach editors in the order the document changed.
+        debug_assert!(
+            self.disk_edits.is_empty(),
+            "disk edits left queued from the previous message"
+        );
         match message {
             DocMessage::GetContent { response_tx } => {
                 response_tx
@@ -408,6 +414,17 @@ impl DocumentActor {
                                     .file_content_at(&file_path, &heads_before_sync_message)
                                     .unwrap_or_default();
 
+                                // Proof assumption: what we delete is what every editor holds.
+                                #[cfg(test)]
+                                for (connection, _) in self.editor_connections.values() {
+                                    if let Some(text) = connection.server_text(&file_path) {
+                                        assert_eq!(
+                                            text, content_before_sync_message,
+                                            "editor text differs from the text before the sync message"
+                                        );
+                                    }
+                                }
+
                                 // Create a delta that deletes all the previous content.
                                 let mut text_delta = TextDelta::default();
                                 text_delta.delete(content_before_sync_message.chars().count());
@@ -500,6 +517,7 @@ impl DocumentActor {
             }
         }
         self.send_disk_edits().await;
+        debug_assert_eq!(self.disk_edits.len(), 0);
     }
 
     // 🧑 "make it work for three or more people reliably"
@@ -801,6 +819,8 @@ impl DocumentActor {
             }
         }
         self.send_disk_edits().await;
+        // Proof assumption: an editor's message sees every document change already broadcast.
+        debug_assert_eq!(self.disk_edits.len(), 0);
         // First, convert the editor message into a component message (+ transformed edits from the
         // OT server).
         let (inside_message, mut messages_to_editor) = self
@@ -2185,7 +2205,107 @@ mod tests {
             std::fs::write(dir.path().join("file1"), "second outside write, longer")
                 .expect("write");
             actor.send_disk_edits().await;
-            assert!(actor.disk_edits.is_empty(), "edits stayed queued");
+            assert_eq!(actor.disk_edits.len(), 0, "edits stayed queued");
+            let Some(document::Content::String(shared)) = actor.current_file_content(&path) else {
+                panic!("shared text")
+            };
+            assert_eq!(
+                actor.editor_connections[&2].0.server_text(&path),
+                Some(shared.as_str())
+            );
+        }
+
+        /// The failure the queue leak caused: a peer's sync delta, relative to a text that includes
+        /// the leaked edit, reached an editor that had not been told the edit, and its OT server
+        /// panicked in `message_from_inside`.
+        #[tokio::test]
+        async fn sync_delta_does_not_overtake_edits_left_by_a_dead_editor() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            let path = RelativePath::new("file1");
+            let uri = actor
+                .absolute_path_for_file_path(&path)
+                .to_file_uri()
+                .to_string();
+            let mut readers = vec![];
+            for id in [1, 2] {
+                let (stream, reader) = tokio::net::UnixStream::pair().expect("editor socket");
+                let (_, writer) = tokio::io::split(stream);
+                readers.push(reader);
+                actor.editor_connections.insert(
+                    id,
+                    (
+                        EditorConnection::new("test".into(), actor.app_config.clone()),
+                        tokio_util::codec::FramedWrite::new(writer, editor::OutgoingProtocolCodec),
+                    ),
+                );
+                actor
+                    .react_to_message_from_editor(
+                        id,
+                        &EditorProtocolMessageFromEditor::Open {
+                            uri: uri.clone(),
+                            content: "content1".into(),
+                            saves_file: false,
+                            daemon_writes: true,
+                        },
+                    )
+                    .await
+                    .expect("open");
+            }
+            // A peer with the same history; finish the sync handshake so one message carries a change.
+            let mut peer = Document::load(&actor.crdt_doc.save());
+            let mut peer_state = SyncState::new();
+            let mut actor_state = SyncState::new();
+            for _ in 0..6 {
+                if let Some(message) = peer.generate_sync_message(&mut peer_state) {
+                    let (tx, rx) = oneshot::channel();
+                    actor
+                        .handle_message(DocMessage::ReceiveSyncMessage {
+                            message,
+                            state: std::mem::replace(&mut actor_state, SyncState::new()),
+                            response_tx: tx,
+                        })
+                        .await;
+                    actor_state = rx.await.expect("state");
+                }
+                let (tx, rx) = oneshot::channel();
+                actor
+                    .handle_message(DocMessage::GenerateSyncMessage {
+                        state: std::mem::replace(&mut actor_state, SyncState::new()),
+                        response_tx: tx,
+                    })
+                    .await;
+                let (state, message) = rx.await.expect("state");
+                actor_state = state;
+                if let Some(message) = message {
+                    let _ = peer.receive_sync_message_log_patches(message, &mut peer_state);
+                }
+            }
+            // Editor 1 disconnects; two outside writes are merged while its removal is handled.
+            drop(readers.remove(0));
+            std::fs::write(dir.path().join("file1"), "first outside write").expect("write");
+            actor.file_created_or_changed(&path);
+            std::fs::write(
+                dir.path().join("file1"),
+                "second outside write, much longer",
+            )
+            .expect("write");
+            actor.send_disk_edits().await;
+            // The peer edits the end of the text it knows; its delta is based on the merged text.
+            peer.update_text("content1 and the peer's tail", &path);
+            let message = peer
+                .generate_sync_message(&mut peer_state)
+                .expect("sync message with the peer's edit");
+            let (tx, rx) = oneshot::channel();
+            actor
+                .handle_message(DocMessage::ReceiveSyncMessage {
+                    message,
+                    state: actor_state,
+                    response_tx: tx,
+                })
+                .await;
+            let _ = rx.await;
+            assert_eq!(actor.disk_edits.len(), 0);
             let Some(document::Content::String(shared)) = actor.current_file_content(&path) else {
                 panic!("shared text")
             };
