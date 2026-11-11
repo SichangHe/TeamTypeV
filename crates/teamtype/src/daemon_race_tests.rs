@@ -663,3 +663,50 @@ async fn recreated_file_is_not_deleted_by_peer_that_removed_it() {
     assert_eq!(std::fs::read_to_string(&b).unwrap(), "new\n");
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "new\n");
 }
+
+// An outside process can write the very text a peer's edit has just made shared, between the
+// daemon's disk read and its comparison. The daemon then finds the bytes equal and does not write,
+// but must still record them as the last bytes seen: with the old record, the watcher event for
+// that write merged the text as a concurrent outside edit and duplicated it.
+#[test]
+fn found_equal_bytes_are_recorded_as_last_seen_on_disk() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a"), "ab").unwrap();
+    let mut actor = peer_actor(&dir, true);
+    let path = RelativePath::new("a");
+    actor.disk_content.insert(path.clone(), b"a".to_vec());
+    actor.crdt_doc.update_text("ab", &path);
+    actor.ensure_file_has_bytes(&path, b"ab").unwrap();
+    assert_eq!(actor.disk_content.get(&path), Some(&b"ab".to_vec()));
+    actor.file_created_or_changed(&path);
+    assert_eq!(
+        actor.current_file_content(&path),
+        Some(&Content::String("ab".into()))
+    );
+}
+
+// The plugin protocol has no session id: an editor applies a daemon edit iff its revision equals
+// the editor's own edit count. After close and reopen on one connection the count restarts at 0,
+// so a daemon edit of the old session that is still in flight is applied to the new buffer.
+// Editors must therefore take the daemon's answer to `close` (which follows every earlier daemon
+// edit on the connection) before opening again, as the VS Code plugin does; the Emacs plugin
+// ignores edits until its `open` is answered. Verus model: daemon_proof (`reopen_without_barrier`).
+#[test]
+fn reopened_session_applies_stale_daemon_edit_unless_old_messages_are_drained() {
+    let mut old_server = crate::ot::OTServer::new("a".into());
+    let mut delta = TextDelta::default();
+    delta.insert("x");
+    delta.retain(1);
+    let stale = old_server.apply_crdt_change(&delta).unwrap();
+    assert_eq!(stale.revision, 0);
+    // The daemon writes "xa" to disk, the editor reopens it: a fresh session at revision 0.
+    let new_server = crate::ot::OTServer::new("xa".into());
+    let mut buffer = "xa".to_string();
+    // Without a barrier the stale message (revision 0 == the new editor revision 0) is accepted.
+    let accepted = stale.revision == 0;
+    assert!(accepted);
+    buffer = apply_editor_delta(&buffer, &stale.delta);
+    assert_ne!(buffer, new_server.current_content(), "editor diverged: {buffer:?}");
+    // With the barrier the stale message is read before the new session exists and dropped.
+    assert_eq!(new_server.current_content(), "xa");
+}

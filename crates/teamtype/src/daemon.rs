@@ -1118,6 +1118,9 @@ impl DocumentActor {
             if let Ok(current_bytes) = sandbox::read_file(&self.app_config.base_dir, &abs_path) {
                 if bytes == current_bytes {
                     debug!("File content is already the desired one, not writing.");
+                    // Record what is on disk. A stale record would make the next watcher event
+                    // merge this very text as an outside edit, duplicating it.
+                    self.disk_content.insert(file_path.clone(), bytes.to_vec());
                     return Ok(());
                 }
             } else {
