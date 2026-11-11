@@ -936,6 +936,9 @@ impl DocumentActor {
                 match result {
                     Err(error) => {
                         error!("Error for JSON-RPC request: {:?}", error);
+                        // A rejected edit makes this editor's connection forget the file, so the
+                        // daemon owns it again and must write what it was holding back.
+                        self.release_files();
                         self.send_to_editor_client(
                             &editor_id,
                             OutgoingMessage::Response(JSONRPCResponse::RequestError {

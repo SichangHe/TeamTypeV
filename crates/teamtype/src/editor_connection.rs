@@ -257,11 +257,15 @@ impl EditorConnection {
                 let Ok((delta_for_crdt, rev_deltas_for_editor)) =
                     ot_server.apply_editor_operation(rev_delta)
                 else {
+                    // The editor applied this edit and counted it, but we did not, so the daemon
+                    // no longer knows the editor's text. Forget the file for this editor until it
+                    // opens it again; the open answer then makes the editor match the daemon.
+                    self.ot_servers.remove(&relative_path);
                     return Err(EditorProtocolMessageError {
                         code: -1,
                         message: "Invalid edit".into(),
                         data: Some(
-                            "This edit can not be applied to the current document content. This is probably a bug in the editor plugin.".into(),
+                            "This edit can not be applied to the current document content. This is probably a bug in the editor plugin. Open the file again to resynchronize.".into(),
                         ),
                     });
                 };
@@ -409,8 +413,64 @@ mod tests {
             edit(0, ed_delta_single((0, 99), (0, 99), "x")),
         ] {
             assert!(connection.message_from_editor(true, &bad).is_err());
+            // The daemon cannot know what the editor did with a rejected edit, so it stops
+            // tracking the file for this editor until the editor opens it again.
+            assert!(!connection.owns(&RelativePath::new("file")));
+            connection
+                .message_from_editor(
+                    true,
+                    &EditorProtocolMessageFromEditor::Open {
+                        uri: uri.clone(),
+                        content: "hello".into(),
+                        saves_file: false,
+                        daemon_writes: true,
+                    },
+                )
+                .expect("reopen");
             assert!(connection.owns(&RelativePath::new("file")));
         }
+    }
+
+    /// An edit the daemon rejects was still applied by the editor (the editor counts every edit
+    /// it sends). Keeping the file open would make the daemon send deltas computed against text
+    /// the editor no longer has, so editor and daemon would silently diverge.
+    #[test]
+    fn rejected_edit_does_not_leave_editor_and_daemon_diverged() {
+        let dir = tempdir().expect("directory");
+        let base = dir.path().canonicalize().expect("canonical");
+        fs::write(base.join("file"), "hello").expect("text");
+        let config = AppConfig {
+            base_dir: base.clone(),
+            ..Default::default()
+        };
+        let mut connection = EditorConnection::new("1".into(), config);
+        let uri = format!("file://{}/file", base.display());
+        let open = EditorProtocolMessageFromEditor::Open {
+            uri: uri.clone(),
+            content: "hello".into(),
+            saves_file: false,
+            daemon_writes: true,
+        };
+        connection.message_from_editor(true, &open).expect("open");
+        // An edit with two operations is rejected (not supported), yet the editor applied it.
+        let mut two_ops = ed_delta_single((0, 0), (0, 0), "X");
+        two_ops.0.extend(ed_delta_single((0, 5), (0, 5), "Y").0);
+        let bad = EditorProtocolMessageFromEditor::Edit {
+            uri: uri.clone(),
+            revision: 0,
+            delta: two_ops,
+        };
+        assert!(connection.message_from_editor(true, &bad).is_err());
+        // Another peer's change arrives. It must not be forwarded to a buffer the daemon cannot
+        // track: the editor holds "XhelloY", the daemon "hello".
+        let from_peer = ComponentMessage::Edit {
+            file_path: RelativePath::new("file"),
+            delta: insert(0, "!"),
+        };
+        assert!(connection.message_from_inside(&from_peer).is_empty());
+        // After the editor opens the file again, the daemon resynchronizes it.
+        connection.message_from_editor(true, &open).expect("reopen");
+        assert!(connection.owns(&RelativePath::new("file")));
     }
 
     #[test]

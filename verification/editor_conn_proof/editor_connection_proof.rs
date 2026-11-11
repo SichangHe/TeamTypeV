@@ -1199,15 +1199,16 @@ pub open spec fn map_wf(m: Map<int, Srv>) -> bool {
 pub open spec fn map_room(m: Map<int, Srv>) -> bool {
     forall|k: int| #[trigger] m.contains_key(k) ==> m[k].er < usize::MAX && m[k].dr < usize::MAX
 }
-// a rejected edit touched at most one server, kept it well-formed with the same text, same daemon
-// revision, and only possibly advanced its editor revision / confirmed text
+// a rejected edit touched at most one server: it either leaves it (well-formed, same text, same daemon
+// revision, editor revision / confirmed text possibly advanced) or removes it (the daemon forgets a
+// file whose editor-side text it can no longer know, until the editor opens it again)
 pub open spec fn same_except(old_m: Map<int, Srv>, new_m: Map<int, Srv>, k0: int) -> bool {
     forall|k: int| old_m.contains_key(k) && k != k0 ==> #[trigger] new_m[k] == old_m[k]
 }
 pub open spec fn err_edit_effect(old_m: Map<int, Srv>, new_m: Map<int, Srv>) -> bool {
-    &&& new_m.dom() == old_m.dom()
-    &&& exists|k0: int| same_except(old_m, new_m, k0)
-    &&& forall|k: int| #[trigger] old_m.contains_key(k) ==> {
+    &&& forall|k: int| #[trigger] new_m.contains_key(k) ==> old_m.contains_key(k)
+    &&& exists|k0: int| same_except(old_m, new_m, k0) && (forall|k: int| old_m.contains_key(k) && k != k0 ==> new_m.contains_key(k))
+    &&& forall|k: int| #[trigger] new_m.contains_key(k) ==> {
         &&& new_m[k].cur == old_m[k].cur && new_m[k].dr == old_m[k].dr
         &&& new_m[k].er <= old_m[k].er + 1 && new_m[k].er >= old_m[k].er
         &&& wf(new_m[k])
@@ -1220,6 +1221,7 @@ pub proof fn lemma_err_effect_refl(m: Map<int, Srv>)
     ensures err_edit_effect(m, m),
 {
     assert(same_except(m, m, 0));
+    assert(forall|k: int| m.contains_key(k) && k != 0 ==> m.contains_key(k));
 }
 
 // ---------- the connection ----------
@@ -1494,22 +1496,12 @@ impl EditorConnection {
                 let result = ot_server.apply_editor_operation(rev_delta);
                 match result {
                     Err(_) => {
-                        proof {
-                            assert(old_map.contains_key(relative_path@));
-                        }
-                        self.ot_servers.insert(relative_path.clone(), ot_server);
+                        // The editor applied and counted this edit but we did not: forget the file.
+                        self.ot_servers.remove(&relative_path);
                         proof {
                             let nm = self.ot_servers@;
-                            assert(nm.dom() =~= old_map.dom());
+                            assert(nm =~= old_map.remove(relative_path@));
                             assert(same_except(old_map, nm, relative_path@));
-                            assert forall|k: int| #[trigger] old_map.contains_key(k) implies {
-                                &&& nm[k].cur == old_map[k].cur && nm[k].dr == old_map[k].dr
-                                &&& nm[k].er <= old_map[k].er + 1 && nm[k].er >= old_map[k].er
-                                &&& wf(nm[k])
-                                &&& (wf2(old_map[k]) ==> wf2(nm[k]))
-                            } by {
-                                if k == relative_path@ { assert(nm[k] == ot_server@); } else { assert(nm[k] == old_map[k]); }
-                            }
                             assert(err_edit_effect(old_map, nm));
                         }
                         Err(err_invalid_edit())
@@ -1656,7 +1648,7 @@ pub enum Step {
     // `process_component_message(Some(e), Edit)` applies the transformed op to the CRDT and broadcasts it to others
     EditorEdit { e: int, f: int, rev: nat, o: int },
     // a rejected Edit: only e's server bookkeeping changes (no text, no doc)
-    EditorReject { e: int, f: int, s2: Srv },
+    EditorReject { e: int, f: int },
     // accepted Open: a fresh server with the editor's content c; then `process_component_message(Open)`:
     // doc has text -> e's server gets the diff edit `d` (None when equal) via `process_in_editor`; otherwise
     // the document takes c (`set_file`)
@@ -1692,7 +1684,7 @@ pub open spec fn step_ok(st: DState, step: Step) -> bool {
             // `message_from_editor` accepted: the editor's op fits the confirmed text (see its ensures)
             &&& fits(lc1_of(st.eds[e][f], rev), o)
         },
-        Step::EditorReject { e, f, s2 } => is_open(st, e, f) && s2.cur == st.eds[e][f].cur && wf2(s2),
+        Step::EditorReject { e, f } => is_open(st, e, f),
         Step::EditorOpen { e, f, c, d } => {
             &&& all_drained(st)
             &&& st.eds.contains_key(e)
@@ -1758,8 +1750,8 @@ pub open spec fn dapply(st: DState, step: Step) -> DState {
                 ..st
             }
         }
-        Step::EditorReject { e, f, s2 } => DState {
-            eds: st.eds.insert(e, st.eds[e].insert(f, s2)),
+        Step::EditorReject { e, f } => DState {
+            eds: st.eds.insert(e, st.eds[e].remove(f)),
             ..st
         },
         Step::EditorOpen { e, f, c, d } => {
@@ -1937,7 +1929,7 @@ pub proof fn lemma_step(st: DState, step: Step)
                 }
             }
         }
-        Step::EditorReject { e, f, s2 } => {
+        Step::EditorReject { e, f } => {
             assert forall|e2: int, g: int| #[trigger] is_open(st2, e2, g) implies {
                 &&& wf2(st2.eds[e2][g])
                 &&& is_text(st2, g)
@@ -1945,19 +1937,11 @@ pub proof fn lemma_step(st: DState, step: Step)
                 &&& fitq(st2.eds[e2][g].cur, pq(st2, g))
             } by {
                 assert(is_open(st, e2, g));
-                if e2 == e && g == f {
-                    assert(st2.eds[e2][g] == s2);
-                    assert(s2.cur == st.eds[e][f].cur);
-                    assert(fitq(st.eds[e][f].cur, pq(st, f)));
-                } else {
-                    assert(st2.eds[e2][g] == st.eds[e2][g]);
-                }
+                assert(st2.eds[e2][g] == st.eds[e2][g]);
             }
             assert forall|e2: int, e3: int, g: int| #[trigger] is_open(st2, e2, g) && #[trigger] is_open(st2, e3, g)
                 implies st2.eds[e2][g].cur == st2.eds[e3][g].cur by {
                 assert(is_open(st, e2, g) && is_open(st, e3, g));
-                if e2 == e && g == f { assert(st2.eds[e2][g] == s2); }
-                if e3 == e && g == f { assert(st2.eds[e3][g] == s2); }
             }
         }
         Step::EditorOpen { e, f, c, d } => {

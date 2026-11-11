@@ -203,22 +203,11 @@
 +            let result = ot_server.apply_editor_operation(rev_delta);
 +            match result {
 +                Err(_) => {
-+                    proof {
-+                        assert(old_map.contains_key(relative_path@));
-+                    }
-+                    self.ot_servers.insert(relative_path.clone(), ot_server);
++                    self.ot_servers.remove(&relative_path);
 +                    proof {
 +                        let nm = self.ot_servers@;
-+                        assert(nm.dom() =~= old_map.dom());
++                        assert(nm =~= old_map.remove(relative_path@));
 +                        assert(same_except(old_map, nm, relative_path@));
-+                        assert forall|k: int| #[trigger] old_map.contains_key(k) implies {
-+                            &&& nm[k].cur == old_map[k].cur && nm[k].dr == old_map[k].dr
-+                            &&& nm[k].er <= old_map[k].er + 1 && nm[k].er >= old_map[k].er
-+                            &&& wf(nm[k])
-+                            &&& (wf2(old_map[k]) ==> wf2(nm[k]))
-+                        } by {
-+                            if k == relative_path@ { assert(nm[k] == ot_server@); } else { assert(nm[k] == old_map[k]); }
-+                        }
 +                        assert(err_edit_effect(old_map, nm));
 +                    }
 +                    Err(err_invalid_edit())
@@ -325,11 +314,12 @@
 -            let Ok((delta_for_crdt, rev_deltas_for_editor)) =
 -                ot_server.apply_editor_operation(rev_delta)
 -            else {
+-                self.ot_servers.remove(&relative_path);
 -                return Err(EditorProtocolMessageError {
 -                    code: -1,
 -                    message: "Invalid edit".into(),
 -                    data: Some(
--                        "This edit can not be applied to the current document content. This is probably a bug in the editor plugin.".into(),
+-                        "This edit can not be applied to the current document content. This is probably a bug in the editor plugin. Open the file again to resynchronize.".into(),
 -                    ),
 -                });
 -            };
