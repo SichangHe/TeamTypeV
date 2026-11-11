@@ -1012,8 +1012,12 @@ impl DocumentActor {
     }
 
     async fn send_disk_edits(&mut self) {
-        for message in std::mem::take(&mut self.disk_edits) {
-            self.broadcast_to_editors(None, &message).await;
+        // Dropping an editor whose send failed releases files, which can merge another outside
+        // write and queue more edits; leaving them queued would let a later broadcast overtake them.
+        while !self.disk_edits.is_empty() {
+            for message in std::mem::take(&mut self.disk_edits) {
+                self.broadcast_to_editors(None, &message).await;
+            }
         }
     }
 
@@ -2138,6 +2142,56 @@ mod tests {
                     .exists()
             );
             assert!(!Path::new("/tmp/tt-escape-abs").exists());
+        }
+
+        #[tokio::test]
+        async fn edits_queued_while_dropping_a_dead_editor_are_still_sent() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            let path = RelativePath::new("file1");
+            let uri = actor
+                .absolute_path_for_file_path(&path)
+                .to_file_uri()
+                .to_string();
+            let mut readers = vec![];
+            for id in [1, 2] {
+                let (stream, reader) = tokio::net::UnixStream::pair().expect("editor socket");
+                let (_, writer) = tokio::io::split(stream);
+                readers.push(reader);
+                actor.editor_connections.insert(
+                    id,
+                    (
+                        EditorConnection::new("test".into(), actor.app_config.clone()),
+                        tokio_util::codec::FramedWrite::new(writer, editor::OutgoingProtocolCodec),
+                    ),
+                );
+                actor
+                    .react_to_message_from_editor(
+                        id,
+                        &EditorProtocolMessageFromEditor::Open {
+                            uri: uri.clone(),
+                            content: "content1".into(),
+                            saves_file: false,
+                            daemon_writes: true,
+                        },
+                    )
+                    .await
+                    .expect("open");
+            }
+            // Editor 1 disconnects; a write is merged, and another lands before the broadcast.
+            drop(readers.remove(0));
+            std::fs::write(dir.path().join("file1"), "first outside write").expect("write");
+            actor.file_created_or_changed(&path);
+            std::fs::write(dir.path().join("file1"), "second outside write, longer").expect("write");
+            actor.send_disk_edits().await;
+            assert!(actor.disk_edits.is_empty(), "edits stayed queued");
+            let Some(document::Content::String(shared)) = actor.current_file_content(&path) else {
+                panic!("shared text")
+            };
+            assert_eq!(
+                actor.editor_connections[&2].0.server_text(&path),
+                Some(shared.as_str())
+            );
         }
 
         #[tokio::test]

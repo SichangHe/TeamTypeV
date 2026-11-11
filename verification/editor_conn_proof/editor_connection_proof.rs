@@ -1675,7 +1675,13 @@ pub open spec fn crdt_op_of(s: Srv, rev: nat, o: int) -> int { tt(o, q1_of(s, re
 pub open spec fn step_ok(st: DState, step: Step) -> bool {
     match step {
         Step::DocEdit { f, o } => is_text(st, f) && fits(doc_text(st, f), o),
-        Step::SyncRemoval { f, before } => forall|e: int| #[trigger] is_open(st, e, f) ==> st.eds[e][f].cur == before,
+        Step::SyncRemoval { f, before } => {
+            // nothing queued at handler start (needs `send_disk_edits` to leave nothing behind: fixed in the commit
+            // listed in STATUS.md), and `before` = the document text before the sync
+            &&& pq(st, f).len() == 0
+            &&& is_text(st, f) ==> before == doc_text(st, f)
+            &&& forall|e: int| #[trigger] is_open(st, e, f) ==> st.eds[e][f].cur == before
+        },
         Step::Invalidate { f } => true,
         Step::FreeDoc { f, nc } => forall|e: int| !(#[trigger] is_open(st, e, f)),
         Step::Drain { f } => pq(st, f).len() > 0,
