@@ -45,4 +45,5 @@ jobs:
         run: |
           node verification/remote-apply.cjs
           node verification/protocol.cjs
+          node verification/protocol_random.cjs
           node verification/positions.cjs
