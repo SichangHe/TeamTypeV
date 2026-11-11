@@ -1,0 +1,119 @@
+--- repo
++++ proof
+-pub fn apply_delta_to_doc(
+-    &mut self,
+-    delta: &TextDelta,
+-    file_path: &RelativePath,
+-) -> Result<()> {
+-    let text_obj = self
+-        .text_obj(file_path)
+-        .expect("Couldn't get automerge text object, so not able to modify it");
+-    let mut offset = 0isize;
+-    let Some(Content::String(text)) = self.current_file_content(file_path) else {
+-        bail!("File {file_path} not initialized before applying delta");
+-    };
+-    let text = text.clone();
+-    let ed_delta = EditorTextDelta::try_from_delta(delta.clone(), &text)?;
+-    for op in &ed_delta.0 {
+-        let (start, length) = op.range.as_relative(&text)?;
+-        self.doc
+-            .splice_text(
+-                text_obj.clone(),
+-                ((start as isize) + offset) as usize,
+-                length as isize,
+-                &op.replacement,
+-            )
+-            .expect("Failed to splice Automerge text object");
+-        offset -= length as isize;
+-        offset += op.replacement.chars().count() as isize;
++#[verifier::spinoff_prover] #[verifier::rlimit(200)]
++pub fn apply_delta_to_doc(delta: &TextDelta, text: &str) -> (r: Result<String, Error>)
++    requires
++        cons(delta.v()) <= MAXL,
++        text@.len() <= L, ins(delta.v()) <= L,
++    ensures
++        cons(delta.v()) <= text@.len() ==> (r matches Ok(s) && s@ == fsem(text@, delta.v())),
++{
++    let ghost p = delta.v();
++    let ed_delta = match try_from_delta(delta.clone_delta(), text) { Ok(d) => d, Err(e) => return Err(e) };
++    let mut doc: Vec<char> = chars_of(text);
++    let mut offset: isize = 0;
++    proof { axiom_str_len(text); }
++    let ghost e = ed_of(p);
++    let ghost orig = text@;
++    let mut j: usize = 0;
++    proof {
++        assert(e.take(0) =~= Seq::<Trip>::empty());
+     }
+-    let Some(Content::String(old_text)) = self.files.get(file_path) else {
+-        bail!("Did not find text content in files cache at file_path");
+-    };
+-    let new_text = delta.apply_to(old_text)?;
+-    self.files
+-        .insert(file_path.clone(), Content::String(new_text));
+-    Ok(())
++    while j < ed_delta.0.len()
++        invariant
++            cons(p) <= MAXL, text@.len() <= L, ins(p) <= L, p == delta.v(), orig == text@, e == ed_of(p),
++            decodes(ed_delta.0@, text@, e),
++            j <= e.len(), doc@ == run(orig, e.take(j as int)), offset == osum(e.take(j as int)),
++            ed_delta.0@.len() == e.len(),
++        decreases ed_delta.0@.len() - j,
++    {
++        let op = &ed_delta.0[j];
++        let (start, length) = match op.range.as_relative(text) { Ok(x) => x, Err(e) => return Err(e) };
++        proof {
++            lemma_ed_split(p, j as int);
++            let m = choose|m: int| 0 <= m < p.len() && #[trigger] ed_of(p.take(m)) =~= e.take(j as int)
++                && ed_of(p.take(m + 1)) =~= e.take(j as int + 1);
++            let q = p.take(m);
++            let o = p[m];
++            assert(p.take(m + 1) =~= q.push(o));
++            lemma_cons_prefix(p, m + 1);
++            lemma_push_unfold(blank(cons(q.push(o)) as int), q, o);
++            lemma_ed_unfold(q, o);
++            let t = e[j as int];
++            assert(e.take(j as int + 1).last() == t);
++            assert(e.take(j as int + 1).drop_last() =~= e.take(j as int));
++            assert(ed_of(q.push(o)).last() == t);
++            assert(ed_of(q.push(o)).drop_last() =~= ed_of(q));
++            assert(ed_delta.0@[j as int].range.start.ok(text@) && ed_delta.0@[j as int].range.end.ok(text@));
++            lemma_off_le(text@, ed_delta.0@[j as int].range.end);
++            assert(t.b <= text@.len());
++            assert(t.a == cons(q) as int);
++            assert(cons(q) + cons_of(o) <= orig.len());
++            lemma_run_step(orig, q, o);
++            lemma_cons_prefix(q, q.len() as int);
++            lemma_run_fsem(orig, q);
++            lemma_len(orig.take(cons(q) as int), q);
++            assert(start as int == t.a && length as int == t.b - t.a);
++            assert(osum(e.take(j as int)) == prod(q) as int - cons(q) as int);
++            assert(doc@ == fsem(orig, q));
++            assert(doc@.len() == prod(q) + orig.len() - cons(q));
++            assert(prod(q) <= cons(q) + ins(q));
++            assert(ins(q) <= ins(p));
++            assert(ed_delta.0@[j as int].replacement@.len() <= ins(p)) by {
++                lemma_cons_prefix(p, m + 1);
++                assert(ins(q.push(o)) <= ins(p));
++            }
++        }
++        let rep_len = num_chars(op.replacement.as_str());
++        let at = ((start as isize) + offset) as usize;
++        splice_chars(&mut doc, at, length, op.replacement.as_str());
++        offset = offset - (length as isize) + (rep_len as isize);
++        proof {
++            let t = e[j as int];
++            assert(e.take(j as int + 1).drop_last() =~= e.take(j as int));
++            assert(e.take(j as int + 1).last() == t);
++        }
++        j += 1;
++    }
++    proof {
++        if cons(p) <= text@.len() {
++            assert(j == ed_delta.0@.len());
++            assert(e.take(j as int) =~= e);
++            lemma_run_fsem(orig, p);
++        }
++    }
++    Ok(string_of(&doc))
+ }

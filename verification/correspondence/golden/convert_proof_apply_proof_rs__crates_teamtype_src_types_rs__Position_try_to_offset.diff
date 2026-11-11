@@ -1,0 +1,31 @@
+--- repo
++++ proof
+-fn try_to_offset(&self, content: &str) -> Result<usize> {
++pub fn try_to_offset(&self, content: &str) -> (r: Result<usize, Error>)
++    ensures
++        self.ok(content@) ==> r == Ok::<usize, Error>(self.off(content@) as usize),
++        !self.ok(content@) ==> r is Err,
++        r matches Ok(o) ==> o <= content@.len(),
++{
++    proof { axiom_str_len(content); lemma_lines(content@); }
+     let rope = Rope::from_str(content);
++    proof { if self.ok(content@) { lemma_pos_rt(content@, self.line as int, self.character as int); } }
+     if self.line >= rope.len_lines() {
+-        bail!("Position is referencing a line that doesn't exist in the content")
++        return Err(Error);
+     }
+     let line = rope.line(self.line);
+     let mut line_length = line.len_chars();
+     if self.line + 1 < rope.len_lines() {
++        proof { assert(start(content@, self.line as int) < start(content@, self.line as int + 1)); }
+         line_length -= 1;
+     }
+     if self.character > line_length {
+-        bail!("Position is referencing a character that doesn't exist in the given line")
++        return Err(Error);
+     }
+-    Ok(rope.try_line_to_char(self.line)? + self.character)
++    proof { assert(self.ok(content@)); lemma_pos_rt(content@, self.line as int, self.character as int); }
++    let st = match rope.try_line_to_char(self.line) { Ok(x) => x, Err(e) => return Err(e) };
++    Ok(st + self.character)
+ }

@@ -4,3 +4,4 @@
 ../protocol/refinement.rs
 ../round2_tp1/tp1.rs
 ../round2_deltas/refinement.rs
+../convert_proof/apply_proof.rs

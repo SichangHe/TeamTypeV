@@ -95,7 +95,7 @@ def find_item(src, sel):
             ranges.append((h.start(), match_brace(m, h.start())))
     else:
         name = sel; ranges = [(0, len(m))]
-    pat = r'^[ \t]*(pub(\([^)]*\))?\s+)?(const\s+)?(async\s+)?(unsafe\s+)?fn\s+%s\b' % re.escape(name)
+    pat = r'^[ \t]*(pub(\([^)]*\))?\s+)?(const\s+)?(async\s+)?(unsafe\s+)?((proof|spec|open|closed|exec|broadcast)\s+)*fn\s+%s\b' % re.escape(name)
     hits = [(a + h.start()) for a, b in ranges for h in re.finditer(pat, m[a:b], re.M)]
     if len(hits) != 1: raise SystemExit(f'selector {sel!r}: {len(hits)} matches (need exactly 1)')
     s = hits[0]; semi = m.find(';', s); br = m.find('{', s)
@@ -164,7 +164,28 @@ def main():
         if not a.proofs:
             for g in sorted(os.listdir(a.golden)):
                 if g.endswith('.diff') and g not in seen: print('FAIL orphan golden', g); bad += 1
+        bad += verbatim_check()
         print(f'corr: {n} regions, {bad} failures'); sys.exit(1 if bad else 0)
 
+
+
+def verbatim_check():
+    # verbatim.txt lines: "<copy.rs> <base.rs> <anchor-fn>" (paths relative to this dir's parent).
+    # The copy's text up to and including `fn <anchor>` must equal the base's text up to the same
+    # item (comments/blank lines/indent ignored), so the copied prefix cannot diverge.
+    vp = os.path.join(HERE, 'verbatim.txt'); bad = 0
+    if not os.path.exists(vp): return 0
+    for line in open(vp):
+        if not line.strip() or line.startswith('#'): continue
+        cp, bp, anchor = line.split()
+        out = []
+        for rel in (cp, bp):
+            src = open(os.path.join(HERE, '..', rel), encoding='utf-8').read()
+            item = find_item(src, anchor)
+            out.append(norm(src[:src.index(item) + len(item)]))
+        if out[0] != out[1]:
+            bad += 1; print(f'FAIL verbatim {cp} vs {bp} up to {anchor}')
+            sys.stdout.writelines(l + '\n' for l in list(difflib.unified_diff(out[1], out[0], 'base', 'copy', n=1, lineterm=''))[:40])
+    return bad
 
 main()

@@ -5,3 +5,5 @@
 ../boundary_proof/boundary.rs
 ../round2_tp1/tp1.rs
 ../round2_deltas/refinement.rs --num-threads 4
+../convert_proof/apply_proof.rs
+../liveness_proof/teamtype_liveness.rs

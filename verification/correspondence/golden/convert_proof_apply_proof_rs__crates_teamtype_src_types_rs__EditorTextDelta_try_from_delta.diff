@@ -1,0 +1,88 @@
+--- repo
++++ proof
+-pub fn try_from_delta(delta: TextDelta, content: &str) -> Result<Self> {
+-    let mut editor_ops = vec![];
+-    let mut position = 0;
+-    for op in delta {
+-        match op {
+-            TextOp::Retain(n) => position += n,
++pub fn try_from_delta(delta: TextDelta, content: &str) -> (r: Result<EditorTextDelta, Error>)
++    requires cons(delta.v()) <= MAXL,
++    ensures
++        r matches Ok(d) ==> decodes(d.0@, content@, ed_of(delta.v())),
++        cons(delta.v()) <= content@.len() ==> r is Ok,
++{
++    let ghost p0 = delta.v();
++    let mut editor_ops: Vec<EditorTextOp> = Vec::new();
++    let mut position: usize = 0;
++    let mut i: usize = 0;
++    proof { assert(tvops(delta.0@.take(0)) =~= Seq::<SOp>::empty()); axiom_str_len(content); }
++    while i < delta.0.len()
++        invariant
++            i <= delta.0@.len(), cons(p0) <= MAXL, p0 == delta.v(),
++            position == cons(tvops(delta.0@.take(i as int))),
++            decodes(editor_ops@, content@, ed_of(tvops(delta.0@.take(i as int)))),
++            cons(p0) <= content@.len() ==> cons(tvops(delta.0@.take(i as int))) <= cons(p0),
++        decreases delta.0@.len() - i,
++    {
++        let ghost p = tvops(delta.0@.take(i as int));
++        let ghost o = tvop(delta.0@[i as int]);
++        let ghost old_ops = editor_ops@;
++        proof {
++            assert(tvops(delta.0@.take(i + 1)) =~= p.push(o));
++            assert(p.push(o).drop_last() =~= p);
++            assert(p0 =~= tvops(delta.0@.take(i + 1)) + tvops(delta.0@.skip(i + 1)));
++            lemma_add(tvops(delta.0@.take(i + 1)), tvops(delta.0@.skip(i + 1)));
++            lemma_push_unfold(blank(0), p, o);
++            lemma_ed_unfold(p, o);
++        }
++        match &delta.0[i] {
++            TextOp::Retain(n) => position += *n,
+             TextOp::Delete(n) => {
+-                editor_ops.push(EditorTextOp {
+-                    range: Range {
+-                        start: Position::try_from_offset(position, content)?,
+-                        end: Position::try_from_offset(position + n, content)?,
+-                    },
+-                    replacement: String::new(),
+-                });
+-                position += n;
++                let start = match Position::try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
++                let end = match Position::try_from_offset(position + *n, content) { Ok(p) => p, Err(e) => return Err(e) };
++                editor_ops.push(EditorTextOp { range: Range { start, end }, replacement: String::new() });
++                position += *n;
+             }
+             TextOp::Insert(s) => {
+-                editor_ops.push(EditorTextOp {
+-                    range: Range {
+-                        start: Position::try_from_offset(position, content)?,
+-                        end: Position::try_from_offset(position, content)?,
+-                    },
+-                    replacement: s.clone(),
+-                });
++                let start = match Position::try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
++                let end = match Position::try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
++                editor_ops.push(EditorTextOp { range: Range { start, end }, replacement: s.clone() });
+             }
+         }
++        proof {
++            let e2 = ed_of(tvops(delta.0@.take(i + 1)));
++            assert(cons(p.push(o)) <= cons(p0)) by {
++                assert(p0 =~= p.push(o) + tvops(delta.0@.skip(i + 1)));
++            }
++            assert(decodes(editor_ops@, content@, e2)) by {
++                assert forall|j: int| 0 <= j < editor_ops@.len() implies {
++                    &&& (#[trigger] editor_ops@[j]).range.start.ok(content@) && editor_ops@[j].range.start.off(content@) == e2[j].a
++                    &&& editor_ops@[j].range.end.ok(content@) && editor_ops@[j].range.end.off(content@) == e2[j].b
++                    &&& editor_ops@[j].replacement@ == e2[j].r
++                } by {
++                    if j < old_ops.len() { assert(editor_ops@[j] == old_ops[j]); }
++                }
++            }
++        }
++        i += 1;
+     }
+-    Ok(Self(editor_ops))
++    proof { assert(delta.0@.take(i as int) =~= delta.0@); }
++    Ok(EditorTextDelta(editor_ops))
+ }
