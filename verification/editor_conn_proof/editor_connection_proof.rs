@@ -2210,5 +2210,78 @@ pub proof fn example_disk_edit_then_peer_removal(st: DState, f: int, o3: int)
     assert(st4.eds[2][f].cur == ap(st2.eds[2][f].cur, del_all(doc_text(st2, f).len())));
 }
 
+// =====================================================================================
+// REFINEMENT OF daemon.rs `send_disk_edits` (corr-marked) + queue-discipline skeleton of handle_message /
+// react_to_message_from_editor (hand-written, NOT corr-marked; guarded by the runtime `debug_assert`s in daemon.rs).
+// Proves: (a) `send_disk_edits` returns only with nothing queued, even though broadcasting to a dead editor can queue
+// more edits (the bug fixed in edb933d); partial correctness only: termination depends on the environment
+// (each pass needs an outside write to refill the queue) and is NOT proved. (b) in the skeleton, `message_from_editor`
+// is only reachable with an empty queue, and a message handler ends with an empty queue, hence the next one starts empty.
+// =====================================================================================
+pub type EditorId = u64;
+
+pub struct DocumentActor {
+    pub disk_edits: Vec<ComponentMessage>,
+}
+
+#[verifier::external_body]
+pub fn take_edits(v: &mut Vec<ComponentMessage>) -> (r: Vec<ComponentMessage>)
+    ensures final(v)@.len() == 0, r@.len() == old(v)@.len(),
+{ unimplemented!() }
+
+impl DocumentActor {
+    // `broadcast_to_editors`: sends to every editor; a failed send drops the editor and runs `release_files`, which can
+    // merge a new outside write, so it may queue ANY number of new disk edits (ASSUMED: no other field matters here)
+    #[verifier::external_body]
+    pub fn broadcast_to_editors(&mut self, exclude_id: Option<EditorId>, message: &ComponentMessage)
+    { unimplemented!() }
+
+    // corr: crates/teamtype/src/daemon.rs :: DocumentActor::send_disk_edits
+    #[verifier::exec_allows_no_decreases_clause]
+    pub fn send_disk_edits(&mut self)
+        ensures final(self).disk_edits@.len() == 0,
+    {
+        while self.disk_edits.len() != 0 {
+            let messages = take_edits(&mut self.disk_edits);
+            let mut i: usize = 0;
+            while i < messages.len()
+                invariant i <= messages@.len(),
+                decreases messages@.len() - i,
+            {
+                self.broadcast_to_editors(None, &messages[i]);
+                i += 1;
+            }
+        }
+    }
+    // corr-end
+
+    // the whole sequence of editor-facing steps of a handler, abstracted: arbitrary effects, may queue disk edits
+    #[verifier::external_body]
+    pub fn handler_body(&mut self) { unimplemented!() }
+    // `EditorConnection::message_from_editor` as called from react_to_message_from_editor: its model-level
+    // contract (EditorEdit/EditorOpen steps) needs nothing queued
+    #[verifier::external_body]
+    pub fn call_message_from_editor(&mut self)
+        requires old(self).disk_edits@.len() == 0,
+    { unimplemented!() }
+
+    // skeleton of `handle_message`: dispatch, then `self.send_disk_edits().await;` as its last statement
+    pub fn handle_message_skeleton(&mut self)
+        ensures final(self).disk_edits@.len() == 0,
+    {
+        self.handler_body();
+        self.send_disk_edits();
+    }
+
+    // skeleton of `react_to_message_from_editor`: the pre-`message_from_editor` code (`file_created_or_changed` may queue
+    // edits), then `self.send_disk_edits().await;`, then `message_from_editor`
+    pub fn react_skeleton(&mut self) {
+        self.handler_body();
+        self.send_disk_edits();
+        self.call_message_from_editor();
+    }
+}
+
+
 } // verus!
 fn main() {}
