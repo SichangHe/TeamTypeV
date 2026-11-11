@@ -189,6 +189,26 @@ mod test_serde {
     }
 
     #[test]
+    fn malformed_messages_are_errors_not_panics() {
+        for bad in [
+            "",
+            "{",
+            "null",
+            "[]",
+            r#"{"jsonrpc":"2.0","method":"nope","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"open","params":{}}"#,
+            r#"{"jsonrpc":"2.0","method":"edit","params":{"uri":"file:///f","revision":-1,"delta":[]}}"#,
+            r#"{"jsonrpc":"2.0","method":"edit","params":{"uri":"file:///f","revision":18446744073709551616,"delta":[]}}"#,
+            r#"{"jsonrpc":"2.0","method":"edit","params":{"uri":"file:///f","revision":"1","delta":[]}}"#,
+        ] {
+            assert!(
+                IncomingMessage::from_jsonrpc(bad).is_err(),
+                "accepted {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn success() {
         let message = OutgoingMessage::Response(JSONRPCResponse::RequestSuccess {
             id: 1.into(),

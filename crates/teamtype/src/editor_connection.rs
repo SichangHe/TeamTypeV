@@ -364,6 +364,51 @@ mod tests {
     }
 
     #[test]
+    fn rejected_edits_do_not_open_close_or_corrupt_sessions() {
+        let dir = tempdir().expect("directory");
+        let base = dir.path().canonicalize().expect("canonical");
+        fs::write(base.join("file"), "hello").expect("text");
+        let config = AppConfig {
+            base_dir: base.clone(),
+            ..Default::default()
+        };
+        let mut connection = EditorConnection::new("1".into(), config);
+        let uri = format!("file://{}/file", base.display());
+        let edit = |revision, delta| EditorProtocolMessageFromEditor::Edit {
+            uri: uri.clone(),
+            revision,
+            delta,
+        };
+        // Editing a file that is not open is an error and does not open it.
+        assert!(
+            connection
+                .message_from_editor(true, &edit(0, ed_delta_single((0, 0), (0, 0), "x")))
+                .is_err()
+        );
+        assert!(!connection.owns(&RelativePath::new("file")));
+        connection
+            .message_from_editor(
+                true,
+                &EditorProtocolMessageFromEditor::Open {
+                    uri: uri.clone(),
+                    content: "hello".into(),
+                    saves_file: false,
+                    daemon_writes: true,
+                },
+            )
+            .expect("open");
+        // A revision from the future, a range past the end, and a huge revision are rejected.
+        for bad in [
+            edit(5, ed_delta_single((0, 0), (0, 0), "x")),
+            edit(usize::MAX, ed_delta_single((0, 0), (0, 0), "x")),
+            edit(0, ed_delta_single((0, 99), (0, 99), "x")),
+        ] {
+            assert!(connection.message_from_editor(true, &bad).is_err());
+            assert!(connection.owns(&RelativePath::new("file")));
+        }
+    }
+
+    #[test]
     fn opening_file_in_wrong_dir_fails() {
         let dir = tempdir().expect("Failed to create temp directory");
 
