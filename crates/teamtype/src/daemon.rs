@@ -411,97 +411,12 @@ impl DocumentActor {
                     PatchEffect::NoEffect => None,
                 }));
 
-                let mut file_deltas = vec![];
-
-                for patch_effect in patch_effects {
-                    match patch_effect {
-                        PatchEffect::FileChange(file_text_delta) => {
-                            file_deltas.push(file_text_delta);
-                        }
-                        PatchEffect::FileRemoval(file_path) => {
-                            if git_forward::excluded(&file_path) {
-                                continue;
-                            }
-                            if self.owns(&file_path) && self.crdt_doc.file_exists(&file_path) {
-                                // A peer's file of the same name replaced ours; no further
-                                // patch arrives for it if it is empty.
-                                self.write_file(&file_path);
-                            } else if self.owns(&file_path) {
-                                info!("Removing file {file_path}.");
-                                if self.git_running {
-                                    self.deferred_removals.insert(file_path);
-                                } else {
-                                    self.remove_disk_file(&file_path);
-                                }
-                            } else {
-                                // At least one editor has the file open. We want to allow it to
-                                // keep editing it. Conceptually, we want to treat the file as
-                                // still there, but send deltas to the editor to make it empty.
-
-                                // Delete all previous file_deltas touching that file. After the
-                                // deletion, they are now irrelevant to the editor. And it's easier
-                                // for us to find out the file's content directly before the sync
-                                // message was applied.
-                                file_deltas.retain(|d| d.file_path != file_path);
-
-                                let content_before_sync_message = self
-                                    .file_content_at(&file_path, &heads_before_sync_message)
-                                    .unwrap_or_default();
-
-                                // Proof assumption: what we delete is what every editor holds.
-                                #[cfg(test)]
-                                for (connection, _) in self.editor_connections.values() {
-                                    if let Some(text) = connection.server_text(&file_path) {
-                                        assert_eq!(
-                                            text, content_before_sync_message,
-                                            "editor text differs from the text before the sync message"
-                                        );
-                                    }
-                                }
-
-                                // Create a delta that deletes all the previous content.
-                                let mut text_delta = TextDelta::default();
-                                text_delta.delete(content_before_sync_message.chars().count());
-                                let delta = FileTextDelta {
-                                    file_path: file_path.clone(),
-                                    delta: text_delta,
-                                };
-                                file_deltas.push(delta);
-
-                                // If the file doesn't exist anymore after the sync message was
-                                // applied (which is now!), we'd like it to be there again. So
-                                // re-create an empty version.
-                                if self.crdt_doc.file_exists(&file_path) {
-                                    // If the file is still there, the upcoming patches of the sync
-                                    // message will re-add it for us. In that case, we don't want
-                                    // to touch it in the doc, because we will send the
-                                    // modifications to the editors, and these contents should be
-                                    // consistent. So we don't need to do anything.
-                                } else {
-                                    info!(
-                                        "Peer deleted {file_path}, but you have it open in an editor. Bringing back an empty version."
-                                    );
-                                    self.crdt_doc.update_text("", &file_path);
-                                }
-                            }
-                        }
-                        PatchEffect::FileBytes(file_path, _) => {
-                            self.invalidate_editor_file(&file_path);
-                            self.write_file(&file_path);
-                        }
-                        PatchEffect::NoEffect => {}
-                    }
-                }
+                let file_deltas =
+                    self.apply_patch_effects(patch_effects, &heads_before_sync_message);
 
                 self.write_files_changed_in_file_deltas(&file_deltas);
 
-                for file_text_delta in &file_deltas {
-                    let message = ComponentMessage::Edit {
-                        file_path: file_text_delta.file_path.clone(),
-                        delta: file_text_delta.delta.clone(),
-                    };
-                    self.broadcast_to_editors(None, &message).await;
-                }
+                self.broadcast_file_deltas(&file_deltas).await;
 
                 if response_tx.send(peer_state).is_err() {
                     warn!("Failed to send peer state in response to ReceiveSyncMessage.");
@@ -1101,6 +1016,123 @@ impl DocumentActor {
     fn invalidate_editor_file(&mut self, path: &RelativePath) {
         for (connection, _) in self.editor_connections.values_mut() {
             connection.invalidate_file(path);
+        }
+    }
+
+    /// Reacts to the effects of a sync message on the shared files and returns the edits the
+    /// editors must be sent, in document order.
+    fn apply_patch_effects(
+        &mut self,
+        patch_effects: Vec<PatchEffect>,
+        heads_before_sync_message: &[ChangeHash],
+    ) -> Vec<FileTextDelta> {
+        let mut file_deltas = vec![];
+
+        for patch_effect in patch_effects {
+            match patch_effect {
+                PatchEffect::FileChange(file_text_delta) => {
+                    file_deltas.push(file_text_delta);
+                }
+                PatchEffect::FileRemoval(file_path) => {
+                    if git_forward::excluded(&file_path) {
+                        continue;
+                    }
+                    if self.owns(&file_path) && self.crdt_doc.file_exists(&file_path) {
+                        // A peer's file of the same name replaced ours; no further
+                        // patch arrives for it if it is empty.
+                        self.write_file(&file_path);
+                    } else if self.owns(&file_path) {
+                        info!("Removing file {file_path}.");
+                        if self.git_running {
+                            self.deferred_removals.insert(file_path);
+                        } else {
+                            self.remove_disk_file(&file_path);
+                        }
+                    } else {
+                        self.remove_file_open_in_editor(
+                            &file_path,
+                            &heads_before_sync_message,
+                            &mut file_deltas,
+                        );
+                    }
+                }
+                PatchEffect::FileBytes(file_path, _) => {
+                    self.invalidate_editor_file(&file_path);
+                    self.write_file(&file_path);
+                }
+                PatchEffect::NoEffect => {}
+            }
+        }
+
+        file_deltas
+    }
+
+    /// A peer deleted `file_path` while an editor has it open: the editors are sent a delta that
+    /// empties the file, and the shared file is brought back empty if the sync message removed it.
+    fn remove_file_open_in_editor(
+        &mut self,
+        file_path: &RelativePath,
+        heads_before_sync_message: &[ChangeHash],
+        file_deltas: &mut Vec<FileTextDelta>,
+    ) {
+        // At least one editor has the file open. We want to allow it to
+        // keep editing it. Conceptually, we want to treat the file as
+        // still there, but send deltas to the editor to make it empty.
+
+        // Delete all previous file_deltas touching that file. After the
+        // deletion, they are now irrelevant to the editor. And it's easier
+        // for us to find out the file's content directly before the sync
+        // message was applied.
+        file_deltas.retain(|d| &d.file_path != file_path);
+
+        let content_before_sync_message = self
+            .file_content_at(file_path, heads_before_sync_message)
+            .unwrap_or_default();
+
+        // Proof assumption: what we delete is what every editor holds.
+        #[cfg(test)]
+        for (connection, _) in self.editor_connections.values() {
+            if let Some(text) = connection.server_text(file_path) {
+                assert_eq!(
+                    text, content_before_sync_message,
+                    "editor text differs from the text before the sync message"
+                );
+            }
+        }
+
+        // Create a delta that deletes all the previous content.
+        let mut text_delta = TextDelta::default();
+        text_delta.delete(content_before_sync_message.chars().count());
+        let delta = FileTextDelta {
+            file_path: file_path.clone(),
+            delta: text_delta,
+        };
+        file_deltas.push(delta);
+
+        // If the file doesn't exist anymore after the sync message was
+        // applied (which is now!), we'd like it to be there again. So
+        // re-create an empty version.
+        if self.crdt_doc.file_exists(file_path) {
+            // If the file is still there, the upcoming patches of the sync
+            // message will re-add it for us. In that case, we don't want
+            // to touch it in the doc, because we will send the
+            // modifications to the editors, and these contents should be
+            // consistent. So we don't need to do anything.
+        } else {
+            info!(
+                "Peer deleted {file_path}, but you have it open in an editor. Bringing back an empty version."
+            );
+            self.crdt_doc.update_text("", file_path);
+        }
+    }
+
+    async fn broadcast_file_deltas(&mut self, file_deltas: &[FileTextDelta]) {
+        for file_text_delta in file_deltas {
+            let message = ComponentMessage::Edit {
+                file_path: file_text_delta.file_path.clone(),
+                delta: file_text_delta.delta.clone(),
+            };
+            self.broadcast_to_editors(None, &message).await;
         }
     }
 
