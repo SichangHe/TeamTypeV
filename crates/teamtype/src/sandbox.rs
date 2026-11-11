@@ -167,20 +167,6 @@ pub fn exists(absolute_base_dir: &Path, absolute_file_path: &Path) -> Result<boo
 }
 
 pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
-    let ignored_things = [
-        ".teamtypev",
-        ".teamtype",
-        ".teamtypeignore",
-        ".ethersync",
-        ".ethersyncignore",
-        ".git",
-        ".bzr",
-        ".hg",
-        ".jj",
-        ".pijul",
-        ".svn",
-    ];
-
     let walk = WalkBuilder::new(&app_config.base_dir)
         .add_custom_ignore_filename(".teamtypevignore")
         .standard_filters(true)
@@ -194,7 +180,7 @@ pub fn enumerate_non_ignored_files(app_config: &AppConfig) -> Vec<PathBuf> {
                 .expect("Failed to get file name from path.")
                 .to_str()
                 .expect("Failed to convert OsStr to str");
-            !ignored_things.contains(&name) && !name.ends_with('~')
+            !crate::git_forward::EXCLUDED_NAMES.contains(&name) && !name.ends_with('~')
         })
         .build();
 

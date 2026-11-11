@@ -16,7 +16,7 @@ use automerge::{
     transaction::Transactable,
 };
 use dissimilar::Chunk;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     path::RelativePath,
@@ -115,7 +115,7 @@ impl Document {
 
         // Update files cache.
         for patch in &patches {
-            match PatchEffect::try_from(patch).expect("Should be able to convert to patch effect") {
+            match PatchEffect::from_patch(patch) {
                 PatchEffect::FileChange(file_text_delta) => {
                     let old_text = if let Some(Content::String(old_text)) =
                         self.files.get(&file_text_delta.file_path)
@@ -411,7 +411,8 @@ impl Document {
                             .insert(RelativePath::new(&file_path), Content::Bytes(bytes.clone()));
                     }
                     _ => {
-                        panic!("Found unexpected object while iterating over Automerge document");
+                        // A peer can put anything under a key; only text and bytes are files.
+                        warn!("Ignoring unsupported value at {file_path} in the document");
                     }
                 }
             }
@@ -637,6 +638,52 @@ mod tests {
             }
         }
         assert_eq!(editor, "new");
+    }
+
+    /// A peer can put any value under a `files` key. The daemon must not crash on it; the cache
+    /// must keep equalling what a reload of the CRDT reads, and a file replaced by an
+    /// unsupported value counts as removed.
+    #[test]
+    fn unsupported_values_from_peers_do_not_crash_and_keep_cache_equal_to_crdt() {
+        let (mut a, mut b) = (Document::default(), Document::default());
+        let keep = RelativePath::new("keep");
+        let gone = RelativePath::new("gone");
+        a.set_file(Content::String("t".into()), &keep);
+        a.set_file(Content::String("old".into()), &gone);
+        sync(&mut a, &mut b);
+        b.assert_file_content(&gone, "old");
+
+        let files = a.top_level_map_obj("files").unwrap();
+        a.doc.put(&files, "gone", 7_i64).unwrap();
+        a.doc.put(&files, "int", 5_i64).unwrap();
+        a.doc.put_object(&files, "map", ObjType::Map).unwrap();
+        let patches = sync(&mut a, &mut b);
+        let effects = PatchEffect::from_crdt_patches(&patches);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, PatchEffect::FileRemoval(p) if *p == gone))
+        );
+
+        b.assert_file_content(&keep, "t");
+        for name in ["gone", "int", "map"] {
+            let path = RelativePath::new(name);
+            assert_eq!(b.current_file_content(&path), None, "{name}");
+            assert_cache_matches_crdt(&mut b, &path);
+        }
+    }
+
+    /// Loading a document that holds an unsupported value must not crash either.
+    #[test]
+    fn loading_a_document_with_unsupported_values_skips_them() {
+        let mut a = Document::default();
+        a.set_file(Content::String("t".into()), &RelativePath::new("keep"));
+        let files = a.top_level_map_obj("files").unwrap();
+        a.doc.put(&files, "int", 5_i64).unwrap();
+        let bytes = a.save();
+        let loaded = Document::load(&bytes);
+        assert_eq!(loaded.current_file_content(&RelativePath::new("int")), None);
+        loaded.assert_file_content(&RelativePath::new("keep"), "t");
     }
 
     /// The cache must equal what the CRDT itself holds, which a reload reads without the cache.

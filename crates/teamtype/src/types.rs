@@ -4,7 +4,6 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use std::borrow::Cow;
 use std::{fmt, vec};
 
 use anyhow::bail;
@@ -177,21 +176,32 @@ pub enum PatchEffect {
 }
 
 impl PatchEffect {
-    pub fn from_crdt_patches(patches: &[Patch]) -> Vec<Self> {
-        let mut file_deltas: Vec<Self> = vec![];
-
-        for patch in patches {
-            match patch.try_into() {
-                Ok(result) => {
-                    file_deltas.push(result);
-                }
-                Err(e) => {
-                    panic!("Failed to convert patch to delta: {e:#?}");
+    /// The effect of one patch. Patches come from peers, so a shape we do not support must not
+    /// crash the daemon: a value we cannot represent at `files/<name>` counts as the file no
+    /// longer existing (the cache cannot hold it either); any other unsupported shape is ignored.
+    /// `Document` uses this too, so cache and effects always agree.
+    pub fn from_patch(patch: &Patch) -> Self {
+        match Self::try_from(patch) {
+            Ok(effect) => effect,
+            Err(e) => {
+                if let ([(_, Prop::Map(files))], PatchAction::PutMap { key, .. }) =
+                    (patch.path.as_slice(), &patch.action)
+                    && files == "files"
+                {
+                    warn!(
+                        "Peer put an unsupported value at {key}; treating the file as removed: {e:#}"
+                    );
+                    Self::FileRemoval(RelativePath::new(key))
+                } else {
+                    warn!("Ignoring unsupported patch from peer: {e:#}");
+                    Self::NoEffect
                 }
             }
         }
+    }
 
-        file_deltas
+    pub fn from_crdt_patches(patches: &[Patch]) -> Vec<Self> {
+        patches.iter().map(Self::from_patch).collect()
     }
 }
 
@@ -394,7 +404,12 @@ impl TryFrom<&Patch> for PatchEffect {
                                     // The removal also creates the (possibly empty) file on disk.
                                     Ok(Self::FileRemoval(relative_path))
                                 }
-                                (Value::Scalar(Cow::Owned(ScalarValue::Bytes(bytes))), _) => {
+                                (Value::Scalar(scalar), _)
+                                    if matches!(scalar.as_ref(), ScalarValue::Bytes(_)) =>
+                                {
+                                    let ScalarValue::Bytes(bytes) = scalar.as_ref() else {
+                                        unreachable!()
+                                    };
                                     Ok(Self::FileBytes(relative_path, bytes.clone()))
                                 }
                                 _ => bail!("Unexpected value in path {relative_path}"),

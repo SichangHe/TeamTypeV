@@ -169,27 +169,31 @@ impl GitHandle {
     }
 }
 
+/// Names that mark metadata: a path with such a component is never shared, and no editor may open
+/// it. The one list, used by `excluded` and by the directory walk in `sandbox`.
+pub const EXCLUDED_NAMES: [&str; 11] = [
+    ".teamtypev",
+    ".teamtype",
+    ".teamtypeignore",
+    ".ethersync",
+    ".ethersyncignore",
+    ".git",
+    ".hg",
+    ".jj",
+    ".bzr",
+    ".pijul",
+    ".svn",
+];
+
 /// Paths that are never shared: metadata directories, and anything that is not a plain relative
 /// path (peers choose document keys, so `..`, a root, or an empty key must not reach the disk).
 pub fn excluded(path: &Path) -> bool {
     path.as_os_str().is_empty()
         || path.components().any(|component| {
             !matches!(component, std::path::Component::Normal(_))
-                || [
-                    ".teamtypev",
-                    ".teamtype",
-                    ".teamtypeignore",
-                    ".ethersync",
-                    ".ethersyncignore",
-                    ".git",
-                    ".hg",
-                    ".jj",
-                    ".bzr",
-                    ".pijul",
-                    ".svn",
-                ]
-                .iter()
-                .any(|name| component.as_os_str() == *name)
+                || EXCLUDED_NAMES
+                    .iter()
+                    .any(|name| component.as_os_str() == *name)
         })
 }
 
@@ -855,6 +859,14 @@ fn validate_args(args: &[Vec<u8>]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_excluded_name_is_excluded_anywhere_in_a_path() {
+        for name in EXCLUDED_NAMES {
+            assert!(excluded(Path::new(name)), "{name}");
+            assert!(excluded(&Path::new("a").join(name).join("b")), "{name}");
+        }
+    }
+
     use super::*;
     use crate::peer::sync::{Connection, PeerMessage, SyncActor};
     include!("git_save_tests.rs");
