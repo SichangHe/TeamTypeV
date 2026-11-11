@@ -1203,7 +1203,11 @@ impl DocumentActor {
         .with_context(|| format!("Failed to write to file {abs_path}"))?;
         if let Some(displaced) = displaced {
             let outside = self.disk_content.get(file_path) != Some(&displaced);
-            if self.disk_content.contains_key(file_path) {
+            // Also without a record: a file created outside and not yet seen by the watcher
+            // would otherwise be lost, since its watcher event only finds our bytes. An empty
+            // file without a record holds nothing to lose (it may be the placeholder that
+            // opening a new file creates), and merging it would replace the shared text.
+            if outside && (self.disk_content.contains_key(file_path) || !displaced.is_empty()) {
                 self.merge_disk_content(file_path, displaced);
             }
             if outside && self.persist {

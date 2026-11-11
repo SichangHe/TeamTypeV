@@ -771,3 +771,28 @@ fn merging_an_outside_change_into_unchanged_shared_text_gives_the_outside_text()
         );
     }
 }
+
+// An outside process creates a file that the daemon has never seen (no `disk_content` record)
+// while a peer creates the same path. If the daemon writes the peer's text before the watcher
+// event for the outside file arrives, the displaced outside bytes must still reach the shared
+// document; the later watcher event only sees the daemon's own bytes.
+#[test]
+fn outside_created_file_displaced_before_its_watcher_event_is_merged() {
+    for persist in [false, true] {
+        let dir = tempdir().unwrap();
+        let mut actor = peer_actor(&dir, true);
+        actor.persist = persist;
+        let path = RelativePath::new("n");
+        actor.crdt_doc.update_text("peer\n", &path);
+        std::fs::write(dir.path().join("n"), "local\n").unwrap();
+        assert!(!actor.disk_content.contains_key(&path));
+        actor.write_file(&path);
+        actor.file_created_or_changed(&path);
+        let shared = match actor.current_file_content(&path) {
+            Some(Content::String(text)) => text.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(shared.contains("local"), "outside text lost: {shared:?}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap(), shared);
+    }
+}

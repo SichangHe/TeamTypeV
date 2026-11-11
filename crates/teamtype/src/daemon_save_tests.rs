@@ -589,3 +589,56 @@ fn skipping_a_write_that_is_already_on_disk_still_saves_the_document() -> Result
     );
     Ok(())
 }
+
+// An editor may send `open` for a file it already has open, without `close`. The daemon then
+// replaces that file's OT session with a fresh one at revision 0 holding the editor's buffer and
+// sends the catch-up edit as for a first open, so later edits apply to the shared text. (Daemon
+// edits still in flight from the old session are the reopen hazard of
+// `reopened_session_applies_stale_daemon_edit_unless_old_messages_are_drained`.)
+// Verus model: daemon_proof (`open` on an owner).
+#[tokio::test]
+async fn open_of_an_already_open_file_restarts_its_session() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let path = RelativePath::new("file1");
+    let (uri, _reader) = open_test_editor(&mut actor, &path).await;
+    let edit = |old: &str, new: &str, revision| EditorProtocolMessageFromEditor::Edit {
+        uri: uri.clone(),
+        revision,
+        delta: crate::types::EditorTextDelta::try_from_delta(
+            TextDelta::from(dissimilar::diff(old, new)),
+            old,
+        )
+        .unwrap(),
+    };
+    actor
+        .react_to_message_from_editor(1, &edit("content1", "Xcontent1", 0))
+        .await
+        .expect("edit");
+    actor.assert_file_content(&path, "Xcontent1");
+    // Open again with a stale buffer: the new session starts at that buffer and revision 0.
+    actor
+        .react_to_message_from_editor(
+            1,
+            &EditorProtocolMessageFromEditor::Open {
+                uri: uri.clone(),
+                content: "content1".into(),
+                saves_file: false,
+                daemon_writes: true,
+            },
+        )
+        .await
+        .expect("second open");
+    actor.assert_file_content(&path, "Xcontent1");
+    // An edit made before the editor received the catch-up edit is transformed against it.
+    actor
+        .react_to_message_from_editor(1, &edit("content1", "content1Y", 0))
+        .await
+        .expect("edit in the new session");
+    actor.assert_file_content(&path, "Xcontent1Y");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("file1"))?,
+        "Xcontent1Y"
+    );
+    Ok(())
+}
