@@ -160,9 +160,71 @@
   (teamtypev-test--with-buffer "ab"
     (let ((old (list 'session)) (new (list 'session)))
       (setq-local teamtypev--session new teamtypev--synced nil)
-      ;; The old session's answer carries the old token.
-      (when (eq teamtypev--session old) (setq-local teamtypev--synced t))
-      (should-not teamtypev--synced))))
+      (cl-letf (((symbol-function 'find-buffer-visiting) (lambda (_) (current-buffer))))
+        (teamtypev--open-answered teamtypev-test--path old)
+        (should-not teamtypev--synced)
+        (teamtypev--open-answered teamtypev-test--path new)
+        (should teamtypev--synced)))))
+
+;; Randomized protocol scenarios against a reference state machine of the rules proved in
+;; editor_proof: local edits, daemon edits with arbitrary revisions (fitting or not), close, reopen,
+;; and answers to current and stale open requests, in random order.
+(ert-deftest teamtypev-random-protocol-scenarios ()
+  (dotimes (seed 150)
+    (random (format "seed-%d" seed))
+    (teamtypev-test--with-buffer "abc\ndef\n"
+      (let ((live nil) (dr 0) (er 0) (tokens nil) (pending nil))
+        (setq-local teamtypev--synced nil)
+        (cl-flet ((open () (let ((tok (list 'session)))
+                             (push tok tokens)
+                             (setq pending tok live nil)
+                             (setq-local teamtypev--session tok teamtypev--synced nil)))
+                  (close () (setq pending nil live nil)
+                            (setq-local teamtypev--session nil teamtypev--synced nil)))
+          (open)
+          (dotimes (step 40)
+            (let* ((kind (1+ (random 7))) (n (length teamtypev-test--sent))
+                   (ctx (format "seed %d step %d kind %d" seed step kind)))
+              (cl-letf (((symbol-function 'find-buffer-visiting) (lambda (_) (current-buffer))))
+                (pcase kind
+                  (1 (let* ((tok (or (nth (random (max 1 (length tokens))) tokens) (list 'unknown))))
+                       (setq tokens (delq tok tokens))
+                       (teamtypev--open-answered teamtypev-test--path tok)
+                       (when (and pending (eq tok pending))
+                         (setq live t dr 0 er 0 pending nil
+                               teamtypev-test--sent nil
+                               n 0)
+                         (setq-local teamtypev--editor-revision 0 teamtypev--daemon-revision 0
+                                     teamtypev--shadow (teamtypev--buffer-content)))))
+                  (2 (close))
+                  (3 (when (or (null teamtypev--session) (= 1 (random 2))) (open)))
+                  (4 (save-excursion (goto-char 1) (insert "x"))
+                     (if live
+                         (progn (should (= (length teamtypev-test--sent) (1+ n)))
+                                (should (= (caar teamtypev-test--sent) dr))
+                                (setq er (1+ er)))
+                       (when teamtypev--synced (ert-fail ctx))))
+                  (t (let* ((revs (list er er (1- er) (1+ er) 0))
+                            (rev (nth (random (length revs)) revs))
+                            (fits (> (random 3) 0))
+                            (before (buffer-string)))
+                       (if fits
+                           (teamtypev-test--daemon-edit rev 0 0 0 0 "D")
+                         (teamtypev-test--daemon-edit rev 40 0 40 0 "BAD"))
+                       (if (and live (= rev er))
+                           (if fits
+                               (progn (should (equal (buffer-string) (concat "D" before)))
+                                      (should (= (length teamtypev-test--sent) n))
+                                      (setq dr (1+ dr)))
+                             (should (equal (buffer-string) before))
+                             (should (= (length teamtypev-test--sent) (1+ n)))
+                             (should (equal (car teamtypev-test--sent) (cons dr nil)))
+                             (setq er (1+ er)))
+                         (should (equal (buffer-string) before))
+                         (should (= (length teamtypev-test--sent) n)))))))
+              (when live
+                (should (= teamtypev--daemon-revision dr))
+                (should (= teamtypev--editor-revision er))))))))))
 
 (ert-deftest teamtypev-multibyte-positions-count-characters ()
   (teamtypev-test--with-buffer "\U0001F600éb\n"

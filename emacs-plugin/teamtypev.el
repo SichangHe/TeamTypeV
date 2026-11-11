@@ -149,6 +149,18 @@ final empty line exists only after a final newline.  Ignores narrowing."
         (let ((client (teamtypev--find-or-create-client root-dir)))
           (teamtypev--open-file client buffer-file-name))))))
 
+(defun teamtypev--open-answered (filepath session)
+  "Handle the daemon's answer to the `open' request SESSION for FILEPATH.
+The answer of an older request (the buffer was closed and reopened meanwhile) must not start the
+current session: the daemon's edits for the old session precede the answer to the new `open'."
+  (when-let ((buffer (find-buffer-visiting filepath)))
+    (with-current-buffer buffer
+      (setq-local teamtypev--shared t)
+      ;; The daemon sends this session's edits after the answer to `open'.
+      (when (eq teamtypev--session session)
+        (setq-local teamtypev--synced t))))
+  (message "TeamTypeV: tracking %s" filepath))
+
 (cl-defun teamtypev--open-file (client filepath)
   "Open FILEPATH with CLIENT."
   (unless (memq (coding-system-base buffer-file-coding-system) '(utf-8 undecided))
@@ -182,14 +194,7 @@ final empty line exists only after a final newline.  Ignores narrowing."
     (jsonrpc-async-request
      connection 'open `(:uri ,uri :content ,content :daemonWrites t)
      ;; This file is dynamically bound, so the callbacks get `filepath' by backquote.
-     :success-fn `(lambda (_result)
-                   (when-let ((buffer (find-buffer-visiting ,filepath)))
-                     (with-current-buffer buffer
-                       (setq-local teamtypev--shared t)
-                       ;; The daemon sends this session\'s edits after the answer to `open\'.
-                       (when (eq teamtypev--session ,session)
-                         (setq-local teamtypev--synced t))))
-                   (message "TeamTypeV: tracking %s" ,filepath))
+     :success-fn `(lambda (_result) (teamtypev--open-answered ,filepath ,session))
      :error-fn `(lambda (err)
                   (message "TeamTypeV error opening file: %S" err)
                   (when-let ((buffer (find-buffer-visiting ,filepath)))
