@@ -1,0 +1,77 @@
+--- repo
++++ proof
+-pub fn try_from_delta(delta: TextDelta, content: &str) -> Result<Self> {
+-    let mut editor_ops = vec![];
+-    let mut position = 0;
+-    for op in delta {
+-        match op {
+-            TextOp::Retain(n) => position += n,
++pub fn try_from_delta(delta: TextDelta, content: &str) -> (r: Result<EditorTextDelta, Error>)
++    requires cons(delta.v()) <= MAXL,
++    ensures cons(delta.v()) <= content@.len() ==> r is Ok,
++        r matches Ok(d) ==> edits(content@, d) == emitted(delta.v()),
++        cons(delta.v()) <= content@.len() && r is Ok ==>
++            editor_apply(content@, r->Ok_0) == fsem(content@, delta.v()),
++        cons(delta.v()) <= content@.len() && r is Ok ==>
++            edits_wf(edits(content@, r->Ok_0), content@.len() as int),
++{
++    let mut editor_ops: Vec<EditorTextOp> = Vec::new();
++    let mut position: usize = 0;
++    let mut i: usize = 0;
++    proof { assert(tvops(delta.0@.take(0)) =~= Seq::<SOp>::empty()); }
++    while i < delta.0.len()
++        invariant
++            i <= delta.0@.len(), cons(delta.v()) <= MAXL,
++            position == cons(tvops(delta.0@.take(i as int))),
++            edits(content@, EditorTextDelta(editor_ops)) == emitted(tvops(delta.0@.take(i as int))),
++        decreases delta.0@.len() - i,
++    {
++        proof {
++            let p = tvops(delta.0@.take(i as int));
++            let o = tvop(delta.0@[i as int]);
++            assert(tvops(delta.0@.take(i + 1)) =~= p.push(o));
++            assert(p.push(o).drop_last() =~= p);
++            assert(delta.v() =~= tvops(delta.0@.take(i + 1)) + tvops(delta.0@.skip(i + 1)));
++            lemma_add(tvops(delta.0@.take(i + 1)), tvops(delta.0@.skip(i + 1)));
++        }
++        match &delta.0[i] {
++            TextOp::Retain(n) => position += *n,
+             TextOp::Delete(n) => {
+-                editor_ops.push(EditorTextOp {
+-                    range: Range {
+-                        start: Position::try_from_offset(position, content)?,
+-                        end: Position::try_from_offset(position + n, content)?,
+-                    },
+-                    replacement: String::new(),
+-                });
+-                position += n;
++                let start = match position_try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
++                let end = match position_try_from_offset(position + *n, content) { Ok(p) => p, Err(e) => return Err(e) };
++                editor_ops.push(EditorTextOp { range: Range { start, end }, replacement: String::new() });
++                position += *n;
+             }
+             TextOp::Insert(s) => {
+-                editor_ops.push(EditorTextOp {
+-                    range: Range {
+-                        start: Position::try_from_offset(position, content)?,
+-                        end: Position::try_from_offset(position, content)?,
+-                    },
+-                    replacement: s.clone(),
+-                });
++                let start = match position_try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
++                let end = match position_try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
++                editor_ops.push(EditorTextOp { range: Range { start, end }, replacement: s.clone() });
+             }
+         }
++        i += 1;
+     }
+-    Ok(Self(editor_ops))
++    proof {
++        assert(tvops(delta.0@.take(i as int)) =~= delta.v());
++        if cons(delta.v()) <= content@.len() {
++            emitted_semantics(content@, delta.v());
++            edits_wf_extend(emitted(delta.v()), cons(delta.v()) as int, content@.len() as int);
++        }
++    }
++    Ok(EditorTextDelta(editor_ops))
+ }

@@ -3,3 +3,5 @@
 ../positions/refinement.rs
 ../protocol/refinement.rs
 ../boundary_proof/boundary.rs
+../round2_tp1/tp1.rs
+../round2_deltas/refinement.rs --num-threads 4

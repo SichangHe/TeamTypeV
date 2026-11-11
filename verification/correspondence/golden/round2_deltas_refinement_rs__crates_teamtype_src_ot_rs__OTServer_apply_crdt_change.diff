@@ -1,0 +1,71 @@
+--- repo
++++ proof
+-pub fn apply_crdt_change(&mut self, delta: &TextDelta) -> Result<RevisionedEditorTextDelta> {
+-    let op_seq: OperationSeq = delta.clone().into();
+-    if op_seq.base_len() > self.current_content.chars().count() {
+-        bail!("CRDT change does not fit the current content.");
++#[verifier::spinoff_prover] #[verifier::rlimit(200)]
++pub fn apply_crdt_change_fixed(&mut self, delta: &TextDelta) -> (r: Result<RevisionedEditorTextDelta, Error>)
++    requires
++        old(self).inv(), old(self).daemon_revision < usize::MAX,
++        cons(delta.v()) <= MAXL, prod(delta.v()) <= MAXL, ins(delta.v()) <= L,
++        cons(delta.v()) <= old(self).current_content@.len() ==>
++            prod(delta.v()) + old(self).current_content@.len() - cons(delta.v()) <= L,
++    ensures
++        r is Err ==> {
++            &&& final(self).editor_revision == old(self).editor_revision
++            &&& final(self).daemon_revision == old(self).daemon_revision
++            &&& final(self).operations@ == old(self).operations@
++            &&& final(self).editor_queue@ == old(self).editor_queue@
++            &&& final(self).current_content@ == old(self).current_content@
++            &&& final(self).last_confirmed_editor_content@ == old(self).last_confirmed_editor_content@
++        },
++        cons(delta.v()) > old(self).current_content@.len() ==> r is Err,
++        cons(delta.v()) <= old(self).current_content@.len() ==> r is Ok,
++        r is Ok ==> final(self).current_content@ == fsem(old(self).current_content@, delta.v()),
++        r is Ok ==> final(self).daemon_revision == old(self).daemon_revision + 1,
++        r is Ok ==> r->Ok_0.revision == old(self).editor_revision,
++        r is Ok ==> editor_apply(old(self).current_content@, r->Ok_0.delta)
++            == final(self).current_content@,
++        r is Ok ==> edits_wf(edits(old(self).current_content@, r->Ok_0.delta),
++            old(self).current_content@.len() as int),
++        final(self).inv(),
++{
++    let op_seq = delta_to_op_seq(delta.clone_delta()); // src: `delta.clone().into()`
++    if op_seq.base_len > num_chars(self.current_content.as_str()) {
++        return Err(Error);
+     }
+-    let editor_delta = EditorTextDelta::try_from_delta(delta.clone(), &self.current_content).context("Failed to convert delta to editor delta, under the given content. Was the edit invalid?")?;
+-    self.operations.push(op_seq.clone());
+-    self.editor_queue.push(op_seq.clone());
++    let editor_delta = match try_from_delta(delta.clone_delta(), self.current_content.as_str()) {
++        Ok(d) => d,
++        Err(e) => return Err(e),
++    };
++    proof {
++        lemma_len(blank(cons(delta.v()) as int), delta.v());
++        assert(old(self).editor_queue@.take(old(self).editor_queue@.len() as int) =~= old(self).editor_queue@);
++        assert(chain(old(self).last_confirmed_editor_content@, old(self).editor_queue@.take(old(self).editor_queue@.len() as int)).len() <= L);
++    }
++    self.operations.push(op_seq.clone_seq());
++    self.editor_queue.push(op_seq.clone_seq());
+     self.daemon_revision += 1;
+-    self.current_content = Self::force_apply(&self.current_content, op_seq);
++    proof {
++        let lc = self.last_confirmed_editor_content@;
++        let q0 = old(self).editor_queue@;
++        let q = self.editor_queue@;
++        let x = self.current_content@;
++        assert(q.drop_last() =~= q0);
++        assert(q.take(q0.len() as int) =~= q0);
++        assert forall|i: int| 0 <= i < q.len() implies #[trigger] q[i].wf() && q[i].base_len <= chain(lc, q.take(i)).len() by {
++            if i < q0.len() { assert(q.take(i) =~= q0.take(i)); }
++        }
++        lemma_fsem_len(x, op_seq.v());
++        assert forall|i: int| 0 <= i <= q.len() implies (#[trigger] chain(lc, q.take(i))).len() <= L by {
++            if i <= q0.len() { assert(q.take(i) =~= q0.take(i)); } else { assert(q.take(i) =~= q); }
++        }
++    }
++    self.current_content = force_apply(self.current_content.as_str(), op_seq);
+     Ok(RevisionedEditorTextDelta {
+         revision: self.editor_revision,

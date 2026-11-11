@@ -1,0 +1,383 @@
+--- repo
++++ proof
+-pub fn transform(&self, other: &Self) -> Result<(Self, Self), OTError> {
++#[verifier::spinoff_prover] #[verifier::rlimit(4000)]
++pub fn transform(&self, other: &Self, Ghost(doc): Ghost<Seq<char>>) -> (r: Result<(Self, Self), OTError>)
++    requires
++        self.wf(), other.wf(), self.target_len + other.target_len <= MAXL,
++        doc.len() == self.base_len,
++    ensures
++        self.base_len != other.base_len ==> r is Err,
++        self.base_len == other.base_len ==> r is Ok && ({
++            let (a_prime, b_prime) = r->Ok_0;
++            &&& a_prime.wf() && b_prime.wf()
++            &&& a_prime.base_len == other.target_len
++            &&& b_prime.base_len == self.target_len
++            &&& a_prime.target_len == b_prime.target_len
++            &&& a_prime.target_len <= self.target_len + other.target_len
++            &&& ins(a_prime.v()) == ins(self.v())
++            &&& ins(b_prime.v()) == ins(other.v())
++            &&& sem(sem(doc, self.v()), b_prime.v()) == sem(sem(doc, other.v()), a_prime.v())
++        }),
++{
+     if self.base_len != other.base_len {
+         return Err(OTError);
+     let mut a_prime = OperationSeq::default();
+     let mut b_prime = OperationSeq::default();
+-    let mut ops1 = self.ops.iter().cloned();
+-    let mut ops2 = other.ops.iter().cloned();
+-    let mut maybe_op1 = ops1.next();
+-    let mut maybe_op2 = ops2.next();
+-    loop {
++    let mut i1: usize = 0;
++    let mut i2: usize = 0;
++    let mut maybe_op1 = next_op(&self.ops, &mut i1);
++    let mut maybe_op2 = next_op(&other.ops, &mut i2);
++    let ghost n = self.base_len as nat;
++    let ghost mut k: nat = 0;
++    let ghost mut ta: Seq<char> = seq![];
++    let ghost mut tb: Seq<char> = seq![];
++    proof {
++        lemma_next(self.ops@, 0, maybe_op1, i1);
++        lemma_next(other.ops@, 0, maybe_op2, i2);
++        lemma_vops_skip0(self.ops@);
++        lemma_vops_skip0(other.ops@);
++        assert(doc.skip(0) =~= doc);
++        assert(seq![] + sem(doc, self.v()) =~= sem(doc, self.v()));
++        assert(seq![] + sem(doc, other.v()) =~= sem(doc, other.v()));
++        assert(a_prime.v() =~= Seq::<SOp>::empty());
++        assert(b_prime.v() =~= Seq::<SOp>::empty());
++        if maybe_op1 is Some { assert(vop(maybe_op1->Some_0) == self.v()[0]); }
++        if maybe_op2 is Some { assert(vop(maybe_op2->Some_0) == other.v()[0]); }
++    }
++    loop
++        invariant
++            self.wf(), other.wf(), self.target_len + other.target_len <= MAXL,
++            doc.len() == n, n == self.base_len, n == other.base_len,
++            i1 <= self.ops.len(), i2 <= other.ops.len(),
++            maybe_op1 is None ==> i1 == self.ops.len(),
++            maybe_op2 is None ==> i2 == other.ops.len(),
++            maybe_op1 is Some ==> nz(vop(maybe_op1->Some_0)),
++            maybe_op2 is Some ==> nz(vop(maybe_op2->Some_0)),
++            k <= n,
++            k + cons(rem(self.ops@, maybe_op1, i1)) == n,
++            k + cons(rem(other.ops@, maybe_op2, i2)) == n,
++            sem(doc, self.v()) == ta + sem(doc.skip(k as int), rem(self.ops@, maybe_op1, i1)),
++            sem(doc, other.v()) == tb + sem(doc.skip(k as int), rem(other.ops@, maybe_op2, i2)),
++            self.target_len == ta.len() + prod(rem(self.ops@, maybe_op1, i1)),
++            other.target_len == tb.len() + prod(rem(other.ops@, maybe_op2, i2)),
++            ins(self.v()) == ins(a_prime.v()) + ins(rem(self.ops@, maybe_op1, i1)),
++            ins(other.v()) == ins(b_prime.v()) + ins(rem(other.ops@, maybe_op2, i2)),
++            a_prime.wf(), b_prime.wf(),
++            a_prime.base_len == tb.len(), b_prime.base_len == ta.len(),
++            a_prime.target_len == b_prime.target_len,
++            a_prime.target_len <= ta.len() + tb.len(),
++            sem(tb, a_prime.v()) == sem(ta, b_prime.v()),
++        ensures
++            maybe_op1 is None, maybe_op2 is None,
++            a_prime.wf(), b_prime.wf(),
++            a_prime.base_len == tb.len(), b_prime.base_len == ta.len(),
++            a_prime.target_len == b_prime.target_len,
++            a_prime.target_len <= ta.len() + tb.len(),
++            sem(tb, a_prime.v()) == sem(ta, b_prime.v()),
++            sem(doc, self.v()) == ta, sem(doc, other.v()) == tb,
++            self.target_len == ta.len(), other.target_len == tb.len(),
++            ins(self.v()) == ins(a_prime.v()), ins(other.v()) == ins(b_prime.v()),
++        decreases
++            (if maybe_op1 is Some { 1int } else { 0int }) + self.ops.len() - i1
++            + (if maybe_op2 is Some { 1int } else { 0int }) + other.ops.len() - i2,
++    {
++        let ghost mo1 = maybe_op1;
++        let ghost mo2 = maybe_op2;
++        let ghost j1 = i1;
++        let ghost j2 = i2;
++        let ghost ap = a_prime;
++        let ghost bp = b_prime;
++        let ghost t = doc.skip(k as int);
++        proof {
++            if mo1 is None { assert(rem(self.ops@, mo1, j1) =~= Seq::<SOp>::empty()); }
++            if mo2 is None { assert(rem(other.ops@, mo2, j2) =~= Seq::<SOp>::empty()); }
++            if mo1 is Some { lemma_rem_some(self.ops@, mo1->Some_0, j1); lemma_add(seq![vop(mo1->Some_0)], vops(self.ops@.skip(j1 as int))); lemma_one(blank(cons_of(vop(mo1->Some_0)) as int), vop(mo1->Some_0)); }
++            if mo2 is Some { lemma_rem_some(other.ops@, mo2->Some_0, j2); lemma_add(seq![vop(mo2->Some_0)], vops(other.ops@.skip(j2 as int))); lemma_one(blank(cons_of(vop(mo2->Some_0)) as int), vop(mo2->Some_0)); }
++            lemma_len(t, rem(self.ops@, mo1, j1));
++            lemma_len(t, rem(other.ops@, mo2, j2));
++        }
+         match (&maybe_op1, &maybe_op2) {
+-            (None, None) => break,
++            (None, None) => {
++                proof {
++                    assert(t =~= seq![]);
++                    assert(ta + seq![] =~= ta);
++                    assert(tb + seq![] =~= tb);
++                }
++                break
++            }
+             (Some(Operation::Insert(s)), _) => {
+-                a_prime.insert(s);
+-                b_prime.retain(num_chars(s.as_bytes()) as _);
+-                maybe_op1 = ops1.next();
++                a_prime.insert(s.as_str());
++                b_prime.retain(num_chars(s.as_str()) as u64); // src: `num_chars(s.as_bytes()) as _`
++                maybe_op1 = next_op(&self.ops, &mut i1);
++                proof {
++                    let o = mo1->Some_0;
++                    let x = o->Insert_0@;
++                    lemma_adv_whole(self.ops@, o, j1, maybe_op1, i1, t);
++                    if maybe_op1 is Some { assert(vop(maybe_op1->Some_0) == self.v()[j1 as int]); }
++                    assert(t.take(0) =~= seq![]);
++                    assert(t.skip(0) =~= t);
++                    assert(sem(tb, a_prime.v()) == sem(tb, ap.v()) + x);
++                    let tt = ta + x;
++                    assert(tt.take(ta.len() as int) =~= ta);
++                    assert(tt.skip(ta.len() as int) =~= x);
++                    assert(sem(tt, b_prime.v()) == sem(ta, bp.v()) + x);
++                    assert(sem(doc, self.v()) =~= tt + sem(t, rem(self.ops@, maybe_op1, i1)));
++                    ta = tt;
++                }
+             }
+             (_, Some(Operation::Insert(s))) => {
+-                a_prime.retain(num_chars(s.as_bytes()) as _);
+-                b_prime.insert(s);
+-                maybe_op2 = ops2.next();
++                a_prime.retain(num_chars(s.as_str()) as u64); // src: `num_chars(s.as_bytes()) as _`
++                b_prime.insert(s.as_str());
++                maybe_op2 = next_op(&other.ops, &mut i2);
++                proof {
++                    let o = mo2->Some_0;
++                    let x = o->Insert_0@;
++                    lemma_adv_whole(other.ops@, o, j2, maybe_op2, i2, t);
++                    if maybe_op2 is Some { assert(vop(maybe_op2->Some_0) == other.v()[j2 as int]); }
++                    assert(t.take(0) =~= seq![]);
++                    assert(t.skip(0) =~= t);
++                    assert(sem(ta, b_prime.v()) == sem(ta, bp.v()) + x);
++                    let tt = tb + x;
++                    assert(tt.take(tb.len() as int) =~= tb);
++                    assert(tt.skip(tb.len() as int) =~= x);
++                    assert(sem(tt, a_prime.v()) == sem(tb, ap.v()) + x);
++                    assert(sem(doc, other.v()) =~= tt + sem(t, rem(other.ops@, maybe_op2, i2)));
++                    tb = tt;
++                }
+             }
+             (None, _) => {
++                proof { assert(false); }
+                 return Err(OTError);
+             }
+             (_, None) => {
++                proof { assert(false); }
+                 return Err(OTError);
+             }
+             (Some(Operation::Retain(i)), Some(Operation::Retain(j))) => {
+-                match i.cmp(j) {
+-                    Ordering::Less => {
+-                        a_prime.retain(*i);
+-                        b_prime.retain(*i);
+-                        maybe_op2 = Some(Operation::Retain(*j - *i));
+-                        maybe_op1 = ops1.next();
+-                    }
+-                    Ordering::Equal => {
+-                        a_prime.retain(*i);
+-                        b_prime.retain(*i);
+-                        maybe_op1 = ops1.next();
+-                        maybe_op2 = ops2.next();
+-                    }
+-                    Ordering::Greater => {
+-                        a_prime.retain(*j);
+-                        b_prime.retain(*j);
+-                        maybe_op1 = Some(Operation::Retain(*i - *j));
+-                        maybe_op2 = ops2.next();
+-                    }
+-                };
+-            }
+-            (Some(Operation::Delete(i)), Some(Operation::Delete(j))) => match i.cmp(j) {
+-                Ordering::Less => {
+-                    maybe_op2 = Some(Operation::Delete(*j - *i));
+-                    maybe_op1 = ops1.next();
+-                }
+-                Ordering::Equal => {
+-                    maybe_op1 = ops1.next();
+-                    maybe_op2 = ops2.next();
+-                }
+-                Ordering::Greater => {
+-                    maybe_op1 = Some(Operation::Delete(*i - *j));
+-                    maybe_op2 = ops2.next();
+-                }
+-            },
++                let i = *i;
++                let j = *j;
++                let ghost m: nat = if i < j { i as nat } else { j as nat };
++                let ghost w = t.take(m as int);
++                if i < j {
++                    a_prime.retain(i);
++                    b_prime.retain(i);
++                    maybe_op2 = Some(Operation::Retain(j - i));
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                } else if i == j {
++                    a_prime.retain(i);
++                    b_prime.retain(i);
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                } else {
++                    a_prime.retain(j);
++                    b_prime.retain(j);
++                    maybe_op1 = Some(Operation::Retain(i - j));
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                }
++                proof {
++                    if i <= j { lemma_adv_whole(self.ops@, mo1->Some_0, j1, maybe_op1, i1, t); }
++                    else { lemma_adv_part(self.ops@, mo1->Some_0, j1, maybe_op1->Some_0, m, t); }
++                    if j <= i { lemma_adv_whole(other.ops@, mo2->Some_0, j2, maybe_op2, i2, t); }
++                    else { lemma_adv_part(other.ops@, mo2->Some_0, j2, maybe_op2->Some_0, m, t); }
++                    if i <= j && maybe_op1 is Some { assert(vop(maybe_op1->Some_0) == self.v()[j1 as int]); }
++                    if j <= i && maybe_op2 is Some { assert(vop(maybe_op2->Some_0) == other.v()[j2 as int]); }
++                    let ua = ta + w;
++                    let ub = tb + w;
++                    assert(ua.take(ta.len() as int) =~= ta);
++                    assert(ua.skip(ta.len() as int) =~= w);
++                    assert(ub.take(tb.len() as int) =~= tb);
++                    assert(ub.skip(tb.len() as int) =~= w);
++                    assert(sem(ub, a_prime.v()) == sem(tb, ap.v()) + w);
++                    assert(sem(ua, b_prime.v()) == sem(ta, bp.v()) + w);
++                    assert(t.skip(m as int) =~= doc.skip((k + m) as int));
++                    assert(sem(doc, self.v()) =~= ua + sem(doc.skip((k + m) as int), rem(self.ops@, maybe_op1, i1)));
++                    assert(sem(doc, other.v()) =~= ub + sem(doc.skip((k + m) as int), rem(other.ops@, maybe_op2, i2)));
++                    ta = ua;
++                    tb = ub;
++                    k = k + m;
++                }
++            }
++            (Some(Operation::Delete(i)), Some(Operation::Delete(j))) => {
++                let i = *i;
++                let j = *j;
++                let ghost m: nat = if i < j { i as nat } else { j as nat };
++                if i < j {
++                    maybe_op2 = Some(Operation::Delete(j - i));
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                } else if i == j {
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                } else {
++                    maybe_op1 = Some(Operation::Delete(i - j));
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                }
++                proof {
++                    if i <= j { lemma_adv_whole(self.ops@, mo1->Some_0, j1, maybe_op1, i1, t); }
++                    else { lemma_adv_part(self.ops@, mo1->Some_0, j1, maybe_op1->Some_0, m, t); }
++                    if j <= i { lemma_adv_whole(other.ops@, mo2->Some_0, j2, maybe_op2, i2, t); }
++                    else { lemma_adv_part(other.ops@, mo2->Some_0, j2, maybe_op2->Some_0, m, t); }
++                    if i <= j && maybe_op1 is Some { assert(vop(maybe_op1->Some_0) == self.v()[j1 as int]); }
++                    if j <= i && maybe_op2 is Some { assert(vop(maybe_op2->Some_0) == other.v()[j2 as int]); }
++                    assert(t.skip(m as int) =~= doc.skip((k + m) as int));
++                    assert(ta + seq![] =~= ta);
++                    assert(tb + seq![] =~= tb);
++                    assert(sem(doc, self.v()) =~= ta + sem(doc.skip((k + m) as int), rem(self.ops@, maybe_op1, i1)));
++                    assert(sem(doc, other.v()) =~= tb + sem(doc.skip((k + m) as int), rem(other.ops@, maybe_op2, i2)));
++                    k = k + m;
++                }
++            }
+             (Some(Operation::Delete(i)), Some(Operation::Retain(j))) => {
+-                match i.cmp(j) {
+-                    Ordering::Less => {
+-                        a_prime.delete(*i);
+-                        maybe_op2 = Some(Operation::Retain(*j - *i));
+-                        maybe_op1 = ops1.next();
+-                    }
+-                    Ordering::Equal => {
+-                        a_prime.delete(*i);
+-                        maybe_op1 = ops1.next();
+-                        maybe_op2 = ops2.next();
+-                    }
+-                    Ordering::Greater => {
+-                        a_prime.delete(*j);
+-                        maybe_op1 = Some(Operation::Delete(*i - *j));
+-                        maybe_op2 = ops2.next();
+-                    }
+-                };
++                let i = *i;
++                let j = *j;
++                let ghost m: nat = if i < j { i as nat } else { j as nat };
++                let ghost w = t.take(m as int);
++                if i < j {
++                    a_prime.delete(i);
++                    maybe_op2 = Some(Operation::Retain(j - i));
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                } else if i == j {
++                    a_prime.delete(i);
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                } else {
++                    a_prime.delete(j);
++                    maybe_op1 = Some(Operation::Delete(i - j));
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                }
++                proof {
++                    if i <= j { lemma_adv_whole(self.ops@, mo1->Some_0, j1, maybe_op1, i1, t); }
++                    else { lemma_adv_part(self.ops@, mo1->Some_0, j1, maybe_op1->Some_0, m, t); }
++                    if j <= i { lemma_adv_whole(other.ops@, mo2->Some_0, j2, maybe_op2, i2, t); }
++                    else { lemma_adv_part(other.ops@, mo2->Some_0, j2, maybe_op2->Some_0, m, t); }
++                    if i <= j && maybe_op1 is Some { assert(vop(maybe_op1->Some_0) == self.v()[j1 as int]); }
++                    if j <= i && maybe_op2 is Some { assert(vop(maybe_op2->Some_0) == other.v()[j2 as int]); }
++                    let ub = tb + w;
++                    assert(ub.take(tb.len() as int) =~= tb);
++                    assert(sem(ub, a_prime.v()) == sem(tb, ap.v()));
++                    assert(t.skip(m as int) =~= doc.skip((k + m) as int));
++                    assert(ta + seq![] =~= ta);
++                    assert(sem(doc, self.v()) =~= ta + sem(doc.skip((k + m) as int), rem(self.ops@, maybe_op1, i1)));
++                    assert(sem(doc, other.v()) =~= ub + sem(doc.skip((k + m) as int), rem(other.ops@, maybe_op2, i2)));
++                    tb = ub;
++                    k = k + m;
++                }
+             }
+             (Some(Operation::Retain(i)), Some(Operation::Delete(j))) => {
+-                match i.cmp(j) {
+-                    Ordering::Less => {
+-                        b_prime.delete(*i);
+-                        maybe_op2 = Some(Operation::Delete(*j - *i));
+-                        maybe_op1 = ops1.next();
+-                    }
+-                    Ordering::Equal => {
+-                        b_prime.delete(*i);
+-                        maybe_op1 = ops1.next();
+-                        maybe_op2 = ops2.next();
+-                    }
+-                    Ordering::Greater => {
+-                        b_prime.delete(*j);
+-                        maybe_op1 = Some(Operation::Retain(*i - *j));
+-                        maybe_op2 = ops2.next();
+-                    }
+-                };
++                let i = *i;
++                let j = *j;
++                let ghost m: nat = if i < j { i as nat } else { j as nat };
++                let ghost w = t.take(m as int);
++                if i < j {
++                    b_prime.delete(i);
++                    maybe_op2 = Some(Operation::Delete(j - i));
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                } else if i == j {
++                    b_prime.delete(i);
++                    maybe_op1 = next_op(&self.ops, &mut i1);
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                } else {
++                    b_prime.delete(j);
++                    maybe_op1 = Some(Operation::Retain(i - j));
++                    maybe_op2 = next_op(&other.ops, &mut i2);
++                }
++                proof {
++                    if i <= j { lemma_adv_whole(self.ops@, mo1->Some_0, j1, maybe_op1, i1, t); }
++                    else { lemma_adv_part(self.ops@, mo1->Some_0, j1, maybe_op1->Some_0, m, t); }
++                    if j <= i { lemma_adv_whole(other.ops@, mo2->Some_0, j2, maybe_op2, i2, t); }
++                    else { lemma_adv_part(other.ops@, mo2->Some_0, j2, maybe_op2->Some_0, m, t); }
++                    if i <= j && maybe_op1 is Some { assert(vop(maybe_op1->Some_0) == self.v()[j1 as int]); }
++                    if j <= i && maybe_op2 is Some { assert(vop(maybe_op2->Some_0) == other.v()[j2 as int]); }
++                    let ua = ta + w;
++                    assert(ua.take(ta.len() as int) =~= ta);
++                    assert(sem(ua, b_prime.v()) == sem(ta, bp.v()));
++                    assert(t.skip(m as int) =~= doc.skip((k + m) as int));
++                    assert(tb + seq![] =~= tb);
++                    assert(sem(doc, self.v()) =~= ua + sem(doc.skip((k + m) as int), rem(self.ops@, maybe_op1, i1)));
++                    assert(sem(doc, other.v()) =~= tb + sem(doc.skip((k + m) as int), rem(other.ops@, maybe_op2, i2)));
++                    ta = ua;
++                    k = k + m;
++                }
+             }
+         }

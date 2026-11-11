@@ -1,0 +1,72 @@
+--- repo
++++ proof
+-impl From<TextDelta> for OperationSeq {
+-    fn from(delta: TextDelta) -> Self {
+-        let mut op_seq = Self::default();
+-        for op in delta {
+-            match op {
+-                TextOp::Retain(n) => {
+-                    op_seq.retain(n as u64);
+-                }
+-                TextOp::Insert(s) => {
+-                    op_seq.insert(&s);
+-                }
+-                TextOp::Delete(n) => {
+-                    op_seq.delete(n as u64);
++#[verifier::spinoff_prover] #[verifier::rlimit(100)]
++pub fn delta_to_op_seq(delta: TextDelta) -> (r: OperationSeq)
++    requires cons(delta.v()) <= MAXL, prod(delta.v()) <= MAXL,
++    ensures
++        r.wf(), r.base_len == cons(delta.v()), r.target_len == prod(delta.v()), ins(r.v()) == ins(delta.v()),
++        forall|t: Seq<char>| t.len() == cons(delta.v()) ==> #[trigger] sem(t, r.v()) == sem(t, delta.v()),
++{
++    let mut op_seq = OperationSeq::default();
++    let mut i: usize = 0;
++    proof {
++        assert(tvops(delta.0@.take(0)) =~= Seq::<SOp>::empty());
++        assert(op_seq.v() =~= Seq::<SOp>::empty());
++    }
++    while i < delta.0.len()
++        invariant
++            i <= delta.0@.len(), cons(delta.v()) <= MAXL, prod(delta.v()) <= MAXL,
++            op_seq.wf(),
++            op_seq.base_len == cons(tvops(delta.0@.take(i as int))),
++            op_seq.target_len == prod(tvops(delta.0@.take(i as int))),
++            ins(op_seq.v()) == ins(tvops(delta.0@.take(i as int))),
++            forall|t: Seq<char>| t.len() == op_seq.base_len ==> #[trigger] sem(t, op_seq.v()) == sem(t, tvops(delta.0@.take(i as int))),
++        decreases delta.0@.len() - i,
++    {
++        let ghost p = tvops(delta.0@.take(i as int));
++        let ghost o = tvop(delta.0@[i as int]);
++        let ghost old_seq = op_seq;
++        proof {
++            assert(tvops(delta.0@.take(i + 1)) =~= p.push(o));
++            assert(delta.v() =~= tvops(delta.0@.take(i + 1)) + tvops(delta.0@.skip(i + 1)));
++            lemma_add(tvops(delta.0@.take(i + 1)), tvops(delta.0@.skip(i + 1)));
++            assert(p.push(o).drop_last() =~= p);
++            lemma_add(p, seq![o]);
++            assert(p + seq![o] =~= p.push(o));
++            lemma_one(blank(cons_of(o) as int), o);
++        }
++        match &delta.0[i] {
++            TextOp::Retain(n) => { op_seq.retain(*n as u64); }
++            TextOp::Insert(s) => { op_seq.insert(s.as_str()); }
++            TextOp::Delete(n) => { op_seq.delete(*n as u64); }
++        }
++        proof {
++            assert forall|t: Seq<char>| t.len() == op_seq.base_len implies #[trigger] sem(t, op_seq.v()) == sem(t, p.push(o)) by {
++                assert(t.take(old_seq.base_len as int).len() == old_seq.base_len);
++                assert(sem(t.take(old_seq.base_len as int), old_seq.v()) == sem(t.take(old_seq.base_len as int), p));
++                if o is I {
++                    assert(t.take(old_seq.base_len as int) =~= t);
++                    assert(sem(t, old_seq.v()) == sem(t, p));
++                    assert(t.skip(cons(p) as int).len() == 0);
+                 }
+             }
+         }
+-        op_seq
++        i += 1;
+     }
++    proof { assert(delta.0@.take(i as int) =~= delta.0@); }
++    op_seq
+ }

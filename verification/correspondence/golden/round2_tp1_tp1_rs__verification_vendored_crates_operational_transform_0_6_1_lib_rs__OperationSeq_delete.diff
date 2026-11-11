@@ -1,0 +1,70 @@
+--- repo
++++ proof
+-pub fn delete(&mut self, n: u64) {
++pub fn delete(&mut self, n: u64)
++    requires old(self).wf(), old(self).base_len + n <= MAXL,
++    ensures
++        final(self).wf(), final(self).base_len == old(self).base_len + n, final(self).target_len == old(self).target_len,
++        ins(final(self).v()) == ins(old(self).v()),
++        forall|t: Seq<char>| t.len() == final(self).base_len ==>
++            #[trigger] sem(t, final(self).v()) == sem(t.take(old(self).base_len as int), old(self).v()),
++{
++    let ghost o = self.v();
+     if n == 0 {
++        assert forall|t: Seq<char>| t.len() == self.base_len implies
++            #[trigger] sem(t, final(self).v()) == sem(t.take(old(self).base_len as int), old(self).v()) by {
++            assert(t.take(t.len() as int) =~= t);
++        }
+         return;
+     }
+     self.base_len += n as usize;
+-    if let Some(Operation::Delete(n_last)) = self.ops.last_mut() {
+-        *n_last += n;
+-    } else {
+-        self.ops.push(Operation::Delete(n));
++    let l = self.ops.len();
++    let last = if l > 0 { match &self.ops[l - 1] { Operation::Delete(k) => Some(*k), _ => None } } else { None };
++    match last {
++        Some(n_last) => {
++            let ghost p = o.drop_last();
++            proof {
++                lemma_one(blank(n_last as int), SOp::D(n_last as nat));
++                assert(o =~= p + seq![SOp::D(n_last as nat)]);
++                lemma_split(blank((cons(p) + n_last) as int), p, seq![SOp::D(n_last as nat)]);
++            }
++            assert(n_last <= cons(o));
++            self.ops.set(l - 1, Operation::Delete(n_last + n));
++            proof {
++                lemma_vops_update(old(self).ops@, l - 1, Operation::Delete((n_last + n) as u64));
++                assert(self.v() =~= p + seq![SOp::D((n_last + n) as nat)]);
++                lemma_one(blank(((n_last + n) as nat) as int), SOp::D((n_last + n) as nat));
++                lemma_split(blank((cons(p) + n_last + n) as int), p, seq![SOp::D((n_last + n) as nat)]);
++                assert forall|t: Seq<char>| t.len() == self.base_len implies
++                    #[trigger] sem(t, self.v()) == sem(t.take(old(self).base_len as int), o) by {
++                    lemma_split(t, p, seq![SOp::D((n_last + n) as nat)]);
++                    lemma_one(t.skip(cons(p) as int), SOp::D((n_last + n) as nat));
++                    let t0 = t.take(old(self).base_len as int);
++                    lemma_split(t0, p, seq![SOp::D(n_last as nat)]);
++                    lemma_one(t0.skip(cons(p) as int), SOp::D(n_last as nat));
++                    assert(t0.take(cons(p) as int) =~= t.take(cons(p) as int));
++                }
++            }
++        }
++        None => {
++            self.ops.push(Operation::Delete(n));
++            proof {
++                lemma_vops_push(old(self).ops@, Operation::Delete(n));
++                let q = seq![SOp::D(n as nat)];
++                assert(self.v() =~= o + q);
++                lemma_one(blank((n as nat) as int), SOp::D(n as nat));
++                lemma_split(blank((cons(o) + n) as int), o, q);
++                assert forall|t: Seq<char>| t.len() == self.base_len implies
++                    #[trigger] sem(t, self.v()) == sem(t.take(old(self).base_len as int), o) by {
++                    lemma_split(t, o, q);
++                    lemma_one(t.skip(cons(o) as int), SOp::D(n as nat));
++                    assert(sem(t.take(cons(o) as int), o) + seq![] =~= sem(t.take(cons(o) as int), o));
++                }
++            }
++        }
+     }
+ }

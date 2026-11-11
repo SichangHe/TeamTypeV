@@ -1,0 +1,55 @@
+--- repo
++++ proof
+-fn deltas_for_editor(&self) -> Vec<RevisionedEditorTextDelta> {
+-    let mut to_editor = vec![];
++#[verifier::spinoff_prover] #[verifier::rlimit(100)]
++pub fn deltas_for_editor(&self) -> (r: Vec<RevisionedEditorTextDelta>)
++    requires self.inv(),
++    ensures r@.len() == self.editor_queue@.len(),
++        outputs_correct(self, r@),
++{
++    reveal(outputs_correct);
++    let mut to_editor: Vec<RevisionedEditorTextDelta> = Vec::new();
+     let mut document = self.last_confirmed_editor_content.clone();
+-    for editor_op in &self.editor_queue {
+-        let delta: TextDelta = editor_op.clone().into();
+-        let ed_delta = EditorTextDelta::try_from_delta(delta, &document).expect("It should always be possible to convert delta to editor delta when calculating edits to send to editor in OT Server");
+-        to_editor.push(RevisionedEditorTextDelta::new(
+-            self.editor_revision,
+-            ed_delta,
+-        ));
+-        document = Self::force_apply(&document, editor_op.clone());
++    let ghost lc = self.last_confirmed_editor_content@;
++    let ghost q = self.editor_queue@;
++    let mut i: usize = 0;
++    proof { assert(q.take(0) =~= Seq::<OperationSeq>::empty()); }
++    while i < self.editor_queue.len()
++        invariant
++            self.inv(), lc == self.last_confirmed_editor_content@, q == self.editor_queue@,
++            i <= q.len(), to_editor@.len() == i,
++            document@ == chain(lc, q.take(i as int)),
++            forall|j: int| 0 <= j < i ==> {
++                &&& (#[trigger] to_editor@[j]).revision == self.editor_revision
++                &&& edits_wf(edits(chain(lc, q.take(j)), to_editor@[j].delta), chain(lc, q.take(j)).len() as int)
++                &&& editor_apply(chain(lc, q.take(j)), to_editor@[j].delta) == chain(lc, q.take(j + 1))
++            },
++        decreases q.len() - i,
++    {
++        proof {
++            assert(q[i as int].wf());
++            assert(q.take(i + 1).drop_last() =~= q.take(i as int));
++            assert(q.take(i + 1).last() == q[i as int]);
++            assert(chain(lc, q.take(i + 1)).len() <= L);
++            lemma_fsem_len(document@, q[i as int].v());
++        }
++        let delta: TextDelta = op_seq_to_delta(self.editor_queue[i].clone_seq());
++        let ed_delta = match try_from_delta(delta, document.as_str()) {
++            Ok(d) => d,
++            Err(_) => unreachable_panic(),
++        };
++        to_editor.push(RevisionedEditorTextDelta { revision: self.editor_revision, delta: ed_delta }); // src: `RevisionedEditorTextDelta::new(..)`
++        assert(to_editor@[i as int].revision == self.editor_revision);
++        document = force_apply(document.as_str(), self.editor_queue[i].clone_seq());
++        i += 1;
+     }
+     to_editor

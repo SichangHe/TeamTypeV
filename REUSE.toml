@@ -19,6 +19,12 @@ SPDX-License-Identifier = "CC-BY-SA-4.0"
 
 # Proof/source correspondence checker, reviewed golden diffs, and Verus proof copies.
 [[annotations]]
-path = ["verification/correspondence/golden/*.diff", "verification/correspondence/*.txt", "verification/**/*.rs", ".github/workflows/proofs.yml"]
+path = ["verification/correspondence/golden/*.diff", "verification/correspondence/*.txt", "verification/concurrency/*.rs", "verification/editor_conn_proof/*.rs", "verification/round2_deltas/*.rs", "verification/round2_tp1/*.rs", ".github/workflows/proofs.yml"]
 SPDX-FileCopyrightText = "2026 Steven Hé (Sīchàng) <stevensichanghe@gmail.com>"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Vendored dependency source, byte-identical to the registry crate (proof correspondence reference).
+[[annotations]]
+path = ["verification/vendored_crates/operational-transform-0.6.1/*"]
+SPDX-FileCopyrightText = "2020 bold <bold@cryptoguru.com>"
+SPDX-License-Identifier = "MIT"

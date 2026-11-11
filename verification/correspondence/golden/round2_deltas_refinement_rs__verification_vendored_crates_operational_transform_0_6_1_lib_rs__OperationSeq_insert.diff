@@ -1,0 +1,136 @@
+--- repo
++++ proof
+-pub fn insert(&mut self, s: &str) {
+-    if s.is_empty() {
++#[verifier::spinoff_prover] #[verifier::rlimit(60)]
++pub fn insert(&mut self, s: &str)
++    requires old(self).wf(), old(self).target_len + s@.len() <= MAXL,
++    ensures
++        final(self).wf(), final(self).base_len == old(self).base_len, final(self).target_len == old(self).target_len + s@.len(),
++        ins(final(self).v()) == ins(old(self).v()) + s@.len(),
++        forall|t: Seq<char>| t.len() == final(self).base_len ==>
++            #[trigger] sem(t, final(self).v()) == sem(t, old(self).v()) + s@,
++{
++    let ghost o = self.v();
++    if num_chars(s) == 0 {
++        assert forall|t: Seq<char>| t.len() == self.base_len implies
++            #[trigger] sem(t, final(self).v()) == sem(t, o) + s@ by {
++            assert(sem(t, o) + s@ =~= sem(t, o));
++        }
+         return;
+     }
+-    self.target_len += num_chars(s.as_bytes());
+-    let new_last = match self.ops.as_mut_slice() {
+-        [.., Operation::Insert(s_last)] => {
+-            *s_last += s;
+-            return;
++    self.target_len += num_chars(s);
++    let l = self.ops.len();
++    let case = if l >= 1 && is_insert(&self.ops[l - 1]) { 1u8 }
++        else if l >= 2 && is_insert(&self.ops[l - 2]) && is_delete(&self.ops[l - 1]) { 2u8 }
++        else if l >= 1 && is_delete(&self.ops[l - 1]) { 3u8 }
++        else { 4u8 };
++    if case == 1 {
++        let ghost p = o.drop_last();
++        let s_new = match &self.ops[l - 1] { Operation::Insert(s_last) => concat(s_last, s), _ => { proof { assert(false); } unreachable_panic() } };
++        let ghost s_last = o.last()->I_0;
++        proof { assert(o =~= p + seq![SOp::I(s_last)]); }
++        self.ops.set(l - 1, Operation::Insert(s_new));
++        proof {
++            lemma_vops_update(old(self).ops@, l - 1, Operation::Insert(s_new));
++            assert(self.v() =~= p + seq![SOp::I(s_last + s@)]);
++            lemma_one(Seq::<char>::empty(), SOp::I(s_last));
++            lemma_one(Seq::<char>::empty(), SOp::I(s_last + s@));
++            lemma_split(blank((cons(p)) as int), p, seq![SOp::I(s_last)]);
++            lemma_split(blank((cons(p)) as int), p, seq![SOp::I(s_last + s@)]);
++            assert forall|t: Seq<char>| t.len() == self.base_len implies
++                #[trigger] sem(t, self.v()) == sem(t, o) + s@ by {
++                lemma_split(t, p, seq![SOp::I(s_last)]);
++                lemma_split(t, p, seq![SOp::I(s_last + s@)]);
++                lemma_one(t.skip(cons(p) as int), SOp::I(s_last));
++                lemma_one(t.skip(cons(p) as int), SOp::I(s_last + s@));
++                assert(sem(t.take(cons(p) as int), p) + (s_last + s@) =~= sem(t.take(cons(p) as int), p) + s_last + s@);
++            }
+         }
+-        [.., Operation::Insert(s_pre_last), Operation::Delete(_)] => {
+-            *s_pre_last += s;
+-            return;
++        return;
++    } else if case == 2 {
++        let ghost p = o.take(l - 2);
++        let s_new = match &self.ops[l - 2] { Operation::Insert(s_pre_last) => concat(s_pre_last, s), _ => { proof { assert(false); } unreachable_panic() } };
++        let ghost s_pre = o[l - 2]->I_0;
++        let ghost k = o[l - 1]->D_0;
++        let ghost q0 = seq![SOp::I(s_pre), SOp::D(k)];
++        let ghost q1 = seq![SOp::I(s_pre + s@), SOp::D(k)];
++        proof { assert(o =~= p + q0); }
++        self.ops.set(l - 2, Operation::Insert(s_new));
++        proof {
++            lemma_vops_update(old(self).ops@, l - 2, Operation::Insert(s_new));
++            assert(self.v() =~= p + q1);
++            let w = blank((k) as int);
++            lemma_id(s_pre, k, w);
++            lemma_id(s_pre + s@, k, w);
++            lemma_split(blank((cons(p) + k) as int), p, q0);
++            lemma_split(blank((cons(p) + k) as int), p, q1);
++            assert forall|t: Seq<char>| t.len() == self.base_len implies
++                #[trigger] sem(t, self.v()) == sem(t, o) + s@ by {
++                lemma_split(t, p, q0);
++                lemma_split(t, p, q1);
++                lemma_id(s_pre, k, t.skip(cons(p) as int));
++                lemma_id(s_pre + s@, k, t.skip(cons(p) as int));
++                assert(sem(t.take(cons(p) as int), p) + (s_pre + s@) =~= sem(t.take(cons(p) as int), p) + s_pre + s@);
++            }
+         }
+-        [.., op_last @ Operation::Delete(_)] => {
+-            let new_last = op_last.clone();
+-            *op_last = Operation::Insert(s.to_owned());
+-            new_last
++        return;
++    } else if case == 3 {
++        let ghost p = o.drop_last();
++        let new_last = clone_op(&self.ops[l - 1]);
++        let ghost k = o.last()->D_0;
++        self.ops.set(l - 1, Operation::Insert(to_owned(s)));
++        self.ops.push(new_last);
++        proof {
++            let q0 = seq![SOp::D(k)];
++            let q1 = seq![SOp::I(s@), SOp::D(k)];
++            assert(o =~= p + q0);
++            lemma_vops_update(old(self).ops@, l - 1, Operation::Insert(self.ops@[l - 1]->Insert_0));
++            lemma_vops_push(old(self).ops@.update(l - 1, self.ops@[l - 1]), new_last);
++            assert(self.v() =~= p + q1);
++            let w = blank((k) as int);
++            lemma_id(s@, k, w);
++            lemma_one(w, SOp::D(k));
++            lemma_split(blank((cons(p) + k) as int), p, q0);
++            lemma_split(blank((cons(p) + k) as int), p, q1);
++            assert forall|t: Seq<char>| t.len() == self.base_len implies
++                #[trigger] sem(t, self.v()) == sem(t, o) + s@ by {
++                lemma_split(t, p, q0);
++                lemma_split(t, p, q1);
++                lemma_id(s@, k, t.skip(cons(p) as int));
++                lemma_one(t.skip(cons(p) as int), SOp::D(k));
++                assert(sem(t.take(cons(p) as int), p) + seq![] =~= sem(t.take(cons(p) as int), p));
++            }
+         }
+-        _ => Operation::Insert(s.to_owned()),
+-    };
+-    self.ops.push(new_last);
++    } else {
++        self.ops.push(Operation::Insert(to_owned(s)));
++        proof {
++            let q = seq![SOp::I(s@)];
++            lemma_vops_push(old(self).ops@, self.ops@.last());
++            assert(self.v() =~= o + q);
++            lemma_one(Seq::<char>::empty(), SOp::I(s@));
++            lemma_split(blank((cons(o)) as int), o, q);
++            assert forall|t: Seq<char>| t.len() == self.base_len implies
++                #[trigger] sem(t, self.v()) == sem(t, o) + s@ by {
++                lemma_split(t, o, q);
++                lemma_one(t.skip(cons(o) as int), SOp::I(s@));
++                assert(t.take(cons(o) as int) =~= t);
++            }
++        }
++    }
+ }

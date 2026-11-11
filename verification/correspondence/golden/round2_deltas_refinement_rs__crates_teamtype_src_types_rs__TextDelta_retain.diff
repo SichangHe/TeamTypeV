@@ -1,0 +1,11 @@
+--- repo
++++ proof
+-pub fn retain(&mut self, n: usize) {
++pub fn retain(&mut self, n: usize)
++    ensures final(self).v() == (if n != 0 { old(self).v().push(SOp::R(n as nat)) } else { old(self).v() }),
++{
+     if n != 0 {
+         self.0.push(TextOp::Retain(n));
++        proof { assert(self.v() =~= old(self).v().push(SOp::R(n as nat))); }
+     }
+ }

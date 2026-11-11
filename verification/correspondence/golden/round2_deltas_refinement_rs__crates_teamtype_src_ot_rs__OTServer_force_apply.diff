@@ -1,0 +1,37 @@
+--- repo
++++ proof
+-#[must_use]
+-fn force_apply(document: &str, mut op_seq: OperationSeq) -> String {
+-    let doc_chars = document.chars().count();
+-    if op_seq.base_len() < doc_chars {
+-        op_seq.retain((doc_chars - op_seq.base_len()) as u64);
++#[verifier::spinoff_prover]
++pub fn force_apply(document: &str, op_seq: OperationSeq) -> (r: String)
++    requires
++        op_seq.wf(), op_seq.base_len <= document@.len(), document@.len() <= MAXL,
++        op_seq.target_len + document@.len() - op_seq.base_len <= MAXL,
++    ensures r@ == fsem(document@, op_seq.v()),
++{
++    let mut op_seq = op_seq;
++    let ghost old_op = op_seq;
++    let doc_chars = num_chars(document); // src: `document.chars().count()`
++    if op_seq.base_len < doc_chars {
++        op_seq.retain((doc_chars - op_seq.base_len) as u64);
+     }
+-    op_seq.apply(document).unwrap_or_else(|_| {
+-        panic!("Could not apply operation {op_seq:?} to string with length {doc_chars} ('{document:?}')")
+-    })
++    proof {
++        let d = document@;
++        if old_op.base_len < d.len() {
++            assert(sem(d, op_seq.v()) == sem(d.take(old_op.base_len as int), old_op.v()) + d.skip(old_op.base_len as int));
++        } else {
++            assert(d.take(d.len() as int) =~= d);
++            assert(sem(d, old_op.v()) + d.skip(d.len() as int) =~= sem(d, old_op.v()));
++        }
++    }
++    match op_seq.apply(document) {
++        Ok(r) => r,
++        Err(_) => unreachable_panic(),
++    }
+ }

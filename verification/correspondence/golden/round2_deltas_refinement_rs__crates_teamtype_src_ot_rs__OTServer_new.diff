@@ -1,0 +1,20 @@
+--- repo
++++ proof
+-pub fn new(initial_content: String) -> Self {
+-    Self {
++pub fn new(initial_content: String) -> (r: Self)
++    requires initial_content@.len() <= L,
++    ensures r.inv(),
++{
++    let r = OTServer {
+         last_confirmed_editor_content: initial_content.clone(),
+         current_content: initial_content,
+-        ..Default::default()
+-    }
++        editor_revision: 0, daemon_revision: 0, operations: Vec::new(), editor_queue: Vec::new(),
++    };
++    proof { assert forall|i: int| 0 <= i <= 0 implies (#[trigger] chain(r.last_confirmed_editor_content@, r.editor_queue@.take(i))).len() <= L by {
++        assert(r.editor_queue@.take(i) =~= Seq::<OperationSeq>::empty());
++    } }
++    r
+ }

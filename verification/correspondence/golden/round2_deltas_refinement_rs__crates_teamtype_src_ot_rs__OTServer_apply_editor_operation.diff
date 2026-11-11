@@ -1,0 +1,167 @@
+--- repo
++++ proof
+-pub fn apply_editor_operation(
+-    &mut self,
+-    rev_editor_delta: RevisionedEditorTextDelta,
+-) -> Result<(TextDelta, Vec<RevisionedEditorTextDelta>)> {
++#[verifier::spinoff_prover] #[verifier::rlimit(100)]
++pub fn apply_editor_operation(&mut self, rev_editor_delta: RevisionedEditorTextDelta)
++    -> (r: Result<(TextDelta, Vec<RevisionedEditorTextDelta>), Error>)
++    requires
++        old(self).inv(), old(self).editor_revision < usize::MAX,
++        rev_editor_delta.revision <= old(self).daemon_revision,
++        old(self).daemon_revision - rev_editor_delta.revision <= old(self).editor_queue@.len(),
++    ensures final(self).inv(),
++        final(self).editor_revision == old(self).editor_revision + 1,
++        r is Ok ==> cons(r->Ok_0.0.v()) <= old(self).current_content@.len(),
++        r is Ok ==> fsem(old(self).current_content@, r->Ok_0.0.v()) == final(self).current_content@,
++        r is Ok ==> outputs_correct(final(self), r->Ok_0.1@),
++{
+     let daemon_revision = rev_editor_delta.revision;
+     self.editor_revision += 1;
+-    let mut op_seq: OperationSeq;
+-    if daemon_revision > self.daemon_revision {
+-        bail!("Editor has seen a daemon revision from the future.");
++    if !(daemon_revision <= self.daemon_revision) { return Err(Error); }
++    let daemon_operations_to_transform = self.daemon_revision - daemon_revision;
++    if !(self.editor_queue.len() >= daemon_operations_to_transform) { return Err(Error); }
++    let seen_operations = self.editor_queue.len() - daemon_operations_to_transform;
++    let ghost lc0 = self.last_confirmed_editor_content@;
++    let ghost q0 = self.editor_queue@;
++    let confirmed_queue = drain_front(&mut self.editor_queue, seen_operations);
++    proof {
++        assert(q0 =~= confirmed_queue@ + self.editor_queue@);
++        lemma_chain_app(lc0, confirmed_queue@, self.editor_queue@);
+     }
+-    let daemon_operations_to_transform = self.daemon_revision - daemon_revision;
+-    if self.editor_queue.len() < daemon_operations_to_transform {
+-        bail!("We don't have enough operations cached. Was this already processed?");
++    let mut j: usize = 0;
++    proof { assert(confirmed_queue@.take(0) =~= Seq::<OperationSeq>::empty()); }
++    while j < confirmed_queue.len()
++        invariant
++            j <= confirmed_queue@.len(),
++            q0 == confirmed_queue@ + self.editor_queue@,
++            chain_ok(lc0, confirmed_queue@),
++            chain_ok(lc0, q0),
++            forall|i: int| 0 <= i <= q0.len() ==> (#[trigger] chain(lc0, q0.take(i))).len() <= L,
++            self.last_confirmed_editor_content@ == chain(lc0, confirmed_queue@.take(j as int)),
++            self.current_content@ == old(self).current_content@,
++            self.editor_revision == old(self).editor_revision + 1,
++        decreases confirmed_queue@.len() - j,
++    {
++        let ghost cq = confirmed_queue@;
++        proof {
++            assert(cq[j as int].wf());
++            assert(cq.take(j + 1).drop_last() =~= cq.take(j as int));
++            assert(cq.take(j + 1).last() == cq[j as int]);
++            assert(q0.take(j as int) =~= cq.take(j as int));
++            assert(q0.take(j + 1) =~= cq.take(j + 1));
++            lemma_fsem_len(self.last_confirmed_editor_content@, cq[j as int].v());
++            assert(chain(lc0, q0.take(j + 1)).len() <= L);
++        }
++        self.last_confirmed_editor_content = force_apply(
++            self.last_confirmed_editor_content.as_str(),
++            confirmed_queue[j].clone_seq(),
++        );
++        j += 1;
+     }
+-    let seen_operations = self.editor_queue.len() - daemon_operations_to_transform;
+-    debug!(
+-        "Editor is confirming {} operations, there are still {} unconfirmed operations.",
+-        seen_operations, daemon_operations_to_transform,
+-    );
+-    if daemon_operations_to_transform > 50 {
+-        warn!(
+-            "Editor is {} operations behind, it might have trouble catching up?",
+-            daemon_operations_to_transform
+-        );
++    let ghost lcd = self.last_confirmed_editor_content@;
++    proof {
++        assert(confirmed_queue@.take(j as int) =~= confirmed_queue@);
++        let p = confirmed_queue@;
++        let q = self.editor_queue@;
++        assert forall|i: int| 0 <= i <= q.len() implies (#[trigger] chain(lcd, q.take(i))).len() <= L by {
++            lemma_chain_app_take(lc0, p, q, i);
++            assert((p + q).take(p.len() + i) =~= p + q.take(i));
++            assert(chain(lc0, q0.take(p.len() + i)).len() <= L);
++        }
++        assert(q.len() == daemon_operations_to_transform);
+     }
+-    let confirmed_queue = self.editor_queue.drain(..seen_operations);
+-    for confirmed_editor_op in confirmed_queue {
+-        debug!(
+-            "Applying confirmed operation {:#?} to last confirmed editor content {:?}",
+-            &confirmed_editor_op, &self.last_confirmed_editor_content
+-        );
+-        self.last_confirmed_editor_content = Self::force_apply(
+-            &self.last_confirmed_editor_content,
+-            confirmed_editor_op.clone(),
+-        );
++    let rev_delta = match try_from_rev_ed_delta(rev_editor_delta, self.last_confirmed_editor_content.as_str()) {
++        Ok(d) => d,
++        Err(e) => return Err(e),
++    };
++    proof { assume(ins(rev_delta.delta.v()) <= L && prod(rev_delta.delta.v()) <= L); }
++    let mut op_seq = delta_to_op_seq(rev_delta.delta);
++    proof { lemma_fsem_len(lcd, op_seq.v()); }
++    self.last_confirmed_editor_content = force_apply(self.last_confirmed_editor_content.as_str(), op_seq.clone_seq());
++    proof {
++        assert(self.last_confirmed_editor_content@ == fsem(lcd, op_seq.v()));
+     }
+-    let rev_delta = RevisionedTextDelta::try_from_rev_ed_delta(
+-        rev_editor_delta,
+-        &self.last_confirmed_editor_content,
+-    )
+-    .context(
+-        "The edit received from the editor has a range that doesn't fit the current content",
+-    )?;
+-    op_seq = rev_delta.delta.into();
+-    debug!(
+-        "Applying incoming editor operation {:#?} to last confirmed editor content {:?}",
+-        &op_seq, &self.last_confirmed_editor_content
+-    );
+-    self.last_confirmed_editor_content =
+-        Self::force_apply(&self.last_confirmed_editor_content, op_seq.clone());
+-    (op_seq, self.editor_queue) = transform_through_operations(op_seq, &self.editor_queue);
+-    self.operations.push(op_seq.clone());
+-    self.current_content = Self::force_apply(&self.current_content, op_seq.clone());
++    let ghost q = self.editor_queue@;
++    let ghost docs = Seq::new((q.len() + 1) as nat, |i: int| chain(lcd, q.take(i)));
++    proof {
++        assert(docs[0] == lcd) by { assert(q.take(0) =~= Seq::<OperationSeq>::empty()); }
++        assert(docs.last() == chain(lcd, q)) by { assert(q.take(q.len() as int) =~= q); }
++        assert forall|i: int| 0 <= i < q.len() implies {
++            &&& (#[trigger] q[i]).wf()
++            &&& q[i].base_len <= docs[i].len()
++            &&& docs[i + 1] == fsem(docs[i], q[i].v())
++        } by {
++            assert(q.take(i + 1).drop_last() =~= q.take(i));
++            assert(q.take(i + 1).last() == q[i]);
++            assert(docs[i] == chain(lcd, q.take(i)));
++            assert(docs[i + 1] == chain(lcd, q.take(i + 1)));
++            assert(chain_ok(lcd, q));
++            assert(q[i].wf() && q[i].base_len <= chain(lcd, q.take(i)).len());
++        }
++        assert forall|i: int| 0 <= i < docs.len() implies (#[trigger] docs[i]).len() <= L by {}
++    }
++    let (op2, queue2) = transform_through_operations(op_seq, self.editor_queue.as_slice(), Ghost(docs));
++    op_seq = op2;
++    self.editor_queue = queue2;
++    self.operations.push(op_seq.clone_seq());
++    proof {
++        let lc = self.last_confirmed_editor_content@;
++        let nq = self.editor_queue@;
++        assume(forall|i: int| 0 <= i <= nq.len() ==> (#[trigger] chain(lc, nq.take(i))).len() <= L);
++        assert(nq.take(nq.len() as int) =~= nq);
++        lemma_fsem_len(self.current_content@, op_seq.v());
++    }
++    self.current_content = force_apply(self.current_content.as_str(), op_seq.clone_seq());
+     let deltas_for_editor = self.deltas_for_editor();
+-    Ok((op_seq.into(), deltas_for_editor))
++    proof {
++        assert(fsem(old(self).current_content@, op_seq.v()) == self.current_content@);
++        assert(outputs_correct(self, deltas_for_editor@));
++    }
++    Ok((op_seq_to_delta(op_seq), deltas_for_editor))
+ }

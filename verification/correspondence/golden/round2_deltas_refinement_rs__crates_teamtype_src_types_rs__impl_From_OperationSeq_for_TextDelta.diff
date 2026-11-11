@@ -1,0 +1,42 @@
+--- repo
++++ proof
+-impl From<OperationSeq> for TextDelta {
+-    fn from(op_seq: OperationSeq) -> Self {
+-        let mut delta = Self::default();
+-        for op in op_seq.ops() {
+-            match op {
+-                Operation::Retain(n) => {
+-                    delta.retain(*n as usize);
+-                }
+-                Operation::Insert(s) => {
+-                    delta.insert(s);
+-                }
+-                Operation::Delete(n) => {
+-                    delta.delete(*n as usize);
+-                }
+-            }
++pub fn op_seq_to_delta(op_seq: OperationSeq) -> (r: TextDelta)
++    requires op_seq.wf(),
++    ensures r.v() == op_seq.v(),
++{
++    let mut delta = TextDelta::default();
++    let mut i: usize = 0;
++    while i < op_seq.ops.len()
++        invariant op_seq.wf(), i <= op_seq.ops@.len(), delta.v() == vops(op_seq.ops@.take(i as int)),
++        decreases op_seq.ops@.len() - i,
++    {
++        proof {
++            assert(vops(op_seq.ops@.take(i + 1)) =~= vops(op_seq.ops@.take(i as int)).push(vop(op_seq.ops@[i as int])));
++            assert(nz(op_seq.v()[i as int]));
+         }
+-        delta
++        match &op_seq.ops[i] {
++            Operation::Retain(n) => { delta.retain(*n as usize); }
++            Operation::Insert(s) => { delta.insert(s.as_str()); }
++            Operation::Delete(n) => { delta.delete(*n as usize); }
++        }
++        i += 1;
+     }
++    proof { assert(op_seq.ops@.take(i as int) =~= op_seq.ops@); }
++    delta
+ }
