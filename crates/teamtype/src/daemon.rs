@@ -241,7 +241,17 @@ impl DocumentActor {
 
         if persistence_file_exists && persist {
             if !init {
+                let left_open: HashSet<RelativePath> =
+                    sandbox::read_file(&s.app_config.base_dir, &s.open_files_list())
+                        .map(|bytes| {
+                            String::from_utf8_lossy(&bytes)
+                                .lines()
+                                .map(RelativePath::new)
+                                .collect()
+                        })
+                        .unwrap_or_default();
                 s.check_files_left_open();
+                s.apply_pending_writes(&left_open);
             }
             s.read_current_content_from_dir(init);
         } else if is_host {
@@ -341,6 +351,14 @@ impl DocumentActor {
                 let patches = self.apply_sync_message_to_doc(message, &mut peer_state);
 
                 let patch_effects = PatchEffect::from_crdt_patches(&patches);
+                // Before any save of the document that includes these changes.
+                self.mark_pending(patch_effects.iter().filter_map(|effect| match effect {
+                    PatchEffect::FileChange(delta) => Some(delta.file_path.clone()),
+                    PatchEffect::FileRemoval(path) | PatchEffect::FileBytes(path, _) => {
+                        Some(path.clone())
+                    }
+                    PatchEffect::NoEffect => None,
+                }));
 
                 let mut file_deltas = vec![];
 
@@ -492,6 +510,78 @@ impl DocumentActor {
         // Saving advances Automerge's incremental cursor even when disk I/O fails.
         self.save_fully = result.is_err();
         result.with_context(|| format!("Failed to persist to '{}'", persistence_file.display()))
+    }
+
+    fn pending_list(&self) -> PathBuf {
+        self.app_config.base_dir.join(".teamtypev/pending-writes")
+    }
+
+    /// Records the files the shared document changed but the disk may not yet reflect. Saved
+    /// before any later save of the document, so that a crash never leaves the document ahead of
+    /// the disk without this record: restarting would otherwise read the stale files as outside
+    /// edits that undo peers' changes, or recreate files peers deleted.
+    fn mark_pending(&self, paths: impl IntoIterator<Item = RelativePath>) {
+        if !self.persist {
+            return;
+        }
+        let mut list = self.read_pending();
+        let before = list.len();
+        list.extend(paths);
+        if list.len() != before {
+            self.write_pending(&list);
+        }
+    }
+
+    fn unmark_pending(&self, path: &RelativePath) {
+        if !self.persist {
+            return;
+        }
+        let mut list = self.read_pending();
+        if list.remove(path) {
+            self.write_pending(&list);
+        }
+    }
+
+    fn read_pending(&self) -> HashSet<RelativePath> {
+        sandbox::read_file(&self.app_config.base_dir, &self.pending_list())
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .lines()
+                    .map(RelativePath::new)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn write_pending(&self, list: &HashSet<RelativePath>) {
+        let mut text = String::new();
+        for path in list {
+            text.push_str(&path.display().to_string());
+            text.push('\n');
+        }
+        if let Err(error) = sandbox::replace_file(
+            &self.app_config.base_dir,
+            &self.pending_list(),
+            text.as_bytes(),
+        ) {
+            error!("Could not record pending file writes: {error:#}");
+        }
+    }
+
+    /// After a restart, brings files the document is ahead on up to date, before the scan could
+    /// mistake them for outside edits. Files that were open in an editor keep the disk version.
+    fn apply_pending_writes(&mut self, left_open: &HashSet<RelativePath>) {
+        for path in self.read_pending() {
+            if git_forward::excluded(&path) || left_open.contains(&path) {
+                self.unmark_pending(&path);
+            } else if self.crdt_doc.file_exists(&path) {
+                if let Err(error) = self.try_write_file(&path) {
+                    warn!("Could not finish a write interrupted by a restart: {error:#}");
+                }
+            } else {
+                self.remove_disk_file(&path);
+            }
+        }
     }
 
     fn open_files_list(&self) -> PathBuf {
@@ -959,6 +1049,7 @@ impl DocumentActor {
                 break;
             }
         }
+        self.unmark_pending(file_path);
         Ok(())
     }
 
@@ -1108,11 +1199,15 @@ impl DocumentActor {
         // The disk no longer has the file, so it must not be compared against later; otherwise
         // the next write of a recreated file reads the missing file as a local deletion.
         self.disk_content.remove(file_path);
-        if let Err(error) = sandbox::remove_file(
-            &self.app_config.base_dir,
-            &self.absolute_path_for_file_path(file_path),
-        ) {
+        let absolute = self.absolute_path_for_file_path(file_path);
+        if let Err(error) = sandbox::remove_file(&self.app_config.base_dir, &absolute) {
             warn!("Failed to remove file {file_path}: {error}");
+        }
+        if !matches!(
+            sandbox::exists(&self.app_config.base_dir, &absolute),
+            Ok(true)
+        ) {
+            self.unmark_pending(file_path);
         }
     }
 
@@ -1711,6 +1806,65 @@ mod tests {
             actor.assert_file_content(&RelativePath::new("file1"), "content1");
             actor.assert_file_content(&RelativePath::new("file2"), "content2");
             actor.assert_file_content(&RelativePath::new("sub/file3"), "content3");
+        }
+
+        fn restart(dir: &TempDir) -> DocumentActor {
+            let (_tx, rx) = mpsc::channel(1);
+            let (ping, _ping_rx) = broadcast::channel::<()>(1);
+            let (eph, _eph_rx) = broadcast::channel::<EphemeralMessage>(100);
+            DocumentActor::new(
+                rx,
+                ping,
+                eph,
+                AppConfig {
+                    base_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                false,
+                true,
+                true,
+            )
+        }
+
+        /// A crash after a peer's edit was saved in the document but before it reached the file
+        /// (for example while Git ran and the write was deferred) must not revert that edit.
+        #[tokio::test]
+        async fn restart_keeps_saved_edits_not_yet_on_disk() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = restart(&dir);
+            let file1 = RelativePath::new("file1");
+            let new_file = RelativePath::new("peer-new");
+            // A peer's sync message arrives while Git runs, so the write is deferred; the
+            // document is saved; then the daemon dies.
+            actor.git_running = true;
+            let mut peer = Document::load(&actor.crdt_doc.save());
+            let _ = peer.update_text("content1 plus peer", &file1);
+            peer.set_file(document::Content::String("fresh".into()), &new_file);
+            let mut peer_state = SyncState::new();
+            let mut own_state = SyncState::new();
+            for _ in 0..6 {
+                if let Some(message) = peer.generate_sync_message(&mut peer_state) {
+                    let (tx, rx) = oneshot::channel();
+                    actor
+                        .handle_message(DocMessage::ReceiveSyncMessage {
+                            message,
+                            state: own_state,
+                            response_tx: tx,
+                        })
+                        .await;
+                    own_state = rx.await.unwrap();
+                }
+                if let Some(message) = actor.crdt_doc.generate_sync_message(&mut own_state) {
+                    let _ = peer.receive_sync_message_log_patches(message, &mut peer_state);
+                }
+            }
+            assert!(actor.crdt_doc.file_exists(&new_file));
+            actor.persist().unwrap();
+            drop(actor);
+
+            let actor = restart(&dir);
+            actor.assert_file_content(&file1, "content1 plus peer");
+            actor.assert_file_content(&new_file, "fresh");
         }
 
         #[test]
