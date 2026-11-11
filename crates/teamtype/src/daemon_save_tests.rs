@@ -396,3 +396,77 @@ fn normal_replacement_leaves_no_displaced_file() -> Result<()> {
     assert_eq!(left, 0);
     Ok(())
 }
+
+// A removal event that arrives while a write of that file is pending (it failed) is not a
+// deletion by the user and must not delete the file from the shared document.
+#[cfg(unix)]
+#[tokio::test]
+async fn removal_event_during_a_failed_write_does_not_delete_the_file() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir()?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let path = RelativePath::new("from_peer");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))?;
+    if std::fs::File::create(dir.path().join("probe")).is_ok() {
+        return Ok(()); // permissions not enforced (e.g. running as root)
+    }
+    actor
+        .crdt_doc
+        .set_file(document::Content::String("peer text".into()), &path);
+    actor.write_file(&path);
+    actor.handle_watcher_event(&WatcherEvent {
+        file_path: dir.path().join("from_peer"),
+        event_type: WatcherEventType::Removed,
+    });
+    assert!(actor.crdt_doc.file_exists(&path));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+    actor.handle_message(DocMessage::RescanFiles).await;
+    assert_eq!(std::fs::read_to_string(dir.path().join("from_peer"))?, "peer text");
+    Ok(())
+}
+
+// With no further file events, a failed write is still retried by the actor itself.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_write_is_retried_without_any_event() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir()?;
+    let (_tx, doc_message_rx) = mpsc::channel(1);
+    let (doc_changed_ping_tx, _rx) = broadcast::channel::<()>(1);
+    let (ephemeral_message_tx, _erx) = broadcast::channel::<EphemeralMessage>(100);
+    let mut actor = DocumentActor::new(
+        doc_message_rx,
+        doc_changed_ping_tx,
+        ephemeral_message_tx,
+        AppConfig {
+            base_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        true,
+        true,
+        false,
+    );
+    let path = RelativePath::new("from_peer");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))?;
+    if std::fs::File::create(dir.path().join("probe")).is_ok() {
+        return Ok(());
+    }
+    actor
+        .crdt_doc
+        .set_file(document::Content::String("peer text".into()), &path);
+    actor.write_file(&path);
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+    let file = dir.path().join("from_peer");
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        // `_tx` stays alive, so `run` only returns when dropped by the timeout.
+        let runner = actor.run();
+        tokio::pin!(runner);
+        tokio::select! {
+            () = &mut runner => {}
+            () = async { while !file.exists() { sleep(Duration::from_millis(10)).await } } => {}
+        }
+    })
+    .await;
+    assert_eq!(std::fs::read_to_string(&file)?, "peer text");
+    Ok(())
+}

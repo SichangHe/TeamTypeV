@@ -904,6 +904,13 @@ impl DocumentActor {
     }
 
     fn file_removed(&mut self, relative_file_path: &RelativePath) {
+        if self.deferred_writes.contains(relative_file_path)
+            && !self.disk_content.contains_key(relative_file_path)
+        {
+            // A write is pending and the daemon never put this file on disk, so its absence is
+            // not a deletion by the user (same rule as the rescan in `read_current_content_from_dir`).
+            return;
+        }
         self.remove_file(relative_file_path);
         let _ = self.doc_changed_ping_tx.send(());
     }
@@ -1534,12 +1541,28 @@ impl DocumentActor {
     }
 
     async fn run(&mut self) {
-        while let Some(message) = self.doc_message_rx.recv().await {
-            self.handle_message(message).await;
+        loop {
+            // Writes that failed or were deferred are retried on every rescan; with no further
+            // file events, nothing would trigger one, so also retry on a timer.
+            let retry_pending = !self.deferred_writes.is_empty() && !self.git_running;
+            tokio::select! {
+                message = self.doc_message_rx.recv() => {
+                    let Some(message) = message else { break };
+                    self.handle_message(message).await;
+                }
+                () = sleep(WRITE_RETRY_INTERVAL), if retry_pending => {
+                    self.handle_message(DocMessage::RescanFiles).await;
+                }
+            }
         }
         debug!("Channel towards document handle has been closed (probably shutting down).");
     }
 }
+
+#[cfg(not(test))]
+const WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// This handle knows how to talk to the `DocumentActor` and provides an interface for doing so.
 ///
