@@ -580,6 +580,64 @@ impl TextDelta {
     }
 }
 
+/// Whether `chunks` is an edit script from `a` to `b`: equal and deleted chunks read `a` in order,
+/// equal and inserted chunks read `b` in order, and both are consumed completely. With it, applying
+/// the script to `a` gives exactly `b` (proved in `daemon_proof/diff_proof.rs`).
+#[must_use]
+pub fn chunks_reconstruct(chunks: &[Chunk<'_>], old: &str, new: &str) -> bool {
+    let (mut rest_a, mut rest_b) = (old, new);
+    for chunk in chunks {
+        match chunk {
+            Chunk::Equal(s) => {
+                let (Some(left), Some(right)) = (rest_a.strip_prefix(s), rest_b.strip_prefix(s))
+                else {
+                    return false;
+                };
+                (rest_a, rest_b) = (left, right);
+            }
+            Chunk::Delete(s) => {
+                let Some(left) = rest_a.strip_prefix(s) else {
+                    return false;
+                };
+                rest_a = left;
+            }
+            Chunk::Insert(s) => {
+                let Some(right) = rest_b.strip_prefix(s) else {
+                    return false;
+                };
+                rest_b = right;
+            }
+        }
+    }
+    rest_a.is_empty() && rest_b.is_empty()
+}
+
+/// `dissimilar::diff`, with its result checked: equal texts give no edit (a lone `Equal` chunk), and
+/// a script that does not turn `a` into `b` is replaced by delete-all then insert-all. Callers
+/// apply the script with `expect`; this makes a faulty diff cost a larger edit instead of a crash or a
+/// corrupted shared text.
+#[must_use]
+pub fn checked_diff<'a>(a: &'a str, b: &'a str) -> Vec<Chunk<'a>> {
+    if a == b {
+        return if a.is_empty() {
+            vec![]
+        } else {
+            vec![Chunk::Equal(a)]
+        };
+    }
+    let chunks = dissimilar::diff(a, b);
+    if chunks_reconstruct(&chunks, a, b) {
+        return chunks;
+    }
+    warn!(
+        "dissimilar::diff returned a script that does not turn the old text into the new one; replacing the whole text."
+    );
+    [Chunk::Delete(a), Chunk::Insert(b)]
+        .into_iter()
+        .filter(|chunk| !matches!(chunk, Chunk::Delete("") | Chunk::Insert("")))
+        .collect()
+}
+
 impl From<Vec<Chunk<'_>>> for TextDelta {
     fn from(chunks: Vec<Chunk>) -> Self {
         let mut delta = Self::default();
@@ -1343,5 +1401,48 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn checked_diff_scripts_turn_old_into_new() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(11);
+        let alphabet = ["x", "y", "\n", "é", "🥕", " "];
+        let mut random = || -> String {
+            let n = rng.random_range(0..14);
+            std::iter::repeat_with(|| alphabet[rng.random_range(0..alphabet.len())])
+                .take(n)
+                .collect()
+        };
+        for _ in 0..300 {
+            let (a, b) = (random(), random());
+            let chunks = checked_diff(&a, &b);
+            assert!(chunks_reconstruct(&chunks, &a, &b), "{a:?} -> {b:?}");
+            let delta = TextDelta::from(chunks);
+            assert_eq!(delta.apply_to(&a).unwrap(), b);
+        }
+    }
+
+    #[test]
+    fn equal_texts_diff_to_no_edit() {
+        assert_eq!(checked_diff("", ""), vec![]);
+        assert_eq!(checked_diff("same", "same"), vec![Chunk::Equal("same")]);
+    }
+
+    #[test]
+    fn chunk_scripts_that_do_not_reconstruct_are_rejected() {
+        assert!(!chunks_reconstruct(&[Chunk::Equal("a")], "ab", "ab"));
+        assert!(!chunks_reconstruct(&[Chunk::Delete("a")], "b", ""));
+        assert!(!chunks_reconstruct(&[Chunk::Insert("b")], "", "c"));
+        assert!(!chunks_reconstruct(
+            &[Chunk::Equal("a"), Chunk::Insert("b")],
+            "a",
+            "ac"
+        ));
+        assert!(chunks_reconstruct(
+            &[Chunk::Equal("a"), Chunk::Delete("x"), Chunk::Insert("y")],
+            "ax",
+            "ay"
+        ));
     }
 }

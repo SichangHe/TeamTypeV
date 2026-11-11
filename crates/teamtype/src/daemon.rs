@@ -1067,9 +1067,9 @@ impl DocumentActor {
                 self.current_file_content(relative_file_path),
             ) {
                 let shared: operational_transform::OperationSeq =
-                    TextDelta::from(dissimilar::diff(base, current)).into();
+                    TextDelta::from(crate::types::checked_diff(base, current)).into();
                 let outside: operational_transform::OperationSeq =
-                    TextDelta::from(dissimilar::diff(base, &new_content)).into();
+                    TextDelta::from(crate::types::checked_diff(base, &new_content)).into();
                 let (_, outside) = shared
                     .transform(&outside)
                     .expect("Disk and shared edits have the same base");
@@ -1597,7 +1597,7 @@ impl DocumentActor {
                 {
                     // We want to compare the content sent along with the "open" with the content
                     // that's known to the CRDT.
-                    let chunks = dissimilar::diff(content, crdt_content);
+                    let chunks = crate::types::checked_diff(content, crdt_content);
                     if let [] | [dissimilar::Chunk::Equal(_)] = chunks.as_slice() {
                         // The contents match, nothing to do.
                     } else {
@@ -2478,7 +2478,7 @@ mod tests {
                 let outside = format!("{old}\noutside-{n}");
                 std::fs::write(dir.path().join("file1"), &outside).expect("outside write");
                 let shared = format!("typed-{n}\n{old}");
-                let delta = TextDelta::from(dissimilar::diff(&old, &shared));
+                let delta = TextDelta::from(crate::types::checked_diff(&old, &shared));
                 let (message, _) = actor
                     .editor_connections
                     .get_mut(&1)

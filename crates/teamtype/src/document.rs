@@ -299,7 +299,7 @@ impl Document {
                 panic!("Failed to get {file_path} text object");
             };
 
-            let chunks = dissimilar::diff(current_text, desired_text);
+            let chunks = crate::types::checked_diff(current_text, desired_text);
             if let [] | [Chunk::Equal(_)] = chunks.as_slice() {
                 return None;
             }
