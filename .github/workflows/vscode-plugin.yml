@@ -40,3 +40,9 @@ jobs:
       - name: Check formatting
         run: npm run lint-format
 
+
+      - name: Differential and protocol regression tests
+        run: |
+          node verification/remote-apply.cjs
+          node verification/protocol.cjs
+          node verification/positions.cjs

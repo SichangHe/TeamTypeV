@@ -316,6 +316,7 @@ export function contentAfterEdits(document: vscode.TextDocument, edits: vscode.T
         start: document.offsetAt(e.range.start),
         end: document.offsetAt(e.range.end),
         newText: e.newText,
+        index: i,
     }))
 
     // Sort by start offset descendingly.
@@ -323,7 +324,8 @@ export function contentAfterEdits(document: vscode.TextDocument, edits: vscode.T
     // Reason: If two edits are "replace character 0-0 with xxx" and "replace character 0-1 with nothing",
     // they don't overlap, but the intended resulting edit should NOT remove the first x of xxx, it should
     // remove a character from the original content.
-    editsWithOffsets.sort((a, b) => b.start - a.start || b.end - a.end)
+    // Equal ranges (two insertions at one point) keep the order given: apply the later first.
+    editsWithOffsets.sort((a, b) => b.start - a.start || b.end - a.end || b.index - a.index)
 
     for (const edit of editsWithOffsets) {
         result = result.slice(0, edit.start) + edit.newText + result.slice(edit.end)
@@ -347,20 +349,29 @@ async function processEditFromDaemon(client: Client, edit: Edit) {
 
             const uri = edit.uri
 
+            // Every daemon message whose revision equals editor_rev ends in exactly one of:
+            // applied (daemon += 1), a no-op that counts as applied (daemon += 1), or
+            // rejected (an empty delta with revision = daemon is sent and editor += 1).
+            // Anything that throws before the edit lands is a rejection, otherwise the
+            // daemon would wait for an acknowledgement that never comes.
             const document = documentForUri(uri)
-            if (document) {
-                let textEdits = teamtypevDeltasToVSCodeTextEdits(document, edit.delta)
+            let worked = false
+            let pending: NonNullable<typeof pendingRemote> | null = null
+            try {
+                if (!document) throw new Error(`No document for URI ${uri}, why is the daemon sending me this?`)
+                const textEdits = teamtypevDeltasToVSCodeTextEdits(document, edit.delta)
                 const content = contentAfterEdits(document, textEdits)
                 if (content === document.getText()) {
                     revision.daemon += 1
                     return
                 }
-                const pending = {uri, content, version: document.version, changes: [] as PendingDocumentChange[]}
+                pending = {uri, content, version: document.version, changes: [] as PendingDocumentChange[]}
                 pendingRemote = pending
-                let worked = false
-                try {
-                    worked = await applyEdit(client, document, edit)
-                } finally {
+                worked = await applyEdit(client, document, edit)
+            } catch (e) {
+                vscode.window.showErrorMessage(`Error while processing edit from TeamTypeV daemon: ${e}`)
+            } finally {
+                if (pending) {
                     if (pendingRemote === pending) pendingRemote = null
                     let remoteApplied = false
                     for (const change of pending.changes) {
@@ -378,19 +389,17 @@ async function processEditFromDaemon(client: Client, edit: Edit) {
                         }
                     }
                 }
-                if (worked) {
-                    // Attempt auto-save to avoid the situation where one user closes a modified
-                    // document without saving, which will cause VS Code to undo the dirty changes.
-                    document.save()
-                } else {
-                    debug("rejected an applyEdit, sending empty delta")
-
-                    let theEdit: Edit = {uri, revision: revision.daemon, delta: []}
-                    client.connection.sendRequest(editType, theEdit)
-                    revision.editor += 1
-                }
+            }
+            if (worked) {
+                // Attempt auto-save to avoid the situation where one user closes a modified
+                // document without saving, which will cause VS Code to undo the dirty changes.
+                document!.save()
             } else {
-                throw new Error(`No document for URI ${uri}, why is the daemon sending me this?`)
+                debug("rejected an applyEdit, sending empty delta")
+
+                let theEdit: Edit = {uri, revision: revision.daemon, delta: []}
+                client.connection.sendRequest(editType, theEdit)
+                revision.editor += 1
             }
         })
     } catch (e) {
@@ -493,7 +502,13 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
     }
     let client = findOrCreateClient(name, directory)
     try {
-        new TextDecoder("utf-8", {fatal: true}).decode(fs.readFileSync(original.uri.fsPath))
+        const onDisk = new TextDecoder("utf-8", {fatal: true}).decode(fs.readFileSync(original.uri.fsPath))
+        // VS Code ends a line at a lone CR; the daemon, Neovim and Emacs do not. Positions would disagree.
+        if (hasLoneCarriageReturn(onDisk) || hasLoneCarriageReturn(original.getText())) {
+            throw new Error(
+                "the file contains a carriage return (CR) not followed by a line feed, which editors count differently",
+            )
+        }
         await client.connection.sendRequest("daemonWriter", {})
         await prepareNativeHandoff(original)
     } catch (error) {
@@ -524,6 +539,7 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
     await closeNativeDocument(original)
     const uri = protocolUri(document)
     debug("OPEN " + decodeURI(uri))
+    await waitForClosedSession(client, uri)
     client.ot_states[uri] = {revision: new Revision(), content: getLines(document)}
     const opened = client.connection.sendRequest("open", {uri, content: initialContent, daemonWrites: true})
     const delta = handoffDelta(initialContent, transferredContent)
@@ -539,6 +555,10 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
             delete client.ot_states[uri]
             throw error
         })
+}
+
+function hasLoneCarriageReturn(text: string): boolean {
+    return /\r(?!\n)/.test(text)
 }
 
 /** Preserves local edits as one operation against the native document's original version. */
@@ -612,13 +632,37 @@ function clientTracksDocument(client: Client, document: vscode.TextDocument): bo
     return document.uri.scheme === "teamtypev" && Object.keys(client.ot_states).includes(protocolUri(document))
 }
 
+/** Daemon messages of a closed session are told apart from a reopened one only by their position in the stream. */
+const closingDocuments = new Map<string, Promise<unknown>>()
+
+function closingKey(client: Client, uri: string): string {
+    return `${client.name}\0${client.directory}\0${uri}`
+}
+
 function processUserClose(document: vscode.TextDocument) {
     for (let client of clientsForDocument(document)) {
         const uri = protocolUri(document)
-        client.connection.sendRequest(closeType, {uri})
+        const closing = Promise.resolve(client.connection.sendRequest(closeType, {uri})).catch(() => {})
+        closingDocuments.set(closingKey(client, uri), closing)
 
         delete client.ot_states[uri]
     }
+}
+
+/**
+ * Wait until every daemon message of the previous session for `uri` has been handled. The daemon
+ * answers `close` after the edits it sent before it, and messages are read in order, so once the
+ * answer arrived (and the handlers queued on the mutex ran) a reopened session starts clean:
+ * an old message with revision == the new editor revision would otherwise be applied.
+ */
+async function waitForClosedSession(client: Client, uri: string) {
+    const key = closingKey(client, uri)
+    const closing = closingDocuments.get(key)
+    if (closing) {
+        await closing
+        if (closingDocuments.get(key) === closing) closingDocuments.delete(key)
+    }
+    await mutex.runExclusive(() => {})
 }
 
 // NOTE: We might get multiple events per document.version,
