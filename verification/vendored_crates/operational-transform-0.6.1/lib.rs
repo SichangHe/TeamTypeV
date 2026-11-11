@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: 2020 bold <bold@cryptoguru.com>
+//
+// SPDX-License-Identifier: MIT
+//
+// Vendored operational-transform 0.6.1 src/lib.rs; only these three header lines were added.
 //! A library for Operational Transformation
 //!
 //! Operational transformation (OT) is a technology for supporting a range of
