@@ -158,7 +158,7 @@ do
                 vim.api.nvim_buf_set_lines(buf, a, b, true, rep)
             end
             text = before
-            local ok, err = pcall(function()
+            local ok = pcall(function()
                 for _, d in ipairs(emitted) do
                     check(#d == 1, "one op per delta")
                     text = apply(text, d[1])
