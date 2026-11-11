@@ -539,22 +539,35 @@ export async function openSharedDocument(name: string, document: vscode.TextDocu
     await closeNativeDocument(original)
     const uri = protocolUri(document)
     debug("OPEN " + decodeURI(uri))
+    await startSharedSession(client, uri, getLines(document), initialContent, transferredContent, () =>
+        vscode.window.showTextDocument(document, {preview: false}),
+    )
+    debug("Successfully opened. Tracking changes.")
+    document.save()
+}
+
+/** Starts the session, sends `open` (and the handoff edit), and settles when the daemon answered both. */
+async function startSharedSession(
+    client: Client,
+    uri: string,
+    lines: string[],
+    initialContent: string,
+    transferredContent: string,
+    show: () => Thenable<unknown>,
+) {
     await waitForClosedSession(client, uri)
-    client.ot_states[uri] = {revision: new Revision(), content: getLines(document)}
+    const state: DocumentOTState = {revision: new Revision(), content: lines}
+    client.ot_states[uri] = state
     const opened = client.connection.sendRequest("open", {uri, content: initialContent, daemonWrites: true})
     const delta = handoffDelta(initialContent, transferredContent)
     const edited = delta.length ? client.connection.sendRequest(editType, {uri, revision: 0, delta}) : Promise.resolve()
-    if (delta.length) client.ot_states[uri].revision.editor += 1
-    await vscode.window.showTextDocument(document, {preview: false})
-    await Promise.all([opened, edited])
-        .then(() => {
-            debug("Successfully opened. Tracking changes.")
-            document.save()
-        })
-        .catch((error) => {
-            delete client.ot_states[uri]
-            throw error
-        })
+    if (delta.length) state.revision.editor += 1
+    await show()
+    await Promise.all([opened, edited]).catch((error) => {
+        // A failed open of an earlier session must not end a session reopened since.
+        if (client.ot_states[uri] === state) delete client.ot_states[uri]
+        throw error
+    })
 }
 
 function hasLoneCarriageReturn(text: string): boolean {
