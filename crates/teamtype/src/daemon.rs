@@ -251,7 +251,9 @@ impl DocumentActor {
                         })
                         .unwrap_or_default();
                 s.check_files_left_open();
+                let pending_before = s.read_pending();
                 s.apply_pending_writes(&left_open);
+                s.recover_displaced(&pending_before);
             }
             s.read_current_content_from_dir(init);
         } else if is_host {
@@ -1133,15 +1135,89 @@ impl DocumentActor {
         if self.persist {
             self.persist()?;
         }
-        let displaced = sandbox::replace_file(&self.app_config.base_dir, &abs_path, bytes)
-            .with_context(|| format!("Failed to write to file {abs_path}"))?;
-        if let Some(displaced) = displaced
-            && self.disk_content.contains_key(file_path)
-        {
-            self.merge_disk_content(file_path, displaced);
+        // The displaced file stays in `.teamtypev` until the document holds its bytes on disk,
+        // so a kill right after the swap cannot lose an outside write made since our last read.
+        let prefix = self.persist.then(|| displaced_prefix(file_path));
+        let (displaced, kept) = sandbox::replace_file_keeping(
+            &self.app_config.base_dir,
+            &abs_path,
+            bytes,
+            prefix.as_deref(),
+        )
+        .with_context(|| format!("Failed to write to file {abs_path}"))?;
+        if let Some(displaced) = displaced {
+            let outside = self.disk_content.get(file_path) != Some(&displaced);
+            if self.disk_content.contains_key(file_path) {
+                self.merge_disk_content(file_path, displaced);
+            }
+            if outside && self.persist {
+                self.persist()?;
+            }
+        }
+        if let Some(kept) = kept {
+            let _ = std::fs::remove_file(kept);
         }
         self.disk_content.insert(file_path.clone(), bytes.to_vec());
         Ok(())
+    }
+
+    /// After a restart, merges outside writes that a kill displaced from a file while the daemon
+    /// was replacing it. `pending_before` is the pending record as the previous run left it; its
+    /// base is the common ancestor. Without a base the bytes are kept apart, never dropped.
+    fn recover_displaced(&mut self, pending_before: &HashMap<RelativePath, Option<Vec<u8>>>) {
+        let dir = self.app_config.base_dir.join(".teamtypev");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix("displaced-") else {
+                continue;
+            };
+            let Some(path) = rest.split('-').next().and_then(unhex) else {
+                continue;
+            };
+            let path = RelativePath::new(&path);
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let on_disk = sandbox::read_file(
+                &self.app_config.base_dir,
+                &self.absolute_path_for_file_path(&path),
+            )
+            .ok();
+            let shared = self
+                .current_file_content(&path)
+                .map(|content| match content {
+                    document::Content::String(text) => text.as_bytes().to_vec(),
+                    document::Content::Bytes(bytes) => bytes.clone(),
+                });
+            // Equal to what we were writing (killed before the swap) or already merged.
+            if shared.as_ref() == Some(&bytes) || on_disk.as_ref() == Some(&bytes) {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
+            match (pending_before.get(&path), shared.is_some(), on_disk) {
+                (Some(base), true, Some(on_disk)) => {
+                    self.disk_content
+                        .insert(path.clone(), base.clone().unwrap_or_default());
+                    self.merge_disk_content(&path, bytes);
+                    self.disk_content.insert(path.clone(), on_disk);
+                    if let Err(error) = self.try_write_file(&path) {
+                        warn!("Could not write {path} after merging a displaced edit: {error:#}");
+                        continue;
+                    }
+                    let _ = std::fs::remove_file(entry.path());
+                }
+                _ => {
+                    warn!(
+                        "{path} was replaced while another program changed it; the other \
+                         version is kept at {}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
     }
 
     fn read_current_content_from_dir(&mut self, init: bool) {
@@ -1751,6 +1827,25 @@ fn spawn_file_watcher(app_config: &AppConfig, document_handle: DocumentActorHand
             }
         }
     });
+}
+
+/// File name prefix of a displaced file kept while `path` is replaced.
+fn displaced_prefix(path: &RelativePath) -> String {
+    let hex: String = path
+        .display()
+        .to_string()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("displaced-{hex}-")
+}
+
+fn unhex(hex: &str) -> Option<String> {
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    String::from_utf8(bytes?).ok()
 }
 
 fn spawn_persister(document_handle: DocumentActorHandle) {

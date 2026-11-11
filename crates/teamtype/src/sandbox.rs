@@ -63,12 +63,27 @@ pub fn replace_file(
     absolute_file_path: &Path,
     content: &[u8],
 ) -> Result<Option<Vec<u8>>> {
+    replace_file_keeping(absolute_base_dir, absolute_file_path, content, None)
+        .map(|(displaced, _)| displaced)
+}
+
+/// Like `replace_file`. With a `keep_prefix`, the displaced file also stays in `.teamtypev` under
+/// a name starting with it, and its path is returned: a kill before the caller has saved the
+/// displaced bytes elsewhere then cannot lose them. The caller removes the file afterwards.
+pub fn replace_file_keeping(
+    absolute_base_dir: &Path,
+    absolute_file_path: &Path,
+    content: &[u8],
+    keep_prefix: Option<&str>,
+) -> Result<(Option<Vec<u8>>, Option<PathBuf>)> {
     let path = check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
     let parent = path.parent().context("File has no parent")?;
     create_dir_all(absolute_base_dir, parent)?;
     let metadata_dir = absolute_base_dir.join(".teamtypev");
     create_dir_all(absolute_base_dir, &metadata_dir)?;
-    let mut staged = tempfile::NamedTempFile::new_in(&metadata_dir)?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(keep_prefix.unwrap_or(".tmp"))
+        .tempfile_in(&metadata_dir)?;
     staged.write_all(content)?;
     if let Ok(metadata) = fs::metadata(&path) {
         staged.as_file().set_permissions(metadata.permissions())?;
@@ -87,9 +102,16 @@ pub fn replace_file(
             &path,
             rustix::fs::RenameFlags::EXCHANGE,
         ) {
-            Ok(()) => break Ok(Some(fs::read(staged.path())?)),
+            Ok(()) => {
+                let displaced = fs::read(staged.path())?;
+                let kept = match keep_prefix {
+                    Some(_) => Some(staged.into_temp_path().keep()?),
+                    None => None,
+                };
+                break Ok((Some(displaced), kept));
+            }
             Err(rustix::io::Errno::NOENT) => match staged.persist_noclobber(&path) {
-                Ok(_) => break Ok(None),
+                Ok(_) => break Ok((None, None)),
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                     staged = error.file;
                 }

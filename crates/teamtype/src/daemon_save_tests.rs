@@ -322,3 +322,77 @@ async fn failed_write_of_a_peers_file_does_not_delete_it_on_rescan() -> Result<(
     assert_eq!(std::fs::read_to_string(dir.path().join("from_peer"))?, "peer text");
     Ok(())
 }
+
+#[test]
+fn torn_incremental_append_does_not_break_restart() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    actor.persist()?;
+    actor.crdt_doc.update_text("line1\npeer\nmore\n", &RelativePath::new("shared"));
+    // Incremental append, then the machine dies after only part of it reached the disk.
+    let doc = dir.path().join(".teamtypev/doc");
+    let full = std::fs::read(&doc)?;
+    actor.persist()?;
+    let whole = std::fs::read(&doc)?;
+    assert!(whole.len() > full.len());
+    std::fs::write(&doc, &whole[..full.len() + (whole.len() - full.len()) / 2])?;
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    let content = restarted.current_file_content(&RelativePath::new("shared"));
+    assert!(content.is_some(), "recovered document lost the file");
+    Ok(())
+}
+
+#[test]
+fn kill_while_replacing_keeps_an_outside_write_made_since_the_last_read() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.persist()?;
+    actor.crdt_doc.update_text("line1\npeer\n", &path);
+    actor.mark_pending([path.clone()]);
+    actor.persist()?;
+    // An outside program writes after the daemon's last read; the daemon swaps its bytes in and is
+    // killed before it has merged the displaced ones.
+    std::fs::write(dir.path().join("shared"), "outside\nline1\n")?;
+    let prefix = displaced_prefix(&path);
+    let (displaced, kept) = sandbox::replace_file_keeping(
+        &actor.app_config.base_dir,
+        &actor.absolute_path_for_file_path(&path),
+        b"line1\npeer\n",
+        Some(&prefix),
+    )?;
+    assert_eq!(displaced.as_deref(), Some(b"outside\nline1\n".as_slice()));
+    assert!(kept.is_some());
+    drop(actor);
+    let restarted = restarted_actor(&dir);
+    restarted.assert_file_content(&path, "outside\nline1\npeer\n");
+    assert_eq!(
+        std::fs::read(dir.path().join("shared"))?,
+        b"outside\nline1\npeer\n"
+    );
+    let left: Vec<_> = std::fs::read_dir(dir.path().join(".teamtypev"))?
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("displaced-"))
+        .collect();
+    assert!(left.is_empty());
+    Ok(())
+}
+
+#[test]
+fn normal_replacement_leaves_no_displaced_file() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = actor_with_pending_peer_edit(&dir)?;
+    std::fs::write(dir.path().join("shared"), "outside\nline1\n")?;
+    actor.try_write_file(&RelativePath::new("shared"))?;
+    actor.assert_file_content(&RelativePath::new("shared"), "outside\nline1\npeer\n");
+    let left = std::fs::read_dir(dir.path().join(".teamtypev"))?
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("displaced-"))
+        .count();
+    assert_eq!(left, 0);
+    Ok(())
+}
