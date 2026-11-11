@@ -300,6 +300,11 @@ impl DocumentActor {
             }
             DocMessage::RescanFiles => {
                 self.read_current_content_from_dir(false);
+                if !self.git_running {
+                    for path in std::mem::take(&mut self.deferred_writes) {
+                        self.write_file(&path);
+                    }
+                }
             }
             DocMessage::GitHeads { response_tx } => {
                 self.read_current_content_from_dir(false);
@@ -1075,6 +1080,16 @@ impl DocumentActor {
             self.deferred_writes.insert(file_path.clone());
             anyhow::bail!("Git is running; retry saving when the command finishes");
         }
+        let result = self.write_file_now(file_path);
+        if result.is_err() {
+            // Keep the shared file: a rescan must not read it as deleted on disk, and the next
+            // rescan (any watcher event) writes it again.
+            self.deferred_writes.insert(file_path.clone());
+        }
+        result
+    }
+
+    fn write_file_now(&mut self, file_path: &RelativePath) -> Result<()> {
         if self.disk_content.contains_key(file_path) {
             self.file_created_or_changed(file_path);
         }

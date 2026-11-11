@@ -291,3 +291,34 @@ fn crash_with_git_changes_during_pending_peer_edit_merges_both() -> Result<()> {
     );
     Ok(())
 }
+
+
+// A write that fails (here: the directory is read-only for a moment) must not make the next
+// directory rescan read the missing file as "deleted on disk" and delete it from the shared
+// document for every peer; once the disk is writable again the file must appear.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_write_of_a_peers_file_does_not_delete_it_on_rescan() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir()?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let path = RelativePath::new("from_peer");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))?;
+    if std::fs::File::create(dir.path().join("probe")).is_ok() {
+        return Ok(()); // permissions not enforced (e.g. running as root)
+    }
+    actor
+        .crdt_doc
+        .set_file(document::Content::String("peer text".into()), &path);
+    actor.write_file(&path);
+    assert!(!dir.path().join("from_peer").exists());
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+    actor.read_current_content_from_dir(false);
+    assert!(
+        actor.crdt_doc.file_exists(&path),
+        "rescan deleted the peer's file from the shared document"
+    );
+    actor.handle_message(DocMessage::RescanFiles).await;
+    assert_eq!(std::fs::read_to_string(dir.path().join("from_peer"))?, "peer text");
+    Ok(())
+}
