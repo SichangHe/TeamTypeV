@@ -47,6 +47,11 @@ impl EditorConnection {
         format!("{:?}", self.ot_servers.get(file_path))
     }
 
+    #[cfg(test)]
+    pub fn server_text(&self, file_path: &RelativePath) -> Option<&str> {
+        self.ot_servers.get(file_path).map(OTServer::current_text)
+    }
+
     #[must_use]
     pub fn owns(&self, file_path: &RelativePath) -> bool {
         self.ot_servers.contains_key(file_path)

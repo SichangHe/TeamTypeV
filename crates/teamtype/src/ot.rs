@@ -86,6 +86,11 @@ pub struct OTServer {
 }
 
 impl OTServer {
+    #[cfg(test)]
+    pub fn current_text(&self) -> &str {
+        &self.current_content
+    }
+
     pub fn new(initial_content: String) -> Self {
         Self {
             last_confirmed_editor_content: initial_content.clone(),

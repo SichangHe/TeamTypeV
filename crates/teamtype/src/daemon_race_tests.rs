@@ -51,7 +51,7 @@ struct EditorClient {
 struct Peer {
     dir: TempDir,
     actor: DocumentActor,
-    editor: Option<EditorClient>,
+    editors: [Option<EditorClient>; 2],
     /// Watcher events not yet delivered.
     watcher: VecDeque<WatcherEventType>,
 }
@@ -100,7 +100,7 @@ impl World {
             ps.push(Peer {
                 dir,
                 actor,
-                editor: None,
+                editors: [None, None],
                 watcher: VecDeque::new(),
             });
         }
@@ -211,8 +211,8 @@ impl World {
         }
     }
 
-    async fn pull(&mut self, p: usize) {
-        let Some(ed) = self.peers[p].editor.as_mut() else {
+    async fn pull(&mut self, p: usize, e: usize) {
+        let Some(ed) = self.peers[p].editors[e].as_mut() else {
             return;
         };
         let mut buf = vec![0u8; 65536];
@@ -241,8 +241,8 @@ impl World {
         }
     }
 
-    async fn open_editor(&mut self, p: usize) {
-        if self.peers[p].editor.is_some() || !self.peers[p].dir.path().join("a").exists() {
+    async fn open_editor(&mut self, p: usize, e: usize) {
+        if self.peers[p].editors[e].is_some() || !self.peers[p].dir.path().join("a").exists() {
             return;
         }
         let path = self.path.clone();
@@ -254,7 +254,7 @@ impl World {
         let (stream, reader) = tokio::net::UnixStream::pair().unwrap();
         let (_, writer) = tokio::io::split(stream);
         actor.editor_connections.insert(
-            1,
+            e + 1,
             (
                 EditorConnection::new("t".into(), actor.app_config.clone()),
                 tokio_util::codec::FramedWrite::new(writer, editor::OutgoingProtocolCodec),
@@ -269,7 +269,7 @@ impl World {
         self.peers[p]
             .actor
             .handle_message(DocMessage::FromEditor(
-                1,
+                e + 1,
                 IncomingMessage::Request {
                     id: JSONRPCId::Usize(id),
                     payload: EditorProtocolMessageFromEditor::Open {
@@ -281,7 +281,7 @@ impl World {
                 },
             ))
             .await;
-        self.peers[p].editor = Some(EditorClient {
+        self.peers[p].editors[e] = Some(EditorClient {
             uri,
             reader,
             pending_read: vec![],
@@ -293,7 +293,7 @@ impl World {
             next_request: 1,
         });
         // Messages sent while handling the open belong to the new editor.
-        self.pull(p).await;
+        self.pull(p, e).await;
     }
 
     fn random_text(&mut self) -> String {
@@ -307,9 +307,9 @@ impl World {
             .collect()
     }
 
-    fn local_edit(&mut self, p: usize) {
+    fn local_edit(&mut self, p: usize, e: usize) {
         let Some(len) = self.peers[p]
-            .editor
+            .editors[e]
             .as_ref()
             .map(|ed| ed.buffer.chars().count())
         else {
@@ -319,7 +319,7 @@ impl World {
         let del = self.rng.random_range(0..=(len - at).min(3));
         let n = self.rng.random_range(0..4);
         let ins = self.random_chars(n);
-        let ed = self.peers[p].editor.as_mut().expect("checked above");
+        let ed = self.peers[p].editors[e].as_mut().expect("checked above");
         let mut delta = TextDelta::default();
         delta.retain(at);
         if del > 0 {
@@ -337,8 +337,8 @@ impl World {
         self.trace.push(format!("edit {p} at {at} del {del} ins {ins:?}"));
     }
 
-    async fn send_to_daemon(&mut self, p: usize) {
-        let Some(ed) = self.peers[p].editor.as_mut() else {
+    async fn send_to_daemon(&mut self, p: usize, e: usize) {
+        let Some(ed) = self.peers[p].editors[e].as_mut() else {
             return;
         };
         let Some((revision, delta)) = ed.to_daemon.pop_front() else {
@@ -351,7 +351,7 @@ impl World {
         self.peers[p]
             .actor
             .handle_message(DocMessage::FromEditor(
-                1,
+                e + 1,
                 IncomingMessage::Request {
                     id: JSONRPCId::Usize(id),
                     payload: EditorProtocolMessageFromEditor::Edit {
@@ -364,8 +364,8 @@ impl World {
             .await;
     }
 
-    fn apply_one_inbox(&mut self, p: usize) {
-        let Some(ed) = self.peers[p].editor.as_mut() else {
+    fn apply_one_inbox(&mut self, p: usize, e: usize) {
+        let Some(ed) = self.peers[p].editors[e].as_mut() else {
             return;
         };
         let Some((revision, delta)) = ed.inbox.pop_front() else {
@@ -412,22 +412,22 @@ impl World {
         }
     }
 
-    async fn close_editor(&mut self, p: usize) {
-        let Some(ed) = self.peers[p].editor.take() else {
+    async fn close_editor(&mut self, p: usize, e: usize) {
+        let Some(ed) = self.peers[p].editors[e].take() else {
             return;
         };
         self.trace.push(format!("close {p}"));
         self.peers[p]
             .actor
             .handle_message(DocMessage::FromEditor(
-                1,
+                e + 1,
                 IncomingMessage::Request {
                     id: JSONRPCId::Usize(9999),
                     payload: EditorProtocolMessageFromEditor::Close { uri: ed.uri },
                 },
             ))
             .await;
-        self.peers[p].actor.editor_connections.remove(&1);
+        self.peers[p].actor.editor_connections.remove(&(e + 1));
     }
 
     async fn watcher(&mut self, p: usize) {
@@ -449,13 +449,14 @@ impl World {
     async fn step(&mut self) {
         let n = self.peers.len();
         let p = self.rng.random_range(0..n);
+        let e = self.rng.random_range(0..2);
         match self.rng.random_range(0..16) {
-            0 => self.open_editor(p).await,
-            1..=3 => self.local_edit(p),
-            4 => self.send_to_daemon(p).await,
+            0 => self.open_editor(p, e).await,
+            1..=3 => self.local_edit(p, e),
+            4 => self.send_to_daemon(p, e).await,
             5 => {
-                self.pull(p).await;
-                self.apply_one_inbox(p);
+                self.pull(p, e).await;
+                self.apply_one_inbox(p, e);
             }
             6 | 7 => {
                 let q = self.rng.random_range(0..n);
@@ -474,8 +475,32 @@ impl World {
             11 if self.disk_writes => self.watcher(p).await,
             12 if self.disk_writes => self.disk_remove(p),
             13 if self.disk_writes => self.disk_create(p),
-            14 if self.disk_writes => self.close_editor(p).await,
+            14 if self.disk_writes => self.close_editor(p, e).await,
             _ => {}
+        }
+        self.check_inside();
+    }
+
+    /// Between actor messages (`disk_edits` is drained), every file an editor connection has
+    /// open has the daemon's shared text as its OT server text.
+    fn check_inside(&mut self) {
+        if self.violation.is_some() {
+            return;
+        }
+        for p in 0..self.peers.len() {
+            let actor = &self.peers[p].actor;
+            for (id, (conn, _)) in &actor.editor_connections {
+                let Some(server) = conn.server_text(&self.path) else {
+                    continue;
+                };
+                let shared = actor.current_file_content(&self.path);
+                if shared != Some(&Content::String(server.to_string())) {
+                    self.violation = Some(format!(
+                        "inside_ok: peer {p} editor {id} server {server:?} != shared {shared:?}"
+                    ));
+                    return;
+                }
+            }
         }
     }
 
@@ -483,19 +508,28 @@ impl World {
         for _ in 0..500 {
             let mut busy = false;
             for p in 0..self.peers.len() {
-                self.pull(p).await;
                 if !self.peers[p].watcher.is_empty() {
                     self.watcher(p).await;
                     busy = true;
                 }
-                if self.peers[p].editor.as_ref().is_some_and(|e| !e.to_daemon.is_empty()) {
-                    self.send_to_daemon(p).await;
-                    busy = true;
-                }
-                self.pull(p).await;
-                while self.peers[p].editor.as_ref().is_some_and(|e| !e.inbox.is_empty()) {
-                    self.apply_one_inbox(p);
-                    busy = true;
+                for e in 0..2 {
+                    self.pull(p, e).await;
+                    if self.peers[p].editors[e]
+                        .as_ref()
+                        .is_some_and(|c| !c.to_daemon.is_empty())
+                    {
+                        self.send_to_daemon(p, e).await;
+                        busy = true;
+                    }
+                    self.pull(p, e).await;
+                    while self.peers[p].editors[e]
+                        .as_ref()
+                        .is_some_and(|c| !c.inbox.is_empty())
+                    {
+                        self.apply_one_inbox(p, e);
+                        busy = true;
+                    }
+                    self.check_inside();
                 }
             }
             let before: Vec<_> = (0..self.peers.len())
@@ -539,26 +573,24 @@ impl World {
                     return Err(format!("peer {p}: file removed in crdt but on disk"));
                 }
             if let Some(Content::String(text)) = &cache {
-                if self.peers[p].editor.is_some() {
-                    // The daemon only keeps the disk of files no editor owns in step.
-                    if let Some(ed) = &self.peers[p].editor
+                for e in 0..2 {
+                    if let Some(ed) = &self.peers[p].editors[e]
                         && &ed.buffer != text
                     {
-                        let ot = self.peers[p].actor.editor_connections[&1].0.debug_ot(&self.path);
-                        return Err(format!("peer {p}: editor {:?} != crdt {text:?}; rev_daemon {} rev_editor {} ot {ot}", ed.buffer, ed.rev_daemon, ed.rev_editor));
+                        let ot = self.peers[p].actor.editor_connections[&(e + 1)]
+                            .0
+                            .debug_ot(&self.path);
+                        return Err(format!("peer {p} editor {e}: editor {:?} != crdt {text:?}; rev_daemon {} rev_editor {} ot {ot}", ed.buffer, ed.rev_daemon, ed.rev_editor));
                     }
+                }
+                // The daemon only keeps the disk of files no editor owns in step.
+                if self.peers[p].editors.iter().any(Option::is_some) {
                     continue;
                 }
                 let disk = std::fs::read_to_string(self.peers[p].dir.path().join("a"))
                     .map_err(|e| format!("peer {p}: disk: {e}"))?;
                 if &disk != text {
                     return Err(format!("peer {p}: disk {disk:?} != crdt {text:?}"));
-                }
-                if let Some(ed) = &self.peers[p].editor
-                    && &ed.buffer != text
-                {
-                    let ot = self.peers[p].actor.editor_connections[&1].0.debug_ot(&self.path);
-                    return Err(format!("peer {p}: editor {:?} != crdt {text:?}; rev_daemon {} rev_editor {} ot {ot}", ed.buffer, ed.rev_daemon, ed.rev_editor));
                 }
             }
         }
@@ -596,7 +628,7 @@ async fn run_seed(seed: u64, peers: usize, steps: usize, disk_writes: bool) -> R
                 let d = std::fs::read_to_string(w.peers[p].dir.path().join("a")).ok();
                 let heads = w.peers[p].actor.crdt_doc.get_heads();
                 let files = w.peers[p].actor.crdt_doc.files();
-                w.trace.push(format!("round {round} peer {p}: crdt {c:?} disk {d:?} editor {} heads {heads:?} files {files:?}", w.peers[p].editor.is_some()));
+                w.trace.push(format!("round {round} peer {p}: crdt {c:?} disk {d:?} editor {} heads {heads:?} files {files:?}", w.peers[p].editors.iter().any(Option::is_some)));
             }
         }
         return Err(format!("seed {seed}: sync did not settle\ntrace:\n{}", w.trace.join("\n")));
