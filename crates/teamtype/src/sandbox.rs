@@ -101,11 +101,14 @@ pub fn replace_file_keeping(
     };
     let (dir, name) = open_parent_beneath(absolute_base_dir, &path)?;
     if let Ok(stat) = rustix::fs::statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
-        // `st_mode` is `u16` on macOS.
-        #[cfg_attr(not(target_vendor = "apple"), expect(clippy::unnecessary_cast))]
+        // `st_mode` is `u16` on macOS and `u32` elsewhere.
+        #[cfg(target_vendor = "apple")]
+        let mode = u32::from(stat.st_mode);
+        #[cfg(not(target_vendor = "apple"))]
+        let mode = stat.st_mode;
         staged
             .as_file()
-            .set_permissions(fs::Permissions::from_mode(stat.st_mode as u32 & 0o7777))?;
+            .set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
     }
     #[cfg(any(
         target_os = "linux",
