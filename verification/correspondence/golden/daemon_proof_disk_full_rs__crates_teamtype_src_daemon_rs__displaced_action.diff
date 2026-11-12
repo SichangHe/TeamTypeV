@@ -1,0 +1,11 @@
+--- repo
++++ proof
+     record_equals_displaced: bool,
+     displaced_is_empty: bool,
+-) -> DisplacedAction {
++) -> (r: DisplacedAction)
++    ensures
++        (r == DisplacedAction::Merge) == (!record_equals_displaced && (has_record || !displaced_is_empty)),
++{
+     if !record_equals_displaced && (has_record || !displaced_is_empty) {
+         DisplacedAction::Merge

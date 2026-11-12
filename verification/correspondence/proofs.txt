@@ -8,3 +8,4 @@
 ../git_persist_proof/crash/model.rs
 ../daemon_proof/panic_wired.rs
 ../daemon_proof/tp1_id.rs
+../daemon_proof/disk_full.rs

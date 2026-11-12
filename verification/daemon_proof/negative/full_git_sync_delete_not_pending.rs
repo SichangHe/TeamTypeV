@@ -240,5 +240,96 @@ pub proof fn example_failed_removal(t: int, u: int)
     }),
 {}
 
+
+// ---- Decisions extracted from daemon.rs, checked against the model's transitions. ----
+// corr: crates/teamtype/src/daemon.rs :: enum DisplacedAction
+/// What `ensure_file_has_bytes` does with the bytes its write displaced.
+#[derive(PartialEq, Eq, Debug)]
+enum DisplacedAction {
+    /// The bytes are what the daemon last saw (or an empty file nobody has seen): nothing to keep.
+    Ignore,
+    /// Outside bytes: merge them into the shared text.
+    Merge,
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: displaced_action
+/// Pure decision, mirrored by `w3` in the disk-coherence proof. A file without a record that
+/// holds bytes was created outside before its watcher event; an empty one may be the placeholder
+/// that opening a new file creates, and merging it would replace the shared text.
+fn displaced_action(
+    has_record: bool,
+    record_equals_displaced: bool,
+    displaced_is_empty: bool,
+) -> (r: DisplacedAction)
+    ensures
+        (r == DisplacedAction::Merge) == (!record_equals_displaced && (has_record || !displaced_is_empty)),
+{
+    if !record_equals_displaced && (has_record || !displaced_is_empty) {
+        DisplacedAction::Merge
+    } else {
+        DisplacedAction::Ignore
+    }
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: enum RemovedAction
+/// How `remove_disk_file` treats the bytes it removed.
+#[derive(PartialEq, Eq, Debug)]
+enum RemovedAction {
+    /// They are what the daemon last saw, or there is no record: the removal stands.
+    Delete,
+    /// They differ from the record: an outside write won the race; share it and write it back.
+    MergeBack,
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: removed_action
+/// Pure decision, mirrored by `remove_or_merge` in the disk-coherence proof.
+fn removed_action(has_record: bool, record_equals_removed: bool) -> (r: RemovedAction)
+    ensures
+        (r == RemovedAction::MergeBack) == (has_record && !record_equals_removed),
+{
+    if has_record && !record_equals_removed {
+        RemovedAction::MergeBack
+    } else {
+        RemovedAction::Delete
+    }
+}
+// corr-end
+
+// the flags `ensure_file_has_bytes` passes to `displaced_action`:
+// (has record, record equals displaced bytes, displaced bytes empty)
+pub open spec fn displaced_flags(s: Fl, x: int) -> (bool, bool, bool) {
+    (s.dc is Some, s.dc == Some(x), x == empty_t())
+}
+
+// The decision `displaced_action` takes is the model's: W3 merges the displaced bytes `x` (from
+// the record's base, or from the empty base without a record) exactly when `displaced_action`
+// says Merge, and otherwise leaves the shared text alone.
+pub proof fn lemma_w3_matches_displaced_action(s: Fl, x: int)
+    requires s.d == Some(x), s.pc is W3,
+    ensures
+        ({
+            let f = displaced_flags(s, x);
+            let merge_decision = !f.1 && (f.0 || !f.2);
+            &&& merge_decision == ((s.dc is Some && s.dc != Some(x)) || (s.dc is None && x != empty_t()))
+            &&& !merge_decision ==> w3(s).c == s.c
+            &&& merge_decision ==> w3(s).dc == Some(s.lc) && w3(s).d == Some(s.lc)
+        }),
+{}
+
+// `remove_or_merge` (a peer deleted the file, the disk holds `x`) merges the disk bytes back
+// exactly when they differ from the record. The decision `removed_action` covers the case where a
+// record exists and differs (the bytes that were actually removed); without a record the
+// pre-check `unhandled_outside_write` merges (the restart path decides with `pending_recovery`).
+pub proof fn lemma_remove_matches_removed_action(s: Fl, x: int)
+    requires s.d == Some(x),
+    ensures
+        (s.dc is Some && s.dc != Some(x)) ==> remove_or_merge(s).c == Some(x),
+        (s.dc == Some(x)) ==> remove_or_merge(s).c is None && remove_or_merge(s).d is None,
+        s.dc is None ==> remove_or_merge(s).c == Some(x),
+{}
+
 } // verus!
 fn main() {}

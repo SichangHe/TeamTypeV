@@ -1350,12 +1350,18 @@ impl DocumentActor {
         )
         .with_context(|| format!("Failed to write to file {abs_path}"))?;
         if let Some(displaced) = displaced {
-            let outside = self.disk_content.get(file_path) != Some(&displaced);
+            let record = self.disk_content.get(file_path);
+            let outside = record != Some(&displaced);
+            let action = displaced_action(
+                record.is_some(),
+                record == Some(&displaced),
+                displaced.is_empty(),
+            );
             // Also without a record: a file created outside and not yet seen by the watcher
             // would otherwise be lost, since its watcher event only finds our bytes. An empty
             // file without a record holds nothing to lose (it may be the placeholder that
             // opening a new file creates), and merging it would replace the shared text.
-            if outside && (self.disk_content.contains_key(file_path) || !displaced.is_empty()) {
+            if action != DisplacedAction::Ignore {
                 // Without a record the file did not exist when the daemon last looked, so the
                 // outside file and the shared text were both created from nothing: merge them
                 // from the empty base instead of letting the outside text replace the shared one.
@@ -1650,7 +1656,10 @@ impl DocumentActor {
         let last_seen = self.disk_content.remove(file_path);
         let absolute = self.absolute_path_for_file_path(file_path);
         match sandbox::remove_file_returning(&self.app_config.base_dir, &absolute) {
-            Ok(removed) if last_seen.as_ref().is_some_and(|seen| *seen != removed) => {
+            Ok(removed)
+                if removed_action(last_seen.is_some(), last_seen.as_ref() == Some(&removed))
+                    == RemovedAction::MergeBack =>
+            {
                 // An outside write landed between the daemon's last look and the removal: the
                 // edit wins, is shared again and the file is written back.
                 self.merge_disk_content(file_path, removed);
@@ -2220,6 +2229,48 @@ fn pending_recovery(
         PendingRecovery::KeepOutsideEdit
     } else {
         PendingRecovery::Write
+    }
+}
+
+/// What `ensure_file_has_bytes` does with the bytes its write displaced.
+#[derive(PartialEq, Eq, Debug)]
+enum DisplacedAction {
+    /// The bytes are what the daemon last saw (or an empty file nobody has seen): nothing to keep.
+    Ignore,
+    /// Outside bytes: merge them into the shared text.
+    Merge,
+}
+
+/// Pure decision, mirrored by `w3` in the disk-coherence proof. A file without a record that
+/// holds bytes was created outside before its watcher event; an empty one may be the placeholder
+/// that opening a new file creates, and merging it would replace the shared text.
+fn displaced_action(
+    has_record: bool,
+    record_equals_displaced: bool,
+    displaced_is_empty: bool,
+) -> DisplacedAction {
+    if !record_equals_displaced && (has_record || !displaced_is_empty) {
+        DisplacedAction::Merge
+    } else {
+        DisplacedAction::Ignore
+    }
+}
+
+/// How `remove_disk_file` treats the bytes it removed.
+#[derive(PartialEq, Eq, Debug)]
+enum RemovedAction {
+    /// They are what the daemon last saw, or there is no record: the removal stands.
+    Delete,
+    /// They differ from the record: an outside write won the race; share it and write it back.
+    MergeBack,
+}
+
+/// Pure decision, mirrored by `remove_or_merge` in the disk-coherence proof.
+fn removed_action(has_record: bool, record_equals_removed: bool) -> RemovedAction {
+    if has_record && !record_equals_removed {
+        RemovedAction::MergeBack
+    } else {
+        RemovedAction::Delete
     }
 }
 

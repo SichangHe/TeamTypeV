@@ -1,0 +1,9 @@
+--- repo
++++ proof
+-fn removed_action(has_record: bool, record_equals_removed: bool) -> RemovedAction {
++fn removed_action(has_record: bool, record_equals_removed: bool) -> (r: RemovedAction)
++    ensures
++        (r == RemovedAction::MergeBack) == (has_record && !record_equals_removed),
++{
+     if has_record && !record_equals_removed {
+         RemovedAction::MergeBack
