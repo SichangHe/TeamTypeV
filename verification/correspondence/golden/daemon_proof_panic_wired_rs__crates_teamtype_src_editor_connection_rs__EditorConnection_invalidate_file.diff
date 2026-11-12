@@ -1,0 +1,12 @@
+--- repo
++++ proof
+-pub fn invalidate_file(&mut self, file_path: &RelativePath) {
++pub fn invalidate_file(&mut self, file_path: &RelativePath)
++    requires old(self).inv(),
++    ensures
++        final(self).inv(),
++        final(self).ot_servers@ == old(self).ot_servers@.remove(file_path@),
++        final(self).app_config == old(self).app_config,
++{
+     self.ot_servers.remove(file_path);
+ }

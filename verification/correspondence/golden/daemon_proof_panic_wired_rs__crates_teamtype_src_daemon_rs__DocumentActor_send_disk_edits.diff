@@ -1,0 +1,21 @@
+--- repo
++++ proof
+-async fn send_disk_edits(&mut self) {
+-    while !self.disk_edits.is_empty() {
+-        for message in std::mem::take(&mut self.disk_edits) {
+-            self.broadcast_to_editors(None, &message).await;
++#[verifier::exec_allows_no_decreases_clause]
++pub fn send_disk_edits(&mut self)
++    ensures final(self).disk_edits@.len() == 0,
++{
++    while self.disk_edits.len() != 0 {
++        let messages = take_edits(&mut self.disk_edits);
++        let mut i: usize = 0;
++        while i < messages.len()
++            invariant i <= messages@.len(),
++            decreases messages@.len() - i,
++        {
++            self.broadcast_to_editors(None, &messages[i]);
++            i += 1;
+         }
+     }

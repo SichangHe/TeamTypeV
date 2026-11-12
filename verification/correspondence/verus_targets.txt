@@ -7,3 +7,16 @@
 ../round2_deltas/refinement.rs --num-threads 4
 ../convert_proof/apply_proof.rs
 ../liveness_proof/teamtype_liveness.rs
+../git_persist_proof/crash/model.rs
+../daemon_proof/daemon_proof.rs
+../daemon_proof/disk_proof.rs
+../daemon_proof/disk_full.rs
+../daemon_proof/panic_proof.rs
+../daemon_proof/tp1_id.rs
+../daemon_proof/diff_proof.rs --verify-root
+../daemon_proof/panic_wired.rs
+../editor_proof/editor_protocol.rs
+../editor_proof/session_fresh.rs
+../liveness_proof/teamtype_peers.rs
+../replace_proof/replace_proof.rs
+../path_proof/path_proof.rs

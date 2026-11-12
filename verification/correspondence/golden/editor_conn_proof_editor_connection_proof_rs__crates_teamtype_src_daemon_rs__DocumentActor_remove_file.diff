@@ -1,0 +1,22 @@
+--- repo
++++ proof
+-fn remove_file(&mut self, file_path: &RelativePath) {
+-    if self.owns(file_path) {
+-        self.crdt_doc.remove_file(file_path);
+-        self.disk_content.remove(file_path);
++pub fn remove_file(&mut self, p: &RelativePath)
++    ensures
++        (forall|e: int| old(self).conns@.contains_key(e) ==> !(#[trigger] old(self).conns@[e].contains_key(p@)))
++            ==> final(self).crdt_doc@ == old(self).crdt_doc@.remove(p@),
++        (exists|e: int| old(self).conns@.contains_key(e) && #[trigger] old(self).conns@[e].contains_key(p@))
++            && old(self).crdt_doc@.contains_key(p@) ==> final(self).crdt_doc@.contains_key(p@),
++        final(self).conns@ == old(self).conns@,
++{
++    let daemon_owns = !self.owns_any(p);
++    if daemon_owns {
++        self.crdt_doc.remove_file(p);
+     } else {
+-        self.merge_disk_content(file_path, vec![]);
++        self.merge_empty(p);
+     }
+ }

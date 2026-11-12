@@ -1,0 +1,96 @@
+--- repo
++++ proof
+-pub fn apply(&self, s: &str) -> Result<String, OTError> {
+-    if num_chars(s.as_bytes()) != self.base_len {
++#[verifier::spinoff_prover] #[verifier::rlimit(200)]
++pub fn apply(&self, s: &str) -> (r: Result<String, OTError>)
++    requires self.wf(),
++    ensures
++        s@.len() != self.base_len ==> r is Err,
++        s@.len() == self.base_len ==> r is Ok && r->Ok_0@ == sem(s@, self.v()),
++{
++    if num_chars(s) != self.base_len {
+         return Err(OTError);
+     }
+     let mut new_s = String::new();
+-    let chars = &mut s.chars();
+-    for op in &self.ops {
+-        match op {
++    let chars = chars_of(s);
++    let mut pos: usize = 0;
++    let mut idx: usize = 0;
++    proof { assert(vops(self.ops@.take(0)) =~= Seq::<SOp>::empty()); }
++    while idx < self.ops.len()
++        invariant
++            self.wf(), chars@ == s@, s@.len() == self.base_len,
++            idx <= self.ops.len(),
++            pos == cons(vops(self.ops@.take(idx as int))),
++            pos <= chars@.len(),
++            new_s@ == sem(chars@.take(pos as int), vops(self.ops@.take(idx as int))),
++        decreases self.ops.len() - idx,
++    {
++        let ghost p = vops(self.ops@.take(idx as int));
++        let ghost o = vop(self.ops@[idx as int]);
++        let ghost pos0 = pos;
++        let ghost ns0 = new_s@;
++        proof {
++            assert(vops(self.ops@.take(idx + 1)) =~= p.push(o));
++            assert(self.v() =~= vops(self.ops@.take(idx + 1)) + vops(self.ops@.skip(idx + 1)));
++            lemma_add(vops(self.ops@.take(idx + 1)), vops(self.ops@.skip(idx + 1)));
++            assert(p.push(o).drop_last() =~= p);
++        }
++        match &self.ops[idx] {
+             Operation::Retain(retain) => {
+-                for c in chars.take(*retain as usize) {
+-                    new_s.push(c);
++                let mut j: u64 = 0;
++                while j < *retain && pos < chars.len()
++                    invariant
++                        chars@ == s@, j <= *retain, pos == pos0 + j, pos0 + *retain <= chars@.len(),
++                        new_s@ == ns0 + chars@.subrange(pos0 as int, pos as int),
++                    decreases *retain - j,
++                {
++                    push_char(&mut new_s, chars[pos]);
++                    pos += 1;
++                    j += 1;
++                    proof { assert(chars@.subrange(pos0 as int, pos as int) =~= chars@.subrange(pos0 as int, pos - 1).push(chars@[pos - 1])); }
++                }
++                proof {
++                    let t = chars@.take(pos as int);
++                    assert(t.take(pos0 as int) =~= chars@.take(pos0 as int));
++                    assert(t.skip(pos0 as int) =~= chars@.subrange(pos0 as int, pos as int));
+                 }
+             }
+             Operation::Delete(delete) => {
+-                for _ in 0..*delete {
+-                    chars.next();
++                let mut j: u64 = 0;
++                while j < *delete
++                    invariant j <= *delete, pos == pos0 + j, pos0 + *delete <= chars@.len(),
++                    decreases *delete - j,
++                {
++                    if pos < chars.len() { pos += 1; }
++                    j += 1;
++                }
++                proof {
++                    let t = chars@.take(pos as int);
++                    assert(t.take(pos0 as int) =~= chars@.take(pos0 as int));
++                    assert(ns0 + seq![] =~= ns0);
+                 }
+             }
+             Operation::Insert(insert) => {
+-                new_s += insert;
++                new_s = concat(&new_s, insert.as_str()); // src: `new_s += insert;`
++                proof {
++                    let t = chars@.take(pos as int);
++                    assert(t.take(pos0 as int) =~= t);
++                }
+             }
+         }
++        idx += 1;
++    }
++    proof {
++        assert(self.ops@.take(idx as int) =~= self.ops@);
++        assert(chars@.take(pos as int) =~= s@);
+     }
+     Ok(new_s)

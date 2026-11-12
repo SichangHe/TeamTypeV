@@ -5,3 +5,6 @@
 ../round2_tp1/tp1.rs
 ../round2_deltas/refinement.rs
 ../convert_proof/apply_proof.rs
+../git_persist_proof/crash/model.rs
+../daemon_proof/panic_wired.rs
+../daemon_proof/tp1_id.rs

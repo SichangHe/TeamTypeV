@@ -1,0 +1,103 @@
+--- repo
++++ proof
+-async fn process_component_message(
+-    &mut self,
+-    from_editor: Option<EditorId>,
+-    message: &ComponentMessage,
+-) -> Vec<ComponentMessage> {
+-    let mut to_editor = vec![];
+-    match message {
+-        ComponentMessage::Open { file_path, content } => {
+-            if self.files_open_in_editors.insert(file_path.clone()) {
+-                self.save_files_open_in_editors();
+-            }
+-            if let Some(document::Content::String(crdt_content)) =
+-                self.current_file_content(file_path)
+-            {
+-                let chunks = crate::types::checked_diff(content, crdt_content);
+-                if let [] | [dissimilar::Chunk::Equal(_)] = chunks.as_slice() {
+-                } else {
+-                    let text_delta: TextDelta = chunks.into();
+-                    let update_message = ComponentMessage::Edit {
+-                        file_path: file_path.clone(),
+-                        delta: text_delta,
+-                    };
+-                    to_editor.push(update_message);
++pub fn pcm_edit(&mut self, p: &RelativePath, d: &TextDelta)
++    requires
++        old(self).crdt_doc@.contains_key(p@), old(self).crdt_doc@[p@] is Text,
++        fits(old(self).crdt_doc@[p@]->Text_0, delta_op(*d)),
++    ensures
++        final(self).crdt_doc@ == old(self).crdt_doc@.insert(p@, DocContent::Text(ap(old(self).crdt_doc@[p@]->Text_0, delta_op(*d)))),
++        final(self).conns@ == old(self).conns@,
++{
++    let r = self.crdt_doc.apply_delta_to_doc(d, p);
++    match r { Ok(()) => {}, Err(_) => { assert(false); } }
++}
++pub fn pcm_open(&mut self, p: &RelativePath, content: &String) -> (to_editor: Vec<ComponentMessage>)
++    ensures
++        final(self).conns@ == old(self).conns@,
++        ({
++            let was_text = old(self).crdt_doc@.contains_key(p@) && old(self).crdt_doc@[p@] is Text;
++            if was_text {
++                let t = old(self).crdt_doc@[p@]->Text_0;
++                &&& final(self).crdt_doc@ == old(self).crdt_doc@
++                &&& (to_editor@.len() == 0 <==> content@ == t)
++                &&& to_editor@.len() <= 1
++                &&& to_editor@.len() == 1 ==> {
++                    &&& to_editor@[0] is Edit
++                    &&& to_editor@[0]->Edit_file_path@ == p@
++                    &&& fits(content@, delta_op(to_editor@[0]->Edit_delta))
++                    &&& ap(content@, delta_op(to_editor@[0]->Edit_delta)) == t
+                 }
+             } else {
+-                self.crdt_doc
+-                    .set_file(document::Content::String(content.clone()), file_path);
+-                let _ = self.doc_changed_ping_tx.send(());
+-                self.write_file(file_path);
++                &&& final(self).crdt_doc@ == old(self).crdt_doc@.insert(p@, DocContent::Text(content@))
++                &&& to_editor@.len() == 0
++            }
++        }),
++{
++    let mut to_editor: Vec<ComponentMessage> = Vec::new();
++    match self.crdt_doc.current_text(p) {
++        Some(crdt_content) => {
++            match diff_delta(content, &crdt_content) {
++                None => {}
++                Some(text_delta) => {
++                    to_editor.push(ComponentMessage::Edit { file_path: rp_clone(p), delta: text_delta });
++                }
+             }
+         }
+-        ComponentMessage::Close { .. } => self.release_files(),
+-        ComponentMessage::Edit { file_path, delta } => {
+-            self.crdt_doc.apply_delta_to_doc(delta, file_path).expect("Failed to apply delta to document while handling edit ComponentMessage. Probably the delta doesn't fit the document content.");
+-            let _ = self.doc_changed_ping_tx.send(());
+-            self.write_file(file_path);
+-        }
+-        ComponentMessage::Cursor {
+-            cursor_id,
+-            cursor_state,
+-        } => {
+-            let next_sequence_number =
+-                if let Some(old_cursor_state) = self.ephemeral_states.get_mut(cursor_id) {
+-                    old_cursor_state.sequence_number + 1
+-                } else {
+-                    0
+-                };
+-            let new_cursor_state = EphemeralMessage {
+-                cursor_id: cursor_id.clone(),
+-                sequence_number: next_sequence_number,
+-                cursor_state: cursor_state.clone(),
+-            };
+-            self.ephemeral_states
+-                .insert(cursor_id.clone(), new_cursor_state.clone());
+-            let _ = self.ephemeral_message_tx.send(new_cursor_state);
++        None => {
++            self.crdt_doc.set_file_text(clone_str(content), p);
+         }
+     }
+-    self.broadcast_to_editors(from_editor, message).await;
+     to_editor
+ }

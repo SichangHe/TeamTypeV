@@ -1,0 +1,14 @@
+--- repo
++++ proof
+     disk_matches_document: bool,
+     disk_matches_base: bool,
+-) -> PendingRecovery {
++) -> (r: PendingRecovery)
++    ensures
++        (r == PendingRecovery::Finished) == (on_disk && in_document && disk_matches_document),
++        (r == PendingRecovery::MergeThenWrite) == (on_disk && in_document && !disk_matches_document),
++        (r == PendingRecovery::KeepOutsideEdit) == (on_disk && !in_document && !disk_matches_base),
++        (r == PendingRecovery::Write) == (!on_disk || (!in_document && disk_matches_base)),
++{
+     if on_disk && in_document && disk_matches_document {
+         PendingRecovery::Finished

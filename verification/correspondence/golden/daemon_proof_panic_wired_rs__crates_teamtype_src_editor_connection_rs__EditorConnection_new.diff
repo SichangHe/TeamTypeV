@@ -1,0 +1,15 @@
+--- repo
++++ proof
+-pub fn new(id: String, app_config: AppConfig) -> Self {
+-    Self {
+-        id,
+-        username: app_config.username.clone(),
+-        app_config,
+-        ot_servers: HashMap::new(),
+-    }
++pub fn new(id: String, app_config: AppConfig) -> (r: Self)
++    requires app_config.base_abs(),
++    ensures r.inv(), r.ot_servers@ == Map::<int, Srv>::empty(), r.app_config == app_config,
++{
++    Self { id, username: clone_username(&app_config), app_config, ot_servers: ServerMap::new() }
+ }
