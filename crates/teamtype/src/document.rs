@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use anyhow::bail;
 use anyhow::{Context, Result};
 use automerge::{
-    AutoCommit, ChangeHash, ObjId, ObjType, Patch, PatchAction, PatchLog, Prop, ReadDoc,
-    ScalarValue, Value,
+    AutoCommit, ChangeHash, ConcreteTextValue, ObjId, ObjType, Patch, PatchAction, PatchLog, Prop,
+    ReadDoc, ScalarValue, TextEncoding, Value,
     sync::{Message as AutomergeSyncMessage, State as AutomergeSyncState, SyncDoc},
     transaction::Transactable,
 };
@@ -176,8 +176,23 @@ impl Document {
                         self.files.remove(&path);
                     }
                 }
-                PatchEffect::FileBytes(path, bytes) => {
-                    self.files.insert(path, Content::Bytes(bytes));
+                PatchEffect::FileBytes(path, patch_bytes) => {
+                    // Concurrent puts at one path are reported one by one, the loser's too;
+                    // the visible value is what the document holds now.
+                    let visible = self
+                        .top_level_map_obj("files")
+                        .ok()
+                        .and_then(|files| match self.doc.get(files, &path).ok()? {
+                            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                                ScalarValue::Bytes(bytes) => Some(bytes.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                    match visible {
+                        Some(bytes) => self.files.insert(path, Content::Bytes(bytes)),
+                        None => self.files.insert(path, Content::Bytes(patch_bytes)),
+                    };
                 }
                 PatchEffect::NoEffect => {
                     // Nothing to do.
@@ -188,6 +203,17 @@ impl Document {
         Ok(patches)
     }
 
+    fn visible_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        let files = self.top_level_map_obj("files").ok()?;
+        match self.doc.get(files, key).ok()? {
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                ScalarValue::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn visible_text_objects(&self) -> HashMap<RelativePath, ObjId> {
         self.files
             .keys()
@@ -196,34 +222,99 @@ impl Document {
     }
 
     /// When peers concurrently create the same path, Automerge may switch the visible text object
-    /// but report only `Conflict` followed by the new object's text as edits of the old one.
-    /// A receiver would insert that text into the old text. Report the switch as what it is: a
-    /// new text object at that path, like `PutMap`.
+    /// but report only `Conflict`, followed by the new object's text as edits of the old one, or
+    /// nothing at all when the object's text was already in the document (it lost an earlier
+    /// conflict, or the winner was deleted). A receiver would insert that text into the old
+    /// text or never learn it. Report the switch as what it is: a new text object at that path,
+    /// like `PutMap`, followed by exactly that object's current text.
     fn replaced_text_objects_as_puts(
         &self,
         patches: Vec<Patch>,
         before: &HashMap<RelativePath, ObjId>,
     ) -> Vec<Patch> {
-        patches
-            .into_iter()
-            .map(|mut patch| {
-                if let PatchAction::Conflict {
+        let mut out = vec![];
+        let mut switched: Vec<(String, ObjId)> = vec![];
+        for mut patch in patches {
+            match &patch.action {
+                PatchAction::Conflict {
                     prop: Prop::Map(key),
-                } = &patch.action
+                } if patch.path.len() == 1
                     && let Ok(now) = self.text_obj(&RelativePath::new(key))
                     && before
                         .get(&RelativePath::new(key))
-                        .is_some_and(|was| *was != now)
+                        .is_some_and(|was| *was != now) =>
                 {
+                    switched.push((key.clone(), now.clone()));
                     patch.action = PatchAction::PutMap {
                         key: key.clone(),
                         value: (Value::Object(ObjType::Text), now),
                         conflict: true,
                     };
                 }
-                patch
-            })
-            .collect()
+                PatchAction::Conflict {
+                    prop: Prop::Map(key),
+                } if patch.path.len() == 1
+                    && let Some(bytes) = self.visible_bytes(key) =>
+                {
+                    // The visible bytes changed hands without a put being reported.
+                    patch.action = PatchAction::PutMap {
+                        key: key.clone(),
+                        value: (
+                            Value::Scalar(Cow::Owned(ScalarValue::Bytes(bytes))),
+                            ObjId::Root,
+                        ),
+                        conflict: true,
+                    };
+                }
+                PatchAction::PutMap {
+                    key,
+                    value: (Value::Object(ObjType::Text), now),
+                    ..
+                } if patch.path.len() == 1 => switched.push((key.clone(), now.clone())),
+                _ => {}
+            }
+            out.push(patch);
+        }
+        for (key, now) in switched {
+            let is_edit_of_key = |patch: &Patch| {
+                patch.path.len() == 2 && matches!(&patch.path[1].1, Prop::Map(k) if *k == key)
+            };
+            let Some(put_at) = out.iter().position(|patch| {
+                matches!(&patch.action, PatchAction::PutMap { key: k, .. } if *k == key)
+                    && patch.path.len() == 1
+            }) else {
+                continue;
+            };
+            let text = self.doc.text(&now).unwrap_or_default();
+            let mut content = if text.is_empty() {
+                None
+            } else {
+                let put = &out[put_at];
+                let mut path = put.path.clone();
+                path.push((put.obj.clone(), Prop::Map(key.clone())));
+                Some(Patch {
+                    obj: now.clone(),
+                    path,
+                    action: PatchAction::SpliceText {
+                        index: 0,
+                        value: ConcreteTextValue::new(&text, TextEncoding::UnicodeCodePoint),
+                        marks: None,
+                    },
+                })
+            };
+            let mut rebuilt = vec![];
+            for (i, patch) in out.into_iter().enumerate() {
+                if is_edit_of_key(&patch) {
+                    continue;
+                }
+                rebuilt.push(patch);
+                if i == put_at {
+                    rebuilt.extend(content.take());
+                }
+            }
+            out = rebuilt;
+        }
+        out
     }
 
     #[must_use]
@@ -423,6 +514,9 @@ impl Document {
         if let Ok(file_map) = self.top_level_map_obj("files") {
             for file_path in self.doc.keys(&file_map) {
                 match self.doc.get(&file_map, &file_path) {
+                    _ if RelativePath::try_new(&file_path).is_err() => {
+                        warn!("Ignoring unsafe file name {file_path:?} in the document");
+                    }
                     Ok(Some((Value::Object(ObjType::Text), text_obj))) => {
                         let string = self
                             .doc
@@ -703,6 +797,33 @@ mod tests {
         }
     }
 
+    /// Counters, their increments, and edits inside a nested map at `files/<name>` must not crash.
+    #[test]
+    fn counter_and_nested_map_edits_from_peers_do_not_crash() {
+        let (mut a, mut b) = (Document::default(), Document::default());
+        let keep = RelativePath::new("keep");
+        a.set_file(Content::String("t".into()), &keep);
+        sync(&mut a, &mut b);
+        let files = a.top_level_map_obj("files").unwrap();
+        a.doc.put(&files, "ctr", ScalarValue::counter(1)).unwrap();
+        let map = a.doc.put_object(&files, "map", ObjType::Map).unwrap();
+        let inner = a.doc.put_object(&map, "x", ObjType::Text).unwrap();
+        a.doc.splice_text(&inner, 0, 0, "hi").unwrap();
+        a.doc.put(&map, "y", 3_i64).unwrap();
+        sync(&mut a, &mut b);
+        a.doc.increment(&files, "ctr", 2).unwrap();
+        a.doc.put(&map, "y", 4_i64).unwrap();
+        a.doc.splice_text(&inner, 2, 0, "!").unwrap();
+        let patches = sync(&mut a, &mut b);
+        let _ = PatchEffect::from_crdt_patches(&patches);
+        b.assert_file_content(&keep, "t");
+        for name in ["ctr", "map"] {
+            let path = RelativePath::new(name);
+            assert_eq!(b.current_file_content(&path), None, "{name}");
+            assert_cache_matches_crdt(&mut b, &path);
+        }
+    }
+
     /// Loading a document that holds an unsupported value must not crash either.
     #[test]
     fn loading_a_document_with_unsupported_values_skips_them() {
@@ -892,6 +1013,133 @@ mod tests {
         }
     }
 
+    /// Like `fuzz_cache_stays_in_step_with_crdt`, but also replays the effects of every received
+    /// sync message into an editor the way `daemon.rs` does (`FileRemoval` clears the text the
+    /// editor held, `FileChange` goes through `OTServer::apply_crdt_change`, `FileBytes` closes
+    /// the editor), over text and bytes values, replacements, deletions, empty and non-ASCII
+    /// text, with random delivery batching on three peers. After each receive, the cache equals
+    /// a reload and an open editor holds exactly the CRDT text; at the end all peers converge.
+    #[test]
+    fn fuzz_editor_replay_ends_with_crdt_text() {
+        use crate::ot::OTServer;
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+        let file = RelativePath::new("file");
+        let texts = ["", "x", "xx", "héllo✓", "😀a", "same"];
+        for seed in 0..1500u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut docs: Vec<Document> =
+                std::iter::repeat_with(Document::default).take(3).collect();
+            let mut editors: Vec<Option<OTServer>> = vec![None, None, None];
+            let mut states = vec![vec![AutomergeSyncState::new(); 3]; 3];
+            let mut wire: Vec<Vec<Vec<AutomergeSyncMessage>>> = vec![vec![vec![]; 3]; 3];
+            let mut log = vec![];
+            for _ in 0..40 {
+                let peer = rng.random_range(0..3);
+                let other = rng.random_range(0..3);
+                let txt = texts[rng.random_range(0..texts.len())];
+                match rng.random_range(0..10) {
+                    0 => {
+                        log.push(format!("{peer}: update_text {txt:?}"));
+                        editors[peer] = None;
+                        let _ = docs[peer].update_text(txt, &file);
+                    }
+                    1 => {
+                        log.push(format!("{peer}: remove"));
+                        editors[peer] = None;
+                        docs[peer].remove_file(&file);
+                    }
+                    2 | 3 => {
+                        log.push(format!("{peer}: set_file {txt:?}"));
+                        editors[peer] = None;
+                        docs[peer].set_file(Content::String(txt.into()), &file);
+                    }
+                    4 => {
+                        log.push(format!("{peer}: set_file bytes {}", txt.len()));
+                        editors[peer] = None;
+                        docs[peer].set_file(Content::Bytes(txt.as_bytes().to_vec()), &file);
+                    }
+                    5 => {
+                        if let Some(Content::String(text)) = docs[peer].current_file_content(&file)
+                        {
+                            log.push(format!("{peer}: open editor on {text:?}"));
+                            editors[peer] = Some(OTServer::new(text.clone()));
+                        }
+                    }
+                    6 if peer != other => {
+                        if let Some(msg) =
+                            docs[peer].generate_sync_message(&mut states[peer][other])
+                        {
+                            wire[peer][other].push(msg);
+                        }
+                    }
+                    _ if peer != other && !wire[peer][other].is_empty() => {
+                        let msg = wire[peer][other].remove(0);
+                        log.push(format!("{other}: receive from {peer}"));
+                        let heads = docs[other].get_heads();
+                        let patches = docs[other]
+                            .receive_sync_message_log_patches(msg, &mut states[other][peer]);
+                        let mut deltas = vec![];
+                        for effect in PatchEffect::from_crdt_patches(&patches) {
+                            match effect {
+                                PatchEffect::FileChange(delta) if delta.file_path == file => {
+                                    deltas.push(delta.delta);
+                                }
+                                PatchEffect::FileRemoval(_) if editors[other].is_some() => {
+                                    deltas.clear();
+                                    let before = docs[other]
+                                        .file_content_at(&file, &heads)
+                                        .unwrap_or_default();
+                                    let mut delta = TextDelta::default();
+                                    delta.delete(before.chars().count());
+                                    deltas.push(delta);
+                                    if !docs[other].file_exists(&file) {
+                                        docs[other].update_text("", &file);
+                                    }
+                                }
+                                PatchEffect::FileBytes(..) => editors[other] = None,
+                                _ => {}
+                            }
+                        }
+                        if let Some(ot) = &mut editors[other] {
+                            for delta in &deltas {
+                                ot.apply_crdt_change(delta)
+                                    .unwrap_or_else(|e| panic!("seed {seed}: {e:#}: {log:#?}"));
+                            }
+                            assert_eq!(
+                                docs[other].current_file_content(&file),
+                                Some(&Content::String(ot.current_text().to_owned())),
+                                "seed {seed}: editor differs from CRDT: {log:#?}"
+                            );
+                        }
+                        let reloaded = Document::load(&docs[other].save());
+                        assert_eq!(
+                            docs[other].current_file_content(&file),
+                            reloaded.current_file_content(&file),
+                            "seed {seed}: cache differs from reload: {log:#?}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let mut all = Document::default();
+            for delta in &mut docs {
+                let _ = sync(delta, &mut all);
+            }
+            for delta in &mut docs {
+                let _ = sync(delta, &mut all);
+                let reloaded = Document::load(&delta.save());
+                assert_eq!(
+                    delta.current_file_content(&file),
+                    reloaded.current_file_content(&file)
+                );
+                assert_eq!(
+                    delta.current_file_content(&file),
+                    all.current_file_content(&file)
+                );
+            }
+        }
+    }
+
     /// Delivery order and batching must not matter: the same set of changes, applied as one
     /// batch, one by one in a random order (Automerge queues changes whose dependencies are
     /// missing), or in random-sized batches, gives the same heads and the same file content,
@@ -1043,6 +1291,82 @@ mod tests {
                         "seed {seed} peer {n} file {file}"
                     );
                     assert_cache_matches_crdt(doc, file);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_cache_stays_in_step_with_crdt_with_binary_files() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+        let file = RelativePath::new("file");
+        for seed in 0..2000u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut docs: Vec<Document> =
+                std::iter::repeat_with(Document::default).take(3).collect();
+            let mut states = vec![vec![AutomergeSyncState::new(); 3]; 3];
+            let mut wire: Vec<Vec<Vec<AutomergeSyncMessage>>> = vec![vec![vec![]; 3]; 3];
+            let mut log = vec![];
+            for _ in 0..25 {
+                let p = rng.random_range(0..3);
+                let q = rng.random_range(0..3);
+                match rng.random_range(0..9) {
+                    7 | 8 => {
+                        let b: Vec<u8> = vec![[0xff, 1u8][rng.random_range(0..2)]];
+                        log.push(format!("{p}: set_file bytes {b:?}"));
+                        docs[p].set_file(Content::Bytes(b), &file);
+                    }
+                    6 => {
+                        if let Some(Content::String(t)) = docs[p].current_file_content(&file) {
+                            let at = rng.random_range(0..=t.chars().count());
+                            let mut d = TextDelta::default();
+                            d.retain(at);
+                            d.insert("z");
+                            log.push(format!("{p}: insert z at {at}"));
+                            docs[p].apply_delta_to_doc(&d, &file).unwrap();
+                        }
+                    }
+                    0 => {
+                        let t = ["", "x", "xx", "y"][rng.random_range(0..4)];
+                        log.push(format!("{p}: update_text {t:?}"));
+                        let _ = docs[p].update_text(t, &file);
+                    }
+                    1 => {
+                        log.push(format!("{p}: remove"));
+                        docs[p].remove_file(&file);
+                    }
+                    2 => {
+                        let t = ["", "x", "xx", "y"][rng.random_range(0..4)];
+                        log.push(format!("{p}: set_file {t:?}"));
+                        docs[p].set_file(Content::String(t.into()), &file);
+                    }
+                    3 if p != q => {
+                        if let Some(m) = docs[p].generate_sync_message(&mut states[p][q]) {
+                            wire[p][q].push(m);
+                        }
+                    }
+                    _ if p != q && !wire[p][q].is_empty() => {
+                        let m = wire[p][q].remove(0);
+                        log.push(format!("{q}: receive from {p}"));
+                        let patches =
+                            docs[q].receive_sync_message_log_patches(m, &mut states[q][p]);
+                        if PatchEffect::from_crdt_patches(&patches)
+                            .iter()
+                            .any(|e| matches!(e, PatchEffect::FileRemoval(_)))
+                            && !docs[q].file_exists(&file)
+                            && rng.random_bool(0.5)
+                        {
+                            log.push(format!("{q}: bring back empty"));
+                            docs[q].update_text("", &file);
+                        }
+                        let reloaded = Document::load(&docs[q].save());
+                        assert_eq!(
+                            docs[q].current_file_content(&file),
+                            reloaded.current_file_content(&file),
+                            "seed {seed}: {log:#?}"
+                        );
+                    }
+                    _ => {}
                 }
             }
         }

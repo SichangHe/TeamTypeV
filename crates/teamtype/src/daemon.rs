@@ -86,6 +86,11 @@ fn base_marker(path: &RelativePath) -> RelativePath {
 fn merged_marker(token: &str) -> RelativePath {
     RelativePath::new(&format!("{MERGED_DIR}{token}"))
 }
+#[cfg(test)]
+thread_local! {
+    /// Test fault injection: pretend the process is killed after the save that precedes a swap.
+    static KILL_BEFORE_SWAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub const TEST_FILE_PATH: &str = "text";
@@ -195,6 +200,10 @@ pub struct DocumentActor {
     /// displaced files it covers are cleaned up.
     #[cfg(test)]
     kill_before_displaced_cleanup: Option<()>,
+
+    /// Test hook: `Some(n)` lets `n` more `persist` calls succeed, then they fail.
+    #[cfg(test)]
+    persist_successes_left: Option<usize>,
 }
 
 impl DocumentActor {
@@ -255,6 +264,8 @@ impl DocumentActor {
             displaced_unsaved: Vec::new(),
             #[cfg(test)]
             kill_before_displaced_cleanup: None,
+            #[cfg(test)]
+            persist_successes_left: None,
         };
         git_forward::remove_old_hook(&s.app_config.base_dir);
         for path in s.crdt_doc.files() {
@@ -285,7 +296,7 @@ impl DocumentActor {
                         .map(|bytes| {
                             String::from_utf8_lossy(&bytes)
                                 .lines()
-                                .map(RelativePath::new)
+                                .filter_map(|line| RelativePath::try_new(line).ok())
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -345,6 +356,9 @@ impl DocumentActor {
                 self.handle_watcher_event(&watcher_event);
             }
             DocMessage::RescanFiles => {
+                if !self.git_running {
+                    self.retry_removals();
+                }
                 self.read_current_content_from_dir(false);
                 if !self.git_running {
                     for path in std::mem::take(&mut self.deferred_writes) {
@@ -375,9 +389,10 @@ impl DocumentActor {
             }
             DocMessage::HistoryId { response_tx } => {
                 let id = match self.current_file_content(&RelativePath::new(HISTORY_ID)) {
-                    Some(document::Content::Bytes(bytes)) => {
-                        Some(String::from_utf8_lossy(&bytes[1..]).into_owned())
-                    }
+                    // A peer controls these bytes; an empty value is not an id.
+                    Some(document::Content::Bytes(bytes)) => bytes
+                        .get(1..)
+                        .map(|id| String::from_utf8_lossy(id).into_owned()),
                     _ => None,
                 };
                 let has_files = self
@@ -430,6 +445,11 @@ impl DocumentActor {
                                 info!("Removing file {file_path}.");
                                 if self.git_running {
                                     self.deferred_removals.insert(file_path);
+                                } else if let Some(bytes) = self.unhandled_outside_write(&file_path)
+                                {
+                                    // Changed on disk while a peer deleted it: the edit wins and is
+                                    // shared again (as on restart, `apply_pending_writes`).
+                                    self.merge_disk_content(&file_path, bytes);
                                 } else {
                                     self.remove_disk_file(&file_path);
                                 }
@@ -559,6 +579,13 @@ impl DocumentActor {
     /// restarts with a document at least as new as its files. With files newer than the document,
     /// the daemon shared their text again and a live trial showed duplicated lines for everyone.
     fn persist(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(left) = &mut self.persist_successes_left {
+            if *left == 0 {
+                anyhow::bail!("injected persist failure");
+            }
+            *left -= 1;
+        }
         let persistence_file = self.app_config.base_dir.join(".teamtypev/doc");
         let result = if self.save_fully {
             debug!("Persisting CRDT document fully.");
@@ -655,7 +682,7 @@ impl DocumentActor {
             .and_then(|bytes| postcard::from_bytes::<Vec<(String, Option<Vec<u8>>)>>(&bytes).ok())
             .unwrap_or_default()
             .into_iter()
-            .map(|(path, base)| (RelativePath::new(&path), base))
+            .filter_map(|(path, base)| Some((RelativePath::try_new(&path).ok()?, base)))
             .collect()
     }
 
@@ -687,37 +714,48 @@ impl DocumentActor {
             let absolute = self.absolute_path_for_file_path(&path);
             let on_disk = sandbox::read_file(&self.app_config.base_dir, &absolute).ok();
             let in_document = self.crdt_doc.file_exists(&path);
-            match (on_disk, in_document) {
-                (Some(bytes), true)
-                    if self
-                        .current_file_content(&path)
+            let matches_document = in_document
+                && on_disk.as_ref().is_some_and(|bytes| {
+                    self.current_file_content(&path)
                         .is_some_and(|content| match content {
                             document::Content::String(text) => text.as_bytes() == bytes.as_slice(),
-                            document::Content::Bytes(shared) => shared == &bytes,
-                        }) =>
-                {
+                            document::Content::Bytes(shared) => shared == bytes,
+                        })
+                });
+            let matches_base = on_disk.is_some() && base == on_disk;
+            match pending_recovery(
+                on_disk.is_some(),
+                in_document,
+                matches_document,
+                matches_base,
+            ) {
+                PendingRecovery::Finished => {
                     // The write finished; only clearing the record was interrupted. Merging
                     // would apply the document's own change to itself a second time.
-                    self.disk_content.insert(path.clone(), bytes);
+                    if let Some(bytes) = on_disk {
+                        self.disk_content.insert(path.clone(), bytes);
+                    }
                     self.unmark_pending(&path);
                     self.crdt_doc.remove_file(&base_marker(&path));
                     continue;
                 }
-                (Some(bytes), true) => {
+                PendingRecovery::MergeThenWrite => {
                     // A file that had no base was created by the peer; Git may have made one too.
                     // A saved merge base is newer than the record's: the document already has
                     // everything up to it.
                     let base = self.merged_base(&path).or(base);
-                    self.disk_content
-                        .insert(path.clone(), base.unwrap_or_default());
-                    self.merge_disk_content(&path, bytes);
+                    if let Some(bytes) = on_disk {
+                        self.disk_content
+                            .insert(path.clone(), base.unwrap_or_default());
+                        self.merge_disk_content(&path, bytes);
+                    }
                 }
-                (Some(bytes), false) if base.as_ref() != Some(&bytes) => {
+                PendingRecovery::KeepOutsideEdit => {
                     // Changed on disk while peers deleted it: the edit wins and is shared again.
                     self.unmark_pending(&path);
                     continue;
                 }
-                _ => {}
+                PendingRecovery::Write => {}
             }
             if in_document {
                 if let Err(error) = self.try_write_file(&path) {
@@ -786,7 +824,9 @@ impl DocumentActor {
             }
         };
         for line in String::from_utf8_lossy(&bytes).lines() {
-            let path = RelativePath::new(line);
+            let Ok(path) = RelativePath::try_new(line) else {
+                continue;
+            };
             let Some(content) = self.current_file_content(&path) else {
                 continue;
             };
@@ -1007,6 +1047,14 @@ impl DocumentActor {
                         self.file_created_or_changed(&relative_file_path);
                     } else {
                         self.file_removed(&relative_file_path);
+                        // With an editor open, the deletion is merged as an outside edit to
+                        // empty text; text that survives it (a concurrent peer's) belongs on disk.
+                        if matches!(
+                            self.current_file_content(&relative_file_path),
+                            Some(document::Content::String(text)) if !text.is_empty()
+                        ) {
+                            self.write_file(&relative_file_path);
+                        }
                     }
                 }
             }
@@ -1029,7 +1077,10 @@ impl DocumentActor {
     // registers a creation when the file is only changed. We check whether or not the CRDT
     // contains the file already in the `update_text` method anyway.
     fn file_created_or_changed(&mut self, relative_file_path: &RelativePath) {
-        if self.git_running {
+        if self.git_running
+            || (self.deferred_removals.contains(relative_file_path)
+                && !self.crdt_doc.file_exists(relative_file_path))
+        {
             return;
         }
         let file_path = self.absolute_path_for_file_path(relative_file_path);
@@ -1256,7 +1307,7 @@ impl DocumentActor {
         if git_forward::excluded(file_path) {
             return Ok(());
         }
-        let abs_path = self.absolute_path_for_file_path(file_path);
+        let abs_path = AbsolutePath::from_parts(&self.app_config.base_dir, file_path)?;
         if sandbox::exists(&self.app_config.base_dir, &abs_path)
             .context("Failed to check for file existence before writing")?
         {
@@ -1283,6 +1334,10 @@ impl DocumentActor {
         if self.persist {
             self.persist()?;
         }
+        #[cfg(test)]
+        if KILL_BEFORE_SWAP.with(std::cell::Cell::get) {
+            anyhow::bail!("injected kill before the swap");
+        }
         // The displaced file stays in `.teamtypev` until the document holds its bytes on disk,
         // so a kill right after the swap cannot lose an outside write made since our last read.
         let prefix = self.persist.then(|| displaced_prefix(file_path));
@@ -1296,7 +1351,11 @@ impl DocumentActor {
         .with_context(|| format!("Failed to write to file {abs_path}"))?;
         if let Some(displaced) = displaced {
             let outside = self.disk_content.get(file_path) != Some(&displaced);
-            if self.disk_content.contains_key(file_path) {
+            // Also without a record: a file created outside and not yet seen by the watcher
+            // would otherwise be lost, since its watcher event only finds our bytes. An empty
+            // file without a record holds nothing to lose (it may be the placeholder that
+            // opening a new file creates), and merging it would replace the shared text.
+            if outside && (self.disk_content.contains_key(file_path) || !displaced.is_empty()) {
                 self.merge_disk_content(file_path, displaced);
             }
             if outside && self.persist {
@@ -1317,8 +1376,10 @@ impl DocumentActor {
                     );
                 }
                 self.displaced_unsaved.extend(kept);
-                self.persist()?;
+                // The disk holds `bytes` now, whether or not saving works; a stale record would
+                // make the watcher event of this write revert the merged outside edit.
                 self.disk_content.insert(file_path.clone(), bytes.to_vec());
+                self.persist()?;
                 return Ok(());
             }
         }
@@ -1350,8 +1411,9 @@ impl DocumentActor {
             else {
                 continue;
             };
-            let shared = self
-                .current_file_content(&RelativePath::new(&path))
+            let shared = RelativePath::try_new(&path)
+                .ok()
+                .and_then(|path| self.current_file_content(&path))
                 .map(|content| match content {
                     document::Content::String(text) => text.as_bytes().to_vec(),
                     document::Content::Bytes(bytes) => bytes.clone(),
@@ -1384,7 +1446,9 @@ impl DocumentActor {
             let Some(path) = rest.split('-').next().and_then(unhex) else {
                 continue;
             };
-            let path = RelativePath::new(&path);
+            let Ok(path) = RelativePath::try_new(&path) else {
+                continue;
+            };
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };
@@ -1426,6 +1490,9 @@ impl DocumentActor {
                     self.disk_content
                         .insert(path.clone(), base.clone().unwrap_or_default());
                     self.merge_disk_content(&path, bytes);
+                    // A kill after the next save and before the write must not read the
+                    // disk as newer than the document (no record would make the disk win).
+                    self.rebase_pending(&path, &on_disk);
                     self.disk_content.insert(path.clone(), on_disk);
                     self.crdt_doc.set_file(
                         document::Content::String(String::new()),
@@ -1507,7 +1574,12 @@ impl DocumentActor {
             {
                 continue;
             }
-            let absolute_file_path = self.absolute_path_for_file_path(&relative_file_path);
+            let Ok(absolute_file_path) =
+                AbsolutePath::from_parts(&self.app_config.base_dir, &relative_file_path)
+            else {
+                warn!("Skipping unsafe shared file name {relative_file_path}.");
+                continue;
+            };
             if git_forward::excluded(&relative_file_path) {
                 continue;
             }
@@ -1549,11 +1621,7 @@ impl DocumentActor {
             return Ok(());
         }
         self.git_running = false;
-        for path in std::mem::take(&mut self.deferred_removals) {
-            if !self.crdt_doc.file_exists(&path) {
-                self.remove_disk_file(&path);
-            }
-        }
+        self.retry_removals();
         self.read_current_content_from_dir(false);
         let mut result = Ok(());
         for path in std::mem::take(&mut self.deferred_writes) {
@@ -1565,20 +1633,54 @@ impl DocumentActor {
         result
     }
 
+    /// The disk bytes, if they differ from what the daemon last saw there.
+    fn unhandled_outside_write(&self, file_path: &RelativePath) -> Option<Vec<u8>> {
+        let absolute = self.absolute_path_for_file_path(file_path);
+        let bytes = sandbox::read_file(&self.app_config.base_dir, &absolute).ok()?;
+        (self.disk_content.get(file_path) != Some(&bytes)).then_some(bytes)
+    }
+
     fn remove_disk_file(&mut self, file_path: &RelativePath) {
         // The disk no longer has the file, so it must not be compared against later; otherwise
         // the next write of a recreated file reads the missing file as a local deletion.
-        self.disk_content.remove(file_path);
+        let last_seen = self.disk_content.remove(file_path);
         let absolute = self.absolute_path_for_file_path(file_path);
-        if let Err(error) = sandbox::remove_file(&self.app_config.base_dir, &absolute) {
-            warn!("Failed to remove file {file_path}: {error}");
+        match sandbox::remove_file_returning(&self.app_config.base_dir, &absolute) {
+            Ok(removed) if last_seen.as_ref().is_some_and(|seen| *seen != removed) => {
+                // An outside write landed between the daemon's last look and the removal: the
+                // edit wins, is shared again and the file is written back.
+                self.merge_disk_content(file_path, removed);
+                self.write_file(file_path);
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => warn!("Failed to remove file {file_path}: {error}"),
         }
-        if !matches!(
+        if matches!(
             sandbox::exists(&self.app_config.base_dir, &absolute),
             Ok(true)
         ) {
+            // Retried on the next rescan; until then the leftover file is not an outside file, so
+            // keep what was last seen: only a different content is an outside write.
+            if let Some(last_seen) = last_seen {
+                self.disk_content.insert(file_path.clone(), last_seen);
+            }
+            self.deferred_removals.insert(file_path.clone());
+        } else {
             self.unmark_pending(file_path);
             self.crdt_doc.remove_file(&base_marker(file_path));
+        }
+    }
+
+    fn retry_removals(&mut self) {
+        for path in std::mem::take(&mut self.deferred_removals) {
+            if self.crdt_doc.file_exists(&path) {
+            } else if let Some(bytes) = self.unhandled_outside_write(&path) {
+                // Written meanwhile: the edit wins, as for an immediate removal.
+                self.merge_disk_content(&path, bytes);
+            } else {
+                self.remove_disk_file(&path);
+            }
         }
     }
 
@@ -1775,7 +1877,9 @@ impl DocumentActor {
         loop {
             // Writes that failed or were deferred are retried on every rescan; with no further
             // file events, nothing would trigger one, so also retry on a timer.
-            let retry_pending = !self.deferred_writes.is_empty() && !self.git_running;
+            let retry_pending = (!self.deferred_writes.is_empty()
+                || !self.deferred_removals.is_empty())
+                && !self.git_running;
             tokio::select! {
                 message = self.doc_message_rx.recv() => {
                     let Some(message) = message else { break };
@@ -2083,6 +2187,38 @@ fn spawn_file_watcher(app_config: &AppConfig, document_handle: DocumentActorHand
     });
 }
 
+/// What restart recovery does with one pending-write record (`apply_pending_writes`).
+#[derive(Debug, PartialEq, Eq)]
+enum PendingRecovery {
+    /// The disk already holds the document's bytes: only clear the record.
+    Finished,
+    /// Merge the disk's bytes against the record's base, then write the result.
+    MergeThenWrite,
+    /// Peers deleted the file but it changed on disk: drop the record, the rescan shares the edit.
+    KeepOutsideEdit,
+    /// Write the document's file, or remove the disk file if the document has none.
+    Write,
+}
+
+/// Pure decision of `apply_pending_writes`, mirrored by `restart` in the crash-consistency proof.
+#[expect(clippy::fn_params_excessive_bools)]
+fn pending_recovery(
+    on_disk: bool,
+    in_document: bool,
+    disk_matches_document: bool,
+    disk_matches_base: bool,
+) -> PendingRecovery {
+    if on_disk && in_document && disk_matches_document {
+        PendingRecovery::Finished
+    } else if on_disk && in_document {
+        PendingRecovery::MergeThenWrite
+    } else if on_disk && !disk_matches_base {
+        PendingRecovery::KeepOutsideEdit
+    } else {
+        PendingRecovery::Write
+    }
+}
+
 /// File name prefix of a displaced file kept while `path` is replaced.
 fn displaced_prefix(path: &RelativePath) -> String {
     use std::fmt::Write;
@@ -2279,6 +2415,113 @@ mod tests {
             actor.assert_file_content(&new_file, "fresh");
         }
 
+        /// A peer's deletion received while Git ran, whose removal then fails, is retried; the
+        /// rescans meanwhile must not read the leftover file as a new outside file.
+        #[tokio::test]
+        async fn failed_removal_after_git_is_retried_not_resurrected() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = setup_filesystem_for_testing();
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            let file1 = RelativePath::new("file1");
+            actor.git_running = true;
+            actor.crdt_doc.remove_file(&file1);
+            actor.deferred_removals.insert(file1.clone());
+            let set_mode = |mode| {
+                std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+            };
+            set_mode(0o555);
+            actor.finish_git().unwrap();
+            assert!(dir.path().join("file1").exists());
+            actor.handle_message(DocMessage::RescanFiles).await;
+            assert!(!actor.crdt_doc.file_exists(&file1));
+            set_mode(0o755);
+            actor.handle_message(DocMessage::RescanFiles).await;
+            assert!(!actor.crdt_doc.file_exists(&file1));
+            assert!(!dir.path().join("file1").exists());
+        }
+
+        /// The document fails to save right after a write displaced an outside edit. The record
+        /// of the disk bytes must then be what the write put there; a stale record made the
+        /// watcher event of our own write merge it as an outside edit that reverts the outside
+        /// edit just merged.
+        #[test]
+        fn failed_save_after_displacing_an_outside_edit_keeps_it() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = restart(&dir);
+            let path = RelativePath::new("file1");
+            actor.read_current_content_from_dir(false);
+            assert_eq!(actor.disk_content.get(&path), Some(&b"content1".to_vec()));
+            // A peer's change arrives, and the user edits the file before the daemon writes it.
+            let _ = actor.crdt_doc.update_text("shared\ncontent1", &path);
+            // The outside write lands after `write_file_now` read the disk, so the write
+            // displaces it (`ensure_file_has_bytes` called as from inside the write loop).
+            std::fs::write(dir.path().join("file1"), "content1\noutside").unwrap();
+            actor.persist_successes_left = Some(1);
+            assert!(
+                actor
+                    .ensure_file_has_bytes(&path, b"shared\ncontent1")
+                    .is_err()
+            );
+            actor.deferred_writes.insert(path.clone());
+            actor.persist_successes_left = None;
+            // Watcher event of the write, then the retry of the pending write.
+            actor.file_created_or_changed(&path);
+            actor.try_write_file(&path).unwrap();
+            actor.file_created_or_changed(&path);
+            actor.assert_file_content(&path, "shared\ncontent1\noutside");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("file1")).unwrap(),
+                "shared\ncontent1\noutside"
+            );
+        }
+
+        /// An outside write lands after the daemon last looked at the file and before it removes
+        /// the file for a peer's deletion (what the unlink used to lose): the removal returns
+        /// the removed bytes, and a difference is merged and written back.
+        #[test]
+        fn removal_keeps_a_write_that_landed_after_the_last_look() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = restart(&dir);
+            let path = RelativePath::new("file1");
+            actor.read_current_content_from_dir(false);
+            assert_eq!(actor.disk_content.get(&path), Some(&b"content1".to_vec()));
+            actor.crdt_doc.remove_file(&path);
+            std::fs::write(dir.path().join("file1"), "content1\nlate").unwrap();
+            actor.remove_disk_file(&path);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("file1")).unwrap(),
+                "content1\nlate"
+            );
+            actor.assert_file_content(&path, "content1\nlate");
+            // No removal leaves its temporary file behind.
+            let leftovers: Vec<_> = std::fs::read_dir(dir.path().join(".teamtypev"))
+                .map(|d| {
+                    d.flatten()
+                        .filter(|e| e.file_name().to_string_lossy().starts_with(".removed"))
+                        .count()
+                })
+                .into_iter()
+                .collect();
+            assert_eq!(leftovers, vec![0]);
+        }
+
+        /// A peer may set the history id to empty bytes; reading it must not panic.
+        #[tokio::test]
+        async fn empty_history_id_from_a_peer_does_not_crash() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            actor.crdt_doc.set_file(
+                document::Content::Bytes(vec![]),
+                &RelativePath::new(HISTORY_ID),
+            );
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_message(DocMessage::HistoryId { response_tx })
+                .await;
+            assert!(response_rx.await.is_ok());
+        }
+
         #[test]
         fn hostile_peer_paths_do_not_crash_rescan_or_escape() {
             let dir = setup_filesystem_for_testing();
@@ -2309,6 +2552,22 @@ mod tests {
                     .exists()
             );
             assert!(!Path::new("/tmp/tt-escape-abs").exists());
+        }
+
+        #[test]
+        fn hostile_recovery_lists_do_not_crash_startup() {
+            let dir = setup_filesystem_for_testing();
+            let actor = DocumentActor::setup_for_testing(&dir);
+            std::fs::create_dir_all(dir.path().join(".teamtypev")).expect("dir");
+            std::fs::write(actor.open_files_list(), "..\n/x\n\n\na/./b\n").expect("list");
+            actor.check_files_left_open();
+            let pending = vec![("../x".to_string(), None::<Vec<u8>>), (String::new(), None)];
+            std::fs::write(
+                actor.pending_list(),
+                postcard::to_allocvec(&pending).expect("encode"),
+            )
+            .expect("pending");
+            assert!(actor.read_pending().is_empty());
         }
 
         #[tokio::test]

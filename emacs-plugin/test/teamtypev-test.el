@@ -235,3 +235,9 @@
     (should (equal (teamtypev-test--only-edit) '(1 0 1 0 "日")))))
 
 ;;; teamtypev-test.el ends here
+
+(ert-deftest teamtypev-test-uri-roundtrip-keeps-reserved-characters ()
+  (dolist (name '("a#b" "a?b" "a%b" "a b" "a\\b" "a\u00e9" "a%20b" "a#b?c%20d e"))
+    (let ((path (concat "/d/" name)))
+      (should (equal path (teamtypev--uri-to-path (teamtypev--path-to-uri path))))
+      (should-not (string-match-p "[#? \\]" (substring (teamtypev--path-to-uri path) 7))))))

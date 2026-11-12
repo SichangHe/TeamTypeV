@@ -701,3 +701,94 @@ fn kill_after_scanning_git_changes_before_the_pending_write_does_not_apply_them_
     assert_eq!(std::fs::read_to_string(dir.path().join("shared"))?, *text);
     Ok(())
 }
+
+// An editor may send `open` for a file it already has open, without `close`. The daemon then
+// replaces that file's OT session with a fresh one at revision 0 holding the editor's buffer and
+// sends the catch-up edit as for a first open, so later edits apply to the shared text. (Daemon
+// edits still in flight from the old session are the reopen hazard of
+// `reopened_session_applies_stale_daemon_edit_unless_old_messages_are_drained`.)
+// Verus model: daemon_proof (`open` on an owner).
+#[tokio::test]
+async fn open_of_an_already_open_file_restarts_its_session() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let path = RelativePath::new("file1");
+    let (uri, _reader) = open_test_editor(&mut actor, &path).await;
+    let edit = |old: &str, new: &str, revision| EditorProtocolMessageFromEditor::Edit {
+        uri: uri.clone(),
+        revision,
+        delta: crate::types::EditorTextDelta::try_from_delta(
+            TextDelta::from(dissimilar::diff(old, new)),
+            old,
+        )
+        .unwrap(),
+    };
+    actor
+        .react_to_message_from_editor(1, &edit("content1", "Xcontent1", 0))
+        .await
+        .expect("edit");
+    actor.assert_file_content(&path, "Xcontent1");
+    // Open again with a stale buffer: the new session starts at that buffer and revision 0.
+    actor
+        .react_to_message_from_editor(
+            1,
+            &EditorProtocolMessageFromEditor::Open {
+                uri: uri.clone(),
+                content: "content1".into(),
+                saves_file: false,
+                daemon_writes: true,
+            },
+        )
+        .await
+        .expect("second open");
+    actor.assert_file_content(&path, "Xcontent1");
+    // An edit made before the editor received the catch-up edit is transformed against it.
+    actor
+        .react_to_message_from_editor(1, &edit("content1", "content1Y", 0))
+        .await
+        .expect("edit in the new session");
+    actor.assert_file_content(&path, "Xcontent1Y");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("file1"))?,
+        "Xcontent1Y"
+    );
+    Ok(())
+}
+
+#[test]
+fn kill_while_recovering_a_displaced_edit_after_its_save_keeps_it() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let path = RelativePath::new("shared");
+    std::fs::write(dir.path().join("shared"), "line1\n")?;
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    actor.persist = true;
+    actor.read_current_content_from_dir(true);
+    actor.crdt_doc.update_text("line1\nlocal\n", &path);
+    actor.persist()?;
+    drop(actor);
+    // Left by a kill right after a swap: our bytes on disk, no pending record, the outside
+    // version and the base the daemon had read kept in `.teamtypev`.
+    std::fs::write(dir.path().join("shared"), "line1\nlocal\n")?;
+    let kept = dir
+        .path()
+        .join(".teamtypev")
+        .join(format!("{}abc", displaced_prefix(&path)));
+    std::fs::write(&kept, "outside\nline1\n")?;
+    let mut base = kept.into_os_string();
+    base.push(".base");
+    std::fs::write(base, "line1\n")?;
+    // Recovery merges and saves, then is killed before its write.
+    KILL_BEFORE_SWAP.with(|kill| kill.set(true));
+    let first = restarted_actor(&dir);
+    KILL_BEFORE_SWAP.with(|kill| kill.set(false));
+    drop(first);
+    let restarted = restarted_actor(&dir);
+    let Some(document::Content::String(text)) = restarted.current_file_content(&path) else {
+        panic!("text file")
+    };
+    assert_eq!(text, "outside\nline1\nlocal\n");
+    let text = text.clone();
+    assert_eq!(std::fs::read_to_string(dir.path().join("shared"))?, text);
+    assert_eq!(displaced_files(&dir), Vec::<String>::new());
+    Ok(())
+}

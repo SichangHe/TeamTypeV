@@ -373,20 +373,29 @@ async function processEditFromDaemon(client: Client, edit: Edit) {
             } finally {
                 if (pending) {
                     if (pendingRemote === pending) pendingRemote = null
-                    let remoteApplied = false
-                    for (const change of pending.changes) {
-                        if (
-                            !remoteApplied &&
-                            worked &&
-                            change.version === pending.version + 1 &&
-                            change.content === pending.content
-                        ) {
-                            remoteApplied = true
-                            revision.daemon += 1
-                            state.content = change.lines
-                        } else {
-                            processLocalEdit(change.event, change.lines)
+                    const remote = pending.changes.findIndex(
+                        (c) => c.version === pending!.version + 1 && c.content === pending!.content,
+                    )
+                    if (worked && remote === -1) {
+                        // The remote edit landed but is not a change event of its own (a keystroke
+                        // came first, or VS Code merged events). The buffer is the remote edit plus
+                        // local changes, so acknowledge it and send the difference as one local edit.
+                        revision.daemon += 1
+                        const delta = handoffDelta(pending.content, document!.getText())
+                        if (delta.length) {
+                            client.connection.sendRequest(editType, {uri, revision: revision.daemon, delta})
+                            revision.editor += 1
                         }
+                        state.content = getLines(document!)
+                    } else {
+                        pending.changes.forEach((change, i) => {
+                            if (worked && i === remote) {
+                                revision.daemon += 1
+                                state.content = change.lines
+                            } else {
+                                processLocalEdit(change.event, change.lines)
+                            }
+                        })
                     }
                 }
             }

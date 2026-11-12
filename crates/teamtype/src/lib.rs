@@ -16,6 +16,8 @@ pub mod git_forward;
 pub mod jsonrpc_forwarder;
 pub mod logging;
 pub mod ot;
+#[cfg(test)]
+mod patch_shape_tests;
 pub mod path;
 pub mod peer;
 pub mod sandbox;

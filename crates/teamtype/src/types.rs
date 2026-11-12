@@ -191,7 +191,7 @@ impl PatchEffect {
                     warn!(
                         "Peer put an unsupported value at {key}; treating the file as removed: {e:#}"
                     );
-                    Self::FileRemoval(RelativePath::new(key))
+                    RelativePath::try_new(key).map_or(Self::NoEffect, Self::FileRemoval)
                 } else {
                     warn!("Ignoring unsupported patch from peer: {e:#}");
                     Self::NoEffect
@@ -361,7 +361,7 @@ impl TryFrom<&Patch> for PatchEffect {
             }
             let (_obj_id, prop) = &path[1];
             if let Prop::Map(file_path) = prop {
-                return Ok(RelativePath::new(file_path));
+                return RelativePath::try_new(file_path);
             }
             bail!("Unexpected path in Automerge patch: Prop is not a map")
         }
@@ -390,7 +390,7 @@ impl TryFrom<&Patch> for PatchEffect {
                         } => {
                             // This action happens when a new file is created.
 
-                            let relative_path = RelativePath::new(key);
+                            let relative_path = RelativePath::try_new(key)?;
 
                             match value {
                                 (Value::Object(ObjType::Text), _) => {
@@ -418,7 +418,7 @@ impl TryFrom<&Patch> for PatchEffect {
                         PatchAction::DeleteMap { key } => {
                             // This action happens when a file is deleted.
                             debug!("Got file removal from patch: {key}");
-                            Ok(Self::FileRemoval(RelativePath::new(key)))
+                            Ok(Self::FileRemoval(RelativePath::try_new(key)?))
                         }
                         PatchAction::Conflict { prop } => {
                             // This can happen when both sides create the same file.

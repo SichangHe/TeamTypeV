@@ -35,6 +35,23 @@ fn apply_editor_delta(text: &str, delta: &EditorTextDelta) -> String {
     out
 }
 
+/// The URI an editor plugin sends: every byte but `/` and unreserved characters percent-escaped
+/// (what Neovim's `vim.uri_from_bufnr` gives, with lowercase hex).
+fn plugin_uri(path: &AbsolutePath) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let escaped: String = Path::new(path.as_ref() as &Path)
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .map(|&b| match b {
+            b'/' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ if b.is_ascii_alphanumeric() => (b as char).to_string(),
+            _ => format!("%{b:02x}"),
+        })
+        .collect();
+    format!("file://{escaped}")
+}
+
 struct EditorClient {
     uri: String,
     reader: tokio::net::UnixStream,
@@ -56,14 +73,17 @@ struct Peer {
     watcher: VecDeque<WatcherEventType>,
 }
 
+#[expect(clippy::struct_excessive_bools)]
 struct World {
     peers: Vec<Peer>,
     states: Vec<Vec<SyncState>>,
     wire: Vec<Vec<VecDeque<AutomergeSyncMessage>>>,
     rng: StdRng,
     path: RelativePath,
+    name: String,
     trace: Vec<String>,
     disk_writes: bool,
+    replace: bool,
     unsettled: bool,
     verbose: bool,
     violation: Option<String>,
@@ -89,12 +109,17 @@ fn peer_actor(dir: &TempDir, is_host: bool) -> DocumentActor {
 
 impl World {
     async fn new(seed: u64, peers: usize) -> Self {
-        let path = RelativePath::new("a");
+        Self::named(seed, peers, "a").await
+    }
+
+    /// Like `new`, with the one shared file called `name`.
+    async fn named(seed: u64, peers: usize, name: &str) -> Self {
+        let path = RelativePath::new(name);
         let mut ps = vec![];
         for i in 0..peers {
             let dir = tempdir().unwrap();
             if i == 0 {
-                std::fs::write(dir.path().join("a"), "one\ntwo\nthree\n").unwrap();
+                std::fs::write(dir.path().join(name), "one\ntwo\nthree\n").unwrap();
             }
             let actor = peer_actor(&dir, i == 0);
             ps.push(Peer {
@@ -110,8 +135,10 @@ impl World {
             peers: ps,
             rng: StdRng::seed_from_u64(seed),
             path,
+            name: name.to_string(),
             trace: vec![],
             disk_writes: false,
+            replace: false,
             unsettled: false,
             verbose: false,
             violation: None,
@@ -242,15 +269,12 @@ impl World {
     }
 
     async fn open_editor(&mut self, p: usize, e: usize) {
-        if self.peers[p].editors[e].is_some() || !self.peers[p].dir.path().join("a").exists() {
+        if self.peers[p].editors[e].is_some() || !self.peers[p].dir.path().join(&self.name).exists() {
             return;
         }
         let path = self.path.clone();
         let actor = &mut self.peers[p].actor;
-        let uri = actor
-            .absolute_path_for_file_path(&path)
-            .to_file_uri()
-            .to_string();
+        let uri = plugin_uri(&actor.absolute_path_for_file_path(&path));
         let (stream, reader) = tokio::net::UnixStream::pair().unwrap();
         let (_, writer) = tokio::io::split(stream);
         actor.editor_connections.insert(
@@ -262,7 +286,7 @@ impl World {
         );
         // The editor reads the file, then opens it. As in the plugin, it opens with the content
         // it read.
-        let content = std::fs::read_to_string(self.peers[p].dir.path().join("a"))
+        let content = std::fs::read_to_string(self.peers[p].dir.path().join(&self.name))
             .unwrap_or_default();
         self.trace.push(format!("open {p} with {content:?}"));
         let id = 0;
@@ -382,7 +406,7 @@ impl World {
 
     async fn disk_write(&mut self, p: usize) {
         let text = self.random_text();
-        let file = self.peers[p].dir.path().join("a");
+        let file = self.peers[p].dir.path().join(&self.name);
         let old = std::fs::read_to_string(&file).unwrap_or_default();
         let new = if self.rng.random_bool(0.5) {
             format!("{old}{text}")
@@ -395,7 +419,7 @@ impl World {
     }
 
     fn disk_remove(&mut self, p: usize) {
-        let file = self.peers[p].dir.path().join("a");
+        let file = self.peers[p].dir.path().join(&self.name);
         if std::fs::remove_file(&file).is_ok() {
             self.trace.push(format!("disk remove {p}"));
             self.peers[p].watcher.push_back(WatcherEventType::Removed);
@@ -403,13 +427,46 @@ impl World {
     }
 
     fn disk_create(&mut self, p: usize) {
-        let file = self.peers[p].dir.path().join("a");
+        let file = self.peers[p].dir.path().join(&self.name);
         if !file.exists() {
             let text = self.random_text();
             self.trace.push(format!("disk create {p}: {text:?}"));
             std::fs::write(&file, text).unwrap();
             self.peers[p].watcher.push_back(WatcherEventType::Created);
         }
+    }
+
+    /// The file is deleted and written again, as an editor-less tool or `git checkout` does:
+    /// the daemon sees the removal first, so the shared file gets a new text (or bytes) object.
+    async fn disk_replace(&mut self, p: usize, binary: bool) {
+        let file = self.peers[p].dir.path().join("a");
+        if std::fs::remove_file(&file).is_ok() {
+            self.fire(p, WatcherEventType::Removed).await;
+        }
+        let content: Vec<u8> = if binary {
+            vec![0xff, 0xfe, self.rng.random_range(0..=255)]
+        } else {
+            self.random_text().into_bytes()
+        };
+        self.trace.push(format!("replace {p} with {content:?}"));
+        std::fs::write(&file, content).unwrap();
+        if self.rng.random_bool(0.7) {
+            self.fire(p, WatcherEventType::Created).await;
+        } else {
+            self.peers[p].watcher.push_back(WatcherEventType::Created);
+        }
+    }
+
+    async fn fire(&mut self, p: usize, event_type: WatcherEventType) {
+        let file_path = self.peers[p].dir.path().join("a");
+        self.peers[p]
+            .actor
+            .handle_message(DocMessage::FromWatcher(WatcherEvent {
+                file_path,
+                event_type,
+            }))
+            .await;
+        self.verify_cache("fire");
     }
 
     async fn close_editor(&mut self, p: usize, e: usize) {
@@ -434,7 +491,7 @@ impl World {
         let Some(kind) = self.peers[p].watcher.pop_front() else {
             return;
         };
-        let file_path = self.peers[p].dir.path().join("a");
+        let file_path = self.peers[p].dir.path().join(&self.name);
         self.trace.push(format!("watcher {p}"));
         self.peers[p]
             .actor
@@ -450,7 +507,7 @@ impl World {
         let n = self.peers.len();
         let p = self.rng.random_range(0..n);
         let e = self.rng.random_range(0..2);
-        match self.rng.random_range(0..16) {
+        match self.rng.random_range(0..18) {
             0 => self.open_editor(p, e).await,
             1..=3 => self.local_edit(p, e),
             4 => self.send_to_daemon(p, e).await,
@@ -476,8 +533,13 @@ impl World {
             12 if self.disk_writes => self.disk_remove(p),
             13 if self.disk_writes => self.disk_create(p),
             14 if self.disk_writes => self.close_editor(p, e).await,
+            15 | 16 if self.replace => {
+                let binary = self.rng.random_range(0..4) == 0;
+                self.disk_replace(p, binary).await;
+            }
             _ => {}
         }
+        self.verify_cache(&format!("step {}", self.trace.last().cloned().unwrap_or_default()));
         self.check_inside();
     }
 
@@ -569,12 +631,22 @@ impl World {
                 return Err(format!("peer {p}: {cache:?} != peer 0 {reference:?}"));
             }
             if cache.is_none()
-                && self.peers[p].dir.path().join("a").exists() {
+                && self.peers[p].dir.path().join(&self.name).exists() {
                     return Err(format!("peer {p}: file removed in crdt but on disk"));
                 }
+            if self.replace
+                && let Some(Content::Bytes(bytes)) = &cache
+                && self.peers[p].editors.iter().all(Option::is_none)
+            {
+                let disk = std::fs::read(self.peers[p].dir.path().join("a")).unwrap_or_default();
+                if &disk != bytes {
+                    return Err(format!("peer {p}: disk {disk:?} != crdt bytes {bytes:?}"));
+                }
+            }
             if let Some(Content::String(text)) = &cache {
                 for e in 0..2 {
                     if let Some(ed) = &self.peers[p].editors[e]
+                        && self.peers[p].actor.editor_connections[&(e + 1)].0.owns(&self.path)
                         && &ed.buffer != text
                     {
                         let ot = self.peers[p].actor.editor_connections[&(e + 1)]
@@ -584,10 +656,12 @@ impl World {
                     }
                 }
                 // The daemon only keeps the disk of files no editor owns in step.
-                if self.peers[p].editors.iter().any(Option::is_some) {
+                if !self.replace && self.peers[p].editors.iter().any(Option::is_some) {
                     continue;
                 }
-                let disk = std::fs::read_to_string(self.peers[p].dir.path().join("a"))
+                // A file the user deleted under an open editor stays deleted while its text is empty.
+                let disk = std::fs::read_to_string(self.peers[p].dir.path().join(&self.name))
+                    .or_else(|e| if text.is_empty() { Ok(String::new()) } else { Err(e) })
                     .map_err(|e| format!("peer {p}: disk: {e}"))?;
                 if &disk != text {
                     return Err(format!("peer {p}: disk {disk:?} != crdt {text:?}"));
@@ -599,8 +673,13 @@ impl World {
 }
 
 async fn run_seed(seed: u64, peers: usize, steps: usize, disk_writes: bool) -> Result<(), String> {
+    run_seed_with(seed, peers, steps, disk_writes, false).await
+}
+
+async fn run_seed_with(seed: u64, peers: usize, steps: usize, disk_writes: bool, replace: bool) -> Result<(), String> {
     let mut w = World::new(seed, peers).await;
     w.disk_writes = disk_writes;
+    w.replace = replace;
     for _ in 0..steps {
         w.step().await;
         if std::env::var("RACE_STEPCHECK").is_ok() {
@@ -625,7 +704,7 @@ async fn run_seed(seed: u64, peers: usize, steps: usize, disk_writes: bool) -> R
             w.sync_all_rounds(1).await;
             for p in 0..peers {
                 let c = w.peers[p].actor.current_file_content(&w.path).cloned();
-                let d = std::fs::read_to_string(w.peers[p].dir.path().join("a")).ok();
+                let d = std::fs::read_to_string(w.peers[p].dir.path().join(&w.name)).ok();
                 let heads = w.peers[p].actor.crdt_doc.get_heads();
                 let files = w.peers[p].actor.crdt_doc.files();
                 w.trace.push(format!("round {round} peer {p}: crdt {c:?} disk {d:?} editor {} heads {heads:?} files {files:?}", w.peers[p].editors.iter().any(Option::is_some)));
@@ -649,6 +728,38 @@ async fn random_interleavings_converge_two_peers() {
 async fn random_interleavings_converge_three_peers() {
     for seed in 0..seed_count(40) {
         if let Err(e) = run_seed(1000 + seed, 3, 80, true).await {
+            panic!("{e}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn random_replacements_converge_two_peers() {
+    for seed in 0..seed_count(150) {
+        if let Err(e) = run_seed_with(5000 + seed, 2, 70, true, true).await {
+            panic!("{e}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn random_replacements_converge_three_peers() {
+    for seed in 0..seed_count(100) {
+        if let Err(e) = run_seed_with(8000 + seed, 3, 90, true, true).await {
+            panic!("{e}");
+        }
+    }
+}
+
+// Seeds that failed before the fixes: 8067 (a text object that lost a concurrent replacement
+// becomes visible when the winner is deleted, with none of its text reported as patches, so
+// the cache stayed empty) and 8189 (a deletion under an open editor lost against a peer's
+// text and the surviving text was never written back to disk), 8789 (concurrent binary
+// replacements: the cache took the losing value).
+#[tokio::test]
+async fn replacement_regression_seeds() {
+    for seed in [8067, 8189, 8789] {
+        if let Err(e) = run_seed_with(seed, 3, 90, true, true).await {
             panic!("{e}");
         }
     }
@@ -770,4 +881,114 @@ fn merging_an_outside_change_into_unchanged_shared_text_gives_the_outside_text()
             "base {base:?} outside {outside:?}"
         );
     }
+}
+
+// File names with URI-reserved characters: the editor's `open` and `edit` must land in that very
+// file, the shared document must key it by that name, and the other peer must write that file.
+#[tokio::test]
+async fn reserved_character_file_names_survive_editor_to_daemon_to_peer() {
+    for name in ["a#b?c%20d e", "x?y", "100%", "back\\slash", "caf\u{e9} #1", "%2e%2e", "q#"] {
+        let mut w = World::named(0, 2, name).await;
+        let (a, b) = (w.peers[0].dir.path().join(name), w.peers[1].dir.path().join(name));
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "one\ntwo\nthree\n", "{name}");
+        w.open_editor(0, 0).await;
+        w.local_edit(0, 0);
+        w.send_to_daemon(0, 0).await;
+        w.sync_all().await;
+        let expected = w.peers[0].editors[0].as_ref().unwrap().buffer.clone();
+        w.check().unwrap();
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), expected, "{name}");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), expected, "{name}");
+        for p in &w.peers {
+            let listed: Vec<_> = std::fs::read_dir(p.dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name() != ".teamtypev")
+                .collect();
+            assert_eq!(listed.len(), 1, "{name}: stray files {listed:?}");
+        }
+    }
+}
+
+// An outside process creates a file that the daemon has never seen (no `disk_content` record)
+// while a peer creates the same path. If the daemon writes the peer's text before the watcher
+// event for the outside file arrives, the displaced outside bytes must still reach the shared
+// document; the later watcher event only sees the daemon's own bytes.
+#[test]
+fn outside_created_file_displaced_before_its_watcher_event_is_merged() {
+    for persist in [false, true] {
+        let dir = tempdir().unwrap();
+        let mut actor = peer_actor(&dir, true);
+        actor.persist = persist;
+        let path = RelativePath::new("n");
+        actor.crdt_doc.update_text("peer\n", &path);
+        std::fs::write(dir.path().join("n"), "local\n").unwrap();
+        assert!(!actor.disk_content.contains_key(&path));
+        actor.write_file(&path);
+        actor.file_created_or_changed(&path);
+        let shared = match actor.current_file_content(&path) {
+            Some(Content::String(text)) => text.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(shared.contains("local"), "outside text lost: {shared:?}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap(), shared);
+    }
+}
+
+// A peer deletes a file while an outside process on this peer has rewritten it and the watcher
+// event for that write is not yet handled. Applying the peer's delete removes the disk file
+// without comparing it to `disk_content`, so the outside text is gone from disk and from every
+// document; the late watcher event finds no file. (On restart the same race is resolved the other
+// way: "Changed on disk while peers deleted it: the edit wins and is shared again.")
+// Failed before the fix on branch tvd-review.
+#[tokio::test]
+async fn peer_delete_keeps_an_unhandled_outside_write() {
+    let mut w = World::new(1, 2).await;
+    let file1 = w.peers[1].dir.path().join("a");
+    assert_eq!(std::fs::read_to_string(&file1).unwrap(), "one\ntwo\nthree\n");
+    // Peer 0 deletes the file.
+    std::fs::remove_file(w.peers[0].dir.path().join("a")).unwrap();
+    let path = w.path.clone();
+    w.peers[0].actor.file_created_or_changed(&path);
+    // Peer 1: an outside write whose watcher event is still queued.
+    std::fs::write(&file1, "one\ntwo\nthree\nunsaved work\n").unwrap();
+    w.sync_all().await;
+    w.peers[1].actor.file_created_or_changed(&path);
+    w.sync_all().await;
+    let on_disk = std::fs::read_to_string(&file1).ok();
+    let shared = w.peers[1].actor.current_file_content(&path).cloned();
+    assert!(
+        on_disk.as_deref().is_some_and(|t| t.contains("unsaved work"))
+            || matches!(&shared, Some(Content::String(t)) if t.contains("unsaved work")),
+        "outside write lost: disk {on_disk:?}, shared {shared:?}"
+    );
+}
+
+// Same race while a Git command runs: the peer's delete is deferred, and an outside write to the
+// file during the command is not yet read. `finish_git` applied deferred removals before its
+// rescan and without comparing to `disk_content`, so the outside text was lost.
+// Failed before the fix on branch tvd-git-removal.
+#[tokio::test]
+async fn deferred_git_removal_keeps_an_outside_write() {
+    let mut w = World::new(1, 2).await;
+    let file1 = w.peers[1].dir.path().join("a");
+    assert_eq!(std::fs::read_to_string(&file1).unwrap(), "one\ntwo\nthree\n");
+    w.peers[1].actor.git_running = true;
+    std::fs::remove_file(w.peers[0].dir.path().join("a")).unwrap();
+    let path = w.path.clone();
+    w.peers[0].actor.file_created_or_changed(&path);
+    w.sync_all().await;
+    assert!(file1.exists(), "removal must be deferred while Git runs");
+    // Outside write (e.g. by the Git command) while Git runs.
+    std::fs::write(&file1, "one\ntwo\nthree\nunsaved work\n").unwrap();
+    w.peers[1].actor.finish_git().unwrap();
+    w.peers[1].actor.file_created_or_changed(&path);
+    w.sync_all().await;
+    let on_disk = std::fs::read_to_string(&file1).ok();
+    let shared = w.peers[1].actor.current_file_content(&path).cloned();
+    assert!(
+        on_disk.as_deref().is_some_and(|t| t.contains("unsaved work"))
+            || matches!(&shared, Some(Content::String(t)) if t.contains("unsaved work")),
+        "outside write lost: disk {on_disk:?}, shared {shared:?}"
+    );
 }

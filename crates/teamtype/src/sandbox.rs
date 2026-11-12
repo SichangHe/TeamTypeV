@@ -9,22 +9,24 @@
 //! The functions in this module are supposed to prevent file I/O outside the base directory.
 //! All our file I/O should go through them.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::bail;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use path_clean::PathClean;
+use rustix::fs::{AtFlags, CWD, Mode, OFlags};
 
 use crate::config::AppConfig;
 
 pub fn read_file(absolute_base_dir: &Path, absolute_file_path: &Path) -> Result<Vec<u8>> {
-    let canonical_file_path =
-        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
-    let bytes = fs::read(canonical_file_path)?;
+    let mut file = open_beneath(absolute_base_dir, absolute_file_path, OFlags::RDONLY)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -45,12 +47,11 @@ pub fn write_file(
 
     // `absolute_and_canonicalized` treats a dangling symlink as a missing file, so the final
     // component must not be followed: it could point outside the base directory.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(canonical_file_path)?;
+    let mut file = open_beneath(
+        absolute_base_dir,
+        &canonical_file_path,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+    )?;
     file.write_all(content)?;
     Ok(())
 }
@@ -98,8 +99,13 @@ pub fn replace_file_keeping(
         }
         _ => None,
     };
-    if let Ok(metadata) = fs::metadata(&path) {
-        staged.as_file().set_permissions(metadata.permissions())?;
+    let (dir, name) = open_parent_beneath(absolute_base_dir, &path)?;
+    if let Ok(stat) = rustix::fs::statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
+        // `st_mode` is `u16` on macOS.
+        #[cfg_attr(not(target_vendor = "apple"), expect(clippy::unnecessary_cast))]
+        staged
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(stat.st_mode as u32 & 0o7777))?;
     }
     #[cfg(any(
         target_os = "linux",
@@ -109,10 +115,10 @@ pub fn replace_file_keeping(
     ))]
     let result = loop {
         match rustix::fs::renameat_with(
-            rustix::fs::CWD,
+            CWD,
             staged.path(),
-            rustix::fs::CWD,
-            &path,
+            &dir,
+            &name,
             rustix::fs::RenameFlags::EXCHANGE,
         ) {
             Ok(()) => {
@@ -125,12 +131,20 @@ pub fn replace_file_keeping(
                     .map(|displaced| (Some(displaced), kept))
                     .map_err(Into::into);
             }
-            Err(rustix::io::Errno::NOENT) => match staged.persist_noclobber(&path) {
-                Ok(_) => break Ok((None, None)),
-                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    staged = error.file;
+            Err(rustix::io::Errno::NOENT) => match rustix::fs::renameat_with(
+                CWD,
+                staged.path(),
+                &dir,
+                &name,
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => {
+                    // The staged name is gone; do not let `staged` delete what now sits there.
+                    let _ = staged.into_temp_path().keep();
+                    break Ok((None, None));
                 }
-                Err(error) => break Err(error.error.into()),
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => break Err(error.into()),
             },
             Err(error) => break Err(error.into()),
         }
@@ -165,9 +179,11 @@ pub fn append_file(
     absolute_file_path: &Path,
     content: &[u8],
 ) -> Result<()> {
-    let canonical_file_path =
-        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
-    let mut file = OpenOptions::new().append(true).open(canonical_file_path)?;
+    let mut file = open_beneath(
+        absolute_base_dir,
+        absolute_file_path,
+        OFlags::WRONLY | OFlags::APPEND,
+    )?;
     file.write_all(content)?;
     Ok(())
 }
@@ -177,19 +193,51 @@ pub fn rename_file(
     absolute_file_path_old: &Path,
     absolute_file_path_new: &Path,
 ) -> Result<()> {
-    let canonical_file_path_old =
-        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path_old)?;
-    let canonical_file_path_new =
-        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path_new)?;
-    fs::rename(canonical_file_path_old, canonical_file_path_new)?;
+    let (old_dir, old_name) = open_parent_beneath(absolute_base_dir, absolute_file_path_old)?;
+    let (new_dir, new_name) = open_parent_beneath(absolute_base_dir, absolute_file_path_new)?;
+    rustix::fs::renameat(&old_dir, &old_name, &new_dir, &new_name)?;
     Ok(())
 }
 
 pub fn remove_file(absolute_base_dir: &Path, absolute_file_path: &Path) -> Result<()> {
-    let canonical_file_path =
-        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
-    fs::remove_file(canonical_file_path)?;
+    let (dir, name) = open_parent_beneath(absolute_base_dir, absolute_file_path)?;
+    rustix::fs::unlinkat(&dir, &name, AtFlags::empty())?;
     Ok(())
+}
+
+/// Removes a file and returns the bytes that were removed. The file is first renamed into
+/// `.teamtypev`, so bytes an outside process writes to that name later make a new file, and the
+/// bytes returned are exactly those that were removed (unlike read-then-unlink, which loses a
+/// write landing between the two).
+pub fn remove_file_returning(
+    absolute_base_dir: &Path,
+    absolute_file_path: &Path,
+) -> Result<Vec<u8>> {
+    let path = check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
+    let metadata_dir = absolute_base_dir.join(".teamtypev");
+    create_dir_all(absolute_base_dir, &metadata_dir)?;
+    let (dir, name) = open_parent_beneath(absolute_base_dir, &path)?;
+    let taken = tempfile::Builder::new()
+        .prefix(".removed")
+        .tempfile_in(&metadata_dir)?
+        .into_temp_path();
+    // Replaces the reserved empty temporary file.
+    rustix::fs::renameat(&dir, &name, CWD, &*taken)?;
+    let bytes = fs::read(&*taken);
+    match bytes {
+        Ok(bytes) => {
+            fs::remove_file(&*taken)?;
+            // Already moved; the path guard has nothing left to delete.
+            let _ = taken.keep();
+            Ok(bytes)
+        }
+        Err(error) => {
+            // Not a regular file we can read: put it back.
+            let _ = rustix::fs::renameat(CWD, &*taken, &dir, &name);
+            let _ = taken.keep();
+            Err(error.into())
+        }
+    }
 }
 
 pub fn create_dir(absolute_base_dir: &Path, absolute_dir_path: &Path) -> Result<()> {
@@ -205,9 +253,14 @@ pub fn create_dir(absolute_base_dir: &Path, absolute_dir_path: &Path) -> Result<
 }
 
 pub fn create_dir_all(absolute_base_dir: &Path, absolute_dir_path: &Path) -> Result<()> {
-    let canonical_dir_path =
-        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_dir_path)?;
-    fs::create_dir_all(canonical_dir_path)?;
+    let (mut dir, relative) = open_base_and_relative(absolute_base_dir, absolute_dir_path)?;
+    for component in relative.components() {
+        match rustix::fs::mkdirat(&dir, component.as_os_str(), Mode::from_raw_mode(0o777)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+        dir = open_dir_nofollow(&dir, component.as_os_str())?;
+    }
     Ok(())
 }
 
@@ -280,6 +333,61 @@ pub fn ignored(app_config: &AppConfig, absolute_file_path: &Path) -> Result<bool
         .map(|path_buf| absolute_and_canonicalized(&path_buf))
         .collect::<Result<Vec<_>>>()?
         .contains(&canonical_file_path))
+}
+
+/// Opens the canonical base directory and returns the checked path relative to it.
+fn open_base_and_relative(base_dir: &Path, path: &Path) -> Result<(OwnedFd, PathBuf)> {
+    let canonical_path = check_inside_base_dir_and_canonicalize(base_dir, path)?;
+    let canonical_base_dir = absolute_and_canonicalized(base_dir)?;
+    let relative = canonical_path
+        .strip_prefix(&canonical_base_dir)?
+        .to_path_buf();
+    let dir = rustix::fs::openat(
+        CWD,
+        &canonical_base_dir,
+        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok((dir, relative))
+}
+
+fn open_dir_nofollow(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<OwnedFd> {
+    Ok(rustix::fs::openat(
+        dir,
+        name,
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?)
+}
+
+/// Opens the parent directory of a checked path one component at a time without following
+/// symlinks, so a concurrent swap of a directory for a symlink between the check and the
+/// syscall cannot redirect the operation outside the base directory. Returns the final name.
+fn open_parent_beneath(base_dir: &Path, path: &Path) -> Result<(OwnedFd, PathBuf)> {
+    let (mut dir, relative) = open_base_and_relative(base_dir, path)?;
+    let name = relative
+        .file_name()
+        .context("Path has no file name inside the base directory")?
+        .into();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            dir = open_dir_nofollow(&dir, component.as_os_str())?;
+        }
+    }
+    Ok((dir, name))
+}
+
+/// Opens a checked path beneath the base directory; no component, including the last, is a
+/// followed symlink.
+fn open_beneath(base_dir: &Path, path: &Path, flags: OFlags) -> Result<File> {
+    let (dir, name) = open_parent_beneath(base_dir, path)?;
+    let fd = rustix::fs::openat(
+        &dir,
+        &name,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o666),
+    )?;
+    Ok(File::from(fd))
 }
 
 fn check_inside_base_dir_and_canonicalize(base_dir: &Path, path: &Path) -> Result<PathBuf> {
@@ -561,5 +669,89 @@ mod dangling_symlink_tests {
         std::os::unix::fs::symlink(&outside, base.join("d")).unwrap();
         let _ = write_file(&base, &base.join("d/f"), b"pwned");
         assert!(!outside.exists(), "escaped: created dir outside");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod toctou_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A concurrent local actor swaps a checked directory for a symlink to outside the base
+    /// directory between the sandbox check and the syscall.
+    #[test]
+    fn read_does_not_escape_when_dir_is_swapped_for_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(base.join("d")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(base.join("d/x"), b"inside").unwrap();
+        fs::write(outside.join("x"), b"SECRET").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("s")).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let adversary = {
+            let (stop, a, b) = (stop.clone(), base.join("d"), base.join("s"));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    rustix::fs::renameat_with(CWD, &a, CWD, &b, rustix::fs::RenameFlags::EXCHANGE)
+                        .unwrap();
+                }
+            })
+        };
+        let mut escaped = false;
+        for _ in 0..20_000 {
+            if let Ok(bytes) = read_file(&base, &base.join("d/x"))
+                && bytes == b"SECRET"
+            {
+                escaped = true;
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        adversary.join().unwrap();
+        assert!(!escaped, "escaped: read a file outside the base directory");
+    }
+}
+
+#[cfg(test)]
+mod walk_contract_tests {
+    use super::*;
+
+    /// The trusted contract of the `ignore` walk used by the proof: it yields only paths below
+    /// the base directory, built from directory entry names, and never descends into a symlink.
+    #[test]
+    fn walk_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(base.join("d")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(base.join("d/x"), b"x").unwrap();
+        fs::write(outside.join("secret"), b"s").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("dirlink")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), base.join("filelink")).unwrap();
+        let config = AppConfig {
+            base_dir: base.clone(),
+            ..Default::default()
+        };
+        let files = enumerate_non_ignored_files(&config);
+        for file in &files {
+            let relative = file.strip_prefix(&base).unwrap();
+            assert!(
+                relative
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)))
+            );
+            assert!(
+                *file == base.join("dirlink") || !file.starts_with(base.join("dirlink")),
+                "descended: {file:?}"
+            );
+        }
+        assert!(files.contains(&base.join("d/x")));
+        // The symlink itself is yielded; reading it must still fail the sandbox check.
+        assert!(files.contains(&base.join("filelink")));
+        assert!(read_file(&base, &base.join("filelink")).is_err());
     }
 }

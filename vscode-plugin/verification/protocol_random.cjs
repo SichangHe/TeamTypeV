@@ -159,10 +159,41 @@ async function scenario(seed) {
         document.version += 1
         fns.processUserEdit({document, contentChanges: [{range, text}]})
     }
+    // How the remote edit reaches the buffer: alone (0), merged with a local keystroke into one
+    // change event (1), or after a local keystroke landed during applyEdit (2).
+    let interleave = 0
+    const endPos = () => {
+        const lines = document.text.split("\n")
+        return new Position(lines.length - 1, lines.at(-1).length)
+    }
     context.applyEdit = async (c, d, edit) => {
         const [e] = fns.teamtypevDeltasToVSCodeTextEdits(d, edit.delta)
-        change(e.range, e.newText)
+        if (interleave === 2) change(new Range(endPos(), endPos()), "y")
+        if (interleave === 1) {
+            const end = endPos()
+            const a = document.offsetAt(e.range.start)
+            document.text = document.text.slice(0, a) + e.newText + document.text.slice(a) + "y"
+            document.version += 1
+            fns.processUserEdit({
+                document,
+                contentChanges: [
+                    {range: new Range(end, end), text: "y"},
+                    {range: e.range, text: e.newText},
+                ],
+            })
+        } else change(e.range, e.newText)
         return true
+    }
+    // Applies a sent delta (ASCII, so characters are UTF-16 code units) to text.
+    const applyDelta = (text, delta) => {
+        const off = (p) =>
+            text
+                .split("\n")
+                .slice(0, p.line)
+                .reduce((a, l) => a + l.length + 1, 0) + p.character
+        for (const d of [...delta].reverse())
+            text = text.slice(0, off(d.range.start)) + d.replacement + text.slice(off(d.range.end))
+        return text
     }
 
     let o = {live: false, dr: 0, er: 0}
@@ -225,13 +256,22 @@ async function scenario(seed) {
             const p = fits ? {line: 0, character: 0} : {line: 40, character: 0}
             const before = document.getText(),
                 n = sent.length
+            interleave = rnd(3)
             await fns.processEditFromDaemon(client, {
                 uri,
                 revision: rev,
                 delta: [{range: {start: p, end: p}, replacement: "D"}],
             })
             if (o.live && rev === o.er) {
-                if (fits) {
+                if (fits && interleave) {
+                    // The remote edit is acknowledged; only the keystroke goes out, against it.
+                    o.dr += 1
+                    assert.equal(document.getText(), "D" + before + "y", ctx + " daemon edit and keystroke")
+                    assert.equal(sent.length, n + 1, ctx + " only the keystroke is sent")
+                    assert.equal(sent.at(-1).revision, o.dr, ctx + " keystroke sent after the remote edit")
+                    assert.equal(applyDelta("D" + before, sent.at(-1).delta), document.getText(), ctx)
+                    o.er += 1
+                } else if (fits) {
                     assert.equal(document.getText(), "D" + before, ctx + " daemon edit applied")
                     assert.equal(sent.length, n, ctx + " applied edit sends nothing")
                     o.dr += 1

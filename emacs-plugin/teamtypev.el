@@ -87,13 +87,14 @@ final empty line exists only after a final newline.  Ignores narrowing."
     (widen)
     (buffer-substring-no-properties (point-min) (point-max))))
 
+;; `url-encode-url' keeps `#', `?' and `%' raw, which the daemon reads as fragment, query and escape.
 (defun teamtypev--uri-to-path (uri)
-  (url-unhex-string
-    (substring uri 7))) ; Remove the 'file://' from the URI. TODO: Make more stable?
+  "Decode the UTF-8 percent-escapes of the `file://' URI URI into a path."
+  (decode-coding-string (url-unhex-string (substring uri (length "file://"))) 'utf-8))
 
 (defun teamtypev--path-to-uri (path)
-  (url-encode-url
-    (concat "file://" path)))
+  "Encode every path segment of PATH, so only `/' stays unescaped."
+  (concat "file://" (mapconcat #'url-hexify-string (split-string path "/") "/")))
 
 ;;; Client Management
 
