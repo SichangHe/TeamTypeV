@@ -20,3 +20,8 @@
 ../liveness_proof/teamtype_peers.rs
 ../replace_proof/replace_proof.rs
 ../path_proof/path_proof.rs
+../automerge_proof/crdt_map.rs
+../automerge_proof/crdt_text.rs
+../automerge_proof/crdt_batch.rs
+../automerge_proof/crdt_batch_full.rs
+../automerge_proof/patch_fidelity.rs
