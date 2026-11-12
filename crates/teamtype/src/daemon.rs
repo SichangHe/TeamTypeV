@@ -1104,26 +1104,38 @@ impl DocumentActor {
     }
 
     fn merge_disk_content(&mut self, relative_file_path: &RelativePath, new_content: Vec<u8>) {
-        if self.disk_content.get(relative_file_path) == Some(&new_content) {
+        let record = self.disk_content.get(relative_file_path);
+        let new_text = std::str::from_utf8(&new_content).ok();
+        let shared_text = match self.current_file_content(relative_file_path) {
+            Some(document::Content::String(current)) => Some(current.as_str()),
+            _ => None,
+        };
+        let plan = merge_plan(
+            record == Some(&new_content),
+            new_text.is_some(),
+            new_text.is_some() && shared_text == new_text,
+            record.is_some_and(|bytes| std::str::from_utf8(bytes).is_ok()) && shared_text.is_some(),
+        );
+        if plan == MergePlan::Unchanged {
             return;
         }
         if let Ok(new_content) = String::from_utf8(new_content.clone()) {
-            if matches!(
-                self.current_file_content(relative_file_path),
-                Some(document::Content::String(current)) if *current == new_content
-            ) {
+            if plan == MergePlan::AdoptShared {
                 // The outside write is exactly the shared text (for example Git applied the same
                 // change a peer made). Merging it would apply that change a second time.
                 self.disk_content
                     .insert(relative_file_path.clone(), new_content.into_bytes());
                 return;
             }
-            let desired = if let (Some(base), Some(document::Content::String(current))) = (
-                self.disk_content
-                    .get(relative_file_path)
-                    .and_then(|bytes| std::str::from_utf8(bytes).ok()),
-                self.current_file_content(relative_file_path),
-            ) {
+            let desired = if plan == MergePlan::ThreeWay {
+                let (Some(base), Some(document::Content::String(current))) = (
+                    self.disk_content
+                        .get(relative_file_path)
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+                    self.current_file_content(relative_file_path),
+                ) else {
+                    unreachable!("a three-way merge needs a text record and shared text")
+                };
                 let shared: operational_transform::OperationSeq =
                     TextDelta::from(crate::types::checked_diff(base, current)).into();
                 let outside: operational_transform::OperationSeq =
@@ -2229,6 +2241,42 @@ fn pending_recovery(
         PendingRecovery::KeepOutsideEdit
     } else {
         PendingRecovery::Write
+    }
+}
+
+/// How `merge_disk_content` folds bytes found on disk into the shared document.
+#[derive(PartialEq, Eq, Debug)]
+enum MergePlan {
+    /// The bytes are what the daemon last saw: nothing happened outside.
+    Unchanged,
+    /// The bytes equal the shared text: record them, do not merge (it would apply a change twice).
+    AdoptShared,
+    /// Transform the outside edit (against the record's base) over the shared text.
+    ThreeWay,
+    /// No base to merge against: the outside text becomes the shared text.
+    TakeOutside,
+    /// Not UTF-8: the file becomes binary.
+    Binary,
+}
+
+/// Pure decision, mirrored by `read_merge` in the disk-coherence proof.
+#[expect(clippy::fn_params_excessive_bools)]
+fn merge_plan(
+    record_equals_new: bool,
+    new_is_text: bool,
+    shared_equals_new: bool,
+    record_and_shared_are_text: bool,
+) -> MergePlan {
+    if record_equals_new {
+        MergePlan::Unchanged
+    } else if !new_is_text {
+        MergePlan::Binary
+    } else if shared_equals_new {
+        MergePlan::AdoptShared
+    } else if record_and_shared_are_text {
+        MergePlan::ThreeWay
+    } else {
+        MergePlan::TakeOutside
     }
 }
 

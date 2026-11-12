@@ -1,0 +1,17 @@
+--- repo
++++ proof
+     shared_equals_new: bool,
+     record_and_shared_are_text: bool,
+-) -> MergePlan {
++) -> (r: MergePlan)
++    ensures
++        (r == MergePlan::Unchanged) == record_equals_new,
++        (r == MergePlan::Binary) == (!record_equals_new && !new_is_text),
++        (r == MergePlan::AdoptShared) == (!record_equals_new && new_is_text && shared_equals_new),
++        (r == MergePlan::ThreeWay)
++            == (!record_equals_new && new_is_text && !shared_equals_new && record_and_shared_are_text),
++        (r == MergePlan::TakeOutside)
++            == (!record_equals_new && new_is_text && !shared_equals_new && !record_and_shared_are_text),
++{
+     if record_equals_new {
+         MergePlan::Unchanged

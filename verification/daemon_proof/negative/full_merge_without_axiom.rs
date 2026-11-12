@@ -55,6 +55,8 @@ pub open spec fn read_merge(s: Fl) -> Fl {
     match s.d {
         Some(t) => if s.dc == Some(t) { s } else {
             match (s.c, s.dc) {
+                // the outside bytes equal the shared text: only the record changes (`AdoptShared`)
+                (Some(cur), Some(_)) if cur == t => Fl { dc: Some(t), ..s },
                 (Some(cur), Some(b)) => Fl { c: Some(merge(b, cur, t)), dc: Some(t), ..s },
                 _ => Fl { c: Some(t), dc: Some(t), ..s },
             }
@@ -295,6 +297,72 @@ fn removed_action(has_record: bool, record_equals_removed: bool) -> (r: RemovedA
     }
 }
 // corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: enum MergePlan
+/// How `merge_disk_content` folds bytes found on disk into the shared document.
+#[derive(PartialEq, Eq, Debug)]
+enum MergePlan {
+    /// The bytes are what the daemon last saw: nothing happened outside.
+    Unchanged,
+    /// The bytes equal the shared text: record them, do not merge (it would apply a change twice).
+    AdoptShared,
+    /// Transform the outside edit (against the record's base) over the shared text.
+    ThreeWay,
+    /// No base to merge against: the outside text becomes the shared text.
+    TakeOutside,
+    /// Not UTF-8: the file becomes binary.
+    Binary,
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: merge_plan
+/// Pure decision, mirrored by `read_merge` in the disk-coherence proof.
+#[expect(clippy::fn_params_excessive_bools)]
+fn merge_plan(
+    record_equals_new: bool,
+    new_is_text: bool,
+    shared_equals_new: bool,
+    record_and_shared_are_text: bool,
+) -> (r: MergePlan)
+    ensures
+        (r == MergePlan::Unchanged) == record_equals_new,
+        (r == MergePlan::Binary) == (!record_equals_new && !new_is_text),
+        (r == MergePlan::AdoptShared) == (!record_equals_new && new_is_text && shared_equals_new),
+        (r == MergePlan::ThreeWay)
+            == (!record_equals_new && new_is_text && !shared_equals_new && record_and_shared_are_text),
+        (r == MergePlan::TakeOutside)
+            == (!record_equals_new && new_is_text && !shared_equals_new && !record_and_shared_are_text),
+{
+    if record_equals_new {
+        MergePlan::Unchanged
+    } else if !new_is_text {
+        MergePlan::Binary
+    } else if shared_equals_new {
+        MergePlan::AdoptShared
+    } else if record_and_shared_are_text {
+        MergePlan::ThreeWay
+    } else {
+        MergePlan::TakeOutside
+    }
+}
+// corr-end
+
+// The plan's flags for a text file in the model (texts are opaque ints, all text): the record
+// equals the bytes, the shared text equals them, and a record and shared text both exist.
+// `read_merge` on a file holding `t` does exactly what the plan says.
+pub proof fn lemma_read_merge_matches_merge_plan(s: Fl, t: int)
+    requires s.d == Some(t),
+    ensures
+        // Unchanged: nothing moves
+        (s.dc == Some(t)) ==> read_merge(s) == s,
+        // AdoptShared: the shared text is kept, only the record changes
+        (s.dc != Some(t) && s.c == Some(t) && s.dc is Some) ==> (read_merge(s).c == s.c && read_merge(s).dc == Some(t)),
+        // ThreeWay: record and shared text exist and differ from the bytes
+        (s.dc != Some(t) && s.c != Some(t) && s.c is Some && s.dc is Some)
+            ==> read_merge(s).c == Some(merge(s.dc->Some_0, s.c->Some_0, t)) && read_merge(s).dc == Some(t),
+        // TakeOutside: no base or no shared text, the outside text is the shared text
+        (s.dc != Some(t) && (s.c is None || s.dc is None)) ==> (read_merge(s).c == Some(t) && read_merge(s).dc == Some(t)),
+{}
 
 // the flags `ensure_file_has_bytes` passes to `displaced_action`:
 // (has record, record equals displaced bytes, displaced bytes empty)

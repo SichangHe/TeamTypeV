@@ -1,0 +1,403 @@
+// (authored by agents) Verus model of one shared file's disk coherence in daemon.rs with outside
+// writes, file creation/removal, editor ownership, failed writes and Git deferral. Extends
+// disk_proof.rs (see DESIGN.md). Texts are opaque ints; `None` = no file.
+use vstd::prelude::*;
+
+verus! {
+
+pub uninterp spec fn merge(base: int, cur: int, outside: int) -> int;
+pub uninterp spec fn empty_t() -> int; // the empty text, what `merge_disk_content(path, vec![])` merges in
+
+// ASSUMED, tested by `merging_an_outside_change_into_unchanged_shared_text_gives_the_outside_text`
+// (daemon_race_tests.rs, 3000 random cases): merging into an unchanged shared text yields the outside text.
+#[verifier::external_body]
+pub proof fn axiom_merge_clean(b: int, o: int)
+    ensures merge(b, b, o) == o,
+{}
+
+pub enum Pc { Idle, W0, W1, W2, W3, W4 }
+
+pub struct Fl {
+    pub pc: Pc,
+    pub c: Option<int>,  // CRDT text (None: not in the CRDT)
+    pub dc: Option<int>, // disk_content entry
+    pub d: Option<int>,  // real file
+    pub n: nat,          // queued watcher events
+    pub lc: int,         // `content` snapshot of the write loop
+    pub wat: bool,       // run started by a watcher event
+    pub wr: bool,        // after the read/merge step, continue with the write (false for Removed events, rescans)
+    pub pend: bool,      // a write or removal is deferred (Git) or failed; rescan/finish retries
+    pub own: bool,       // some editor has the file open (`!DocumentActor::owns`)
+    pub git: bool,       // git_running
+    pub repl: bool,      // ghost: the shared text was replaced by outside bytes created concurrently with it
+    pub lost: bool,      // ghost: a write displaced outside bytes (differing from the record, not the
+                         // empty file without a record) without merging them into the shared text
+}
+
+pub enum Act {
+    Outside(Option<int>), // another process (or Git) creates, writes or removes the file; event queued
+    CrdtChange(int),      // sync message or editor edit changes the text; handler writes (or defers during Git)
+    SyncDelete,           // a peer deleted the file, daemon-owned (an owned file is recreated empty: CrdtChange)
+    Watch,                // actor takes a watcher event
+    MergeOnly,            // RescanFiles / GitHeads / Open-Edit pre-check: read + merge, no write
+    Step,                 // next step of the running handler
+    Fail,                 // the write at W3 fails
+    FailRemove,           // the unlink of a peer-deleted file fails (remove_disk_file keeps the last-seen record and defers)
+    FailSave,             // `persist` fails right after W3 displaced bytes (ensure_file_has_bytes returns Err)
+    Retry,                // rescan retries a pending write
+    Own(bool),            // an editor opens (true) or closes (false: release_files writes the file)
+    GitStart,
+    GitFinish,
+}
+
+// the read/merge step: `file_created_or_changed` + `remove_file` + `merge_disk_content`
+pub open spec fn read_merge(s: Fl) -> Fl {
+    match s.d {
+        Some(t) => if s.dc == Some(t) { s } else {
+            match (s.c, s.dc) {
+                // the outside bytes equal the shared text: only the record changes (`AdoptShared`)
+                
+                (Some(cur), Some(b)) => Fl { c: Some(merge(b, cur, t)), dc: Some(t), ..s },
+                _ => Fl { c: Some(t), dc: Some(t), ..s },
+            }
+        },
+        None => if s.own {
+            match (s.c, s.dc) {
+                (Some(cur), Some(b)) => Fl { c: Some(merge(b, cur, empty_t())), dc: Some(empty_t()), ..s },
+                _ => Fl { c: Some(empty_t()), dc: Some(empty_t()), ..s },
+            }
+        } else if s.pend && s.dc is None { s } // rescan keeps a file whose write is deferred
+        else { Fl { c: None, dc: None, ..s } },
+    }
+}
+
+// the bytes replaced at W3 were an outside write that carried content
+pub open spec fn displaced_unmerged(s: Fl) -> bool {
+    s.d is Some && s.d != s.dc && !(s.dc is None && s.d == Some(empty_t()))
+}
+
+// a deferred or immediate removal of a daemon-owned file deleted by a peer (c is None)
+pub open spec fn remove_or_merge(s: Fl) -> Fl {
+    match s.d {
+        Some(x) => if s.dc != Some(x) { Fl { c: Some(x), dc: Some(x), ..s } }
+            else { Fl { c: None, d: None, dc: None, lost: s.lost || displaced_unmerged(s), ..s } },
+        None => Fl { c: None, d: None, dc: None, ..s },
+    }
+}
+
+pub open spec fn enabled(s: Fl, a: Act) -> bool {
+    match a {
+        Act::Outside(_) => true,
+        Act::CrdtChange(_) => s.pc is Idle,
+        Act::SyncDelete => s.pc is Idle && s.c is Some && !s.own,
+        Act::Watch => s.pc is Idle && s.n > 0,
+        Act::MergeOnly => s.pc is Idle && !s.git,
+        Act::Step => !(s.pc is Idle),
+        Act::Fail => s.pc is W3,
+        Act::FailSave => s.pc is W3,
+        Act::FailRemove => s.pc is Idle && s.c is Some && !s.own && !s.git,
+        Act::Retry => s.pc is Idle && s.pend && !s.git,
+        Act::Own(b) => s.pc is Idle && (b ==> s.c is Some),
+        Act::GitStart => s.pc is Idle && !s.git,
+        Act::GitFinish => s.pc is Idle && s.git,
+    }
+}
+
+// `replace_file_keeping` + merge of the displaced bytes (`ensure_file_has_bytes`)
+pub open spec fn w3(s: Fl) -> Fl {
+    match (s.d, s.dc) {
+            (Some(x), Some(b)) if x != b =>
+                Fl { pc: Pc::W4, c: Some(merge(b, s.lc, x)), d: Some(s.lc), dc: Some(s.lc), ..s },
+            // no record (file created outside, its event not yet handled): the record becomes the
+            // empty base and `merge_disk_content` merges both creations (equal text: unchanged)
+            (Some(x), None) if x != empty_t() =>
+                Fl { pc: Pc::W4, c: if s.c == Some(x) { s.c } else { Some(merge(empty_t(), s.lc, x)) }, d: Some(s.lc), dc: Some(s.lc), ..s },
+            _ => Fl { pc: Pc::W4, d: Some(s.lc), dc: Some(s.lc), lost: s.lost || displaced_unmerged(s), ..s },
+        }
+}
+
+pub open spec fn step(s: Fl, a: Act) -> Fl {
+    match a {
+        Act::Outside(t) => Fl { d: t, n: s.n + 1, ..s },
+        Act::CrdtChange(c2) => if s.git { Fl { c: Some(c2), pend: true, ..s } }
+            else { Fl { pc: Pc::W0, c: Some(c2), wat: false, wr: true, ..s } },
+        // FileRemoval: delete only when the disk equals the record, else merge the outside bytes
+        // back (fix 3577382, `unhandled_outside_write`); `lost` checks the delete
+        Act::SyncDelete => if s.git { Fl { c: None, pend: true, ..s } }
+            else { remove_or_merge(s) },
+        Act::Watch => if s.git { Fl { n: (s.n - 1) as nat, ..s } }
+            else { Fl { pc: Pc::W0, wat: true, wr: s.d is Some, ..s } },
+        Act::MergeOnly => read_merge(s),
+        Act::Fail => Fl { pc: Pc::Idle, pend: true, ..s },
+        // the displacement is done and the disk holds the write (fix ec2eff8: the record is updated
+        // before `persist`); the handler returns the error and the write stays pending
+        Act::FailSave => { let t = w3(s); Fl { pc: Pc::Idle, pend: true, ..t } },
+        Act::Retry => if s.c is None { Fl { pend: false, ..remove_or_merge(s) } }
+            else { Fl { pc: Pc::W0, wat: false, wr: true, ..s } },
+        // `retry_removals` (also reached from `finish_git`): the file stays on disk, the shared
+        // document no longer has it, the record is kept so only a changed file counts as outside
+        Act::FailRemove => Fl { c: None, pend: true, ..s },
+        Act::Own(b) => if b { Fl { own: true, ..s } }
+            else if s.git { Fl { own: false, pend: true, ..s } }
+            else { Fl { own: false, pc: Pc::W0, wat: false, wr: true, ..s } },
+        Act::GitStart => Fl { git: true, ..s },
+        // deferred removals, then rescan, then deferred writes
+        Act::GitFinish => {
+            let s1 = if s.c is None { remove_or_merge(s) } else { s };
+            Fl { git: false, pc: Pc::W0, wat: false, wr: s.pend, ..s1 }
+        },
+        Act::Step => match s.pc {
+            Pc::W0 => {
+                let n2 = if s.wat && s.n > 0 { (s.n - 1) as nat } else { s.n };
+                let r = read_merge(s);
+                Fl { pc: if s.wr { Pc::W1 } else { Pc::Idle }, n: n2, wat: false, ..r }
+            }
+            Pc::W1 => match s.c {
+                None => Fl { pc: Pc::Idle, pend: s.pend && (s.d is Some || s.dc is Some), ..s },
+                Some(x) => Fl { pc: Pc::W2, lc: x, ..s },
+            },
+            Pc::W2 => if s.d == Some(s.lc) { Fl { pc: Pc::W4, dc: Some(s.lc), ..s } }
+                else { Fl { pc: Pc::W3, ..s } },
+            // `replace_file_keeping` + merge of the displaced bytes (`ensure_file_has_bytes`)
+            Pc::W3 => w3(s),
+            Pc::W4 => if s.c == Some(s.lc) { Fl { pc: Pc::Idle, pend: false, ..s } }
+                else { Fl { pc: Pc::W1, ..s } },
+            Pc::Idle => s,
+        },
+    }
+}
+
+pub open spec fn inv(s: Fl) -> bool {
+    &&& (!(s.pc is Idle) ==> !s.git)
+    // every outside change is covered by a queued event; the exception is the file deleted on disk
+    // while an editor has it open (shared text becomes empty, the disk file stays absent)
+    &&& ((!s.git && !(s.pc is W0) && s.n == 0) ==>
+            (s.dc == s.d || (s.own && s.d is None && s.dc is Some)))
+    &&& ((s.pc is Idle && !s.pend) ==> s.dc == s.c)
+    &&& ((s.pc is W0 && !s.wr && !s.pend) ==> s.dc == s.c)
+    &&& (s.pc is W4 ==> s.dc == Some(s.lc))
+    &&& (s.own ==> s.c is Some)
+    &&& ((s.c is None && !s.git && !s.pend) ==> s.dc is None)
+    &&& (((s.pc is W2) || (s.pc is W3) || (s.pc is W4)) ==> s.c is Some)
+    &&& !s.lost
+    &&& !s.repl
+}
+
+pub proof fn lemma_step(s: Fl, a: Act)
+    requires inv(s), enabled(s, a),
+    ensures inv(step(s, a)),
+{
+    if a is MergeOnly || a is Step || a is GitFinish {
+        match s.c { Some(x) => {}, None => {} }
+        if s.dc is Some { axiom_merge_clean(s.dc->Some_0, empty_t()); }
+        if s.dc is Some && s.d is Some { axiom_merge_clean(s.dc->Some_0, s.d->Some_0); }
+    }
+}
+
+// Quiescence: no handler running, no deferral, no queued event => the file is the shared text,
+// except an owned file deleted on disk (kept in the shared document as the empty text).
+pub proof fn theorem_idle_agreement(s: Fl)
+    requires inv(s), s.pc is Idle, !s.pend, !s.git, s.n == 0,
+    ensures s.d == s.c || (s.own && s.d is None),
+{}
+
+pub proof fn lemma_init(t: int)
+    ensures inv(Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false, repl: false }),
+{}
+
+// Non-vacuity: an editor opens the file, the file is deleted on disk, the watcher event is handled:
+// the shared text becomes empty and the disk file stays absent; closing the editor then deletes it
+// from the shared document.
+pub proof fn example_owned_deletion(t: int)
+    ensures ({
+        let s0 = Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false, repl: false };
+        let s1 = step(s0, Act::Own(true));
+        let s2 = step(s1, Act::Outside(None));
+        let s3 = step(s2, Act::Watch);
+        let s4 = step(s3, Act::Step);            // W0 (Removed event: no write)
+        let s5 = step(s4, Act::Own(false));      // editor closes: release_files
+        let s6 = step(s5, Act::Step);            // W0: file gone, nobody owns it
+        let s7 = step(s6, Act::Step);            // W1: not in the CRDT: nothing to write
+        s4.pc is Idle && s4.c == Some(empty_t()) && s4.d is None && s4.own
+        && s7.pc is Idle && s7.c is None && s7.dc is None
+    }),
+{
+    axiom_merge_clean(t, empty_t());
+}
+
+
+// Non-vacuity of failed removal: a peer's delete fails to unlink, the record is kept, the retry
+// removes the file; and the same with an outside write in between, which is merged instead.
+pub proof fn example_failed_removal(t: int, u: int)
+    requires u != t,
+    ensures ({
+        let s0 = Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false, repl: false };
+        let s1 = step(s0, Act::FailRemove);
+        let s2 = step(s1, Act::Retry);
+        let o1 = step(s1, Act::Outside(Some(u)));
+        let o2 = step(o1, Act::Retry);
+        inv(s1) && s1.d == Some(t) && s1.dc == Some(t) && s1.c is None
+        && s2.c is None && s2.d is None && s2.dc is None && !s2.pend
+        && o2.c == Some(u) && o2.d == Some(u)
+    }),
+{}
+
+
+// ---- Decisions extracted from daemon.rs, checked against the model's transitions. ----
+// corr: crates/teamtype/src/daemon.rs :: enum DisplacedAction
+/// What `ensure_file_has_bytes` does with the bytes its write displaced.
+#[derive(PartialEq, Eq, Debug)]
+enum DisplacedAction {
+    /// The bytes are what the daemon last saw (or an empty file nobody has seen): nothing to keep.
+    Ignore,
+    /// Outside bytes: merge them into the shared text.
+    Merge,
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: displaced_action
+/// Pure decision, mirrored by `w3` in the disk-coherence proof. A file without a record that
+/// holds bytes was created outside before its watcher event; an empty one may be the placeholder
+/// that opening a new file creates, and merging it would replace the shared text.
+fn displaced_action(
+    has_record: bool,
+    record_equals_displaced: bool,
+    displaced_is_empty: bool,
+) -> (r: DisplacedAction)
+    ensures
+        (r == DisplacedAction::Merge) == (!record_equals_displaced && (has_record || !displaced_is_empty)),
+{
+    if !record_equals_displaced && (has_record || !displaced_is_empty) {
+        DisplacedAction::Merge
+    } else {
+        DisplacedAction::Ignore
+    }
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: enum RemovedAction
+/// How `remove_disk_file` treats the bytes it removed.
+#[derive(PartialEq, Eq, Debug)]
+enum RemovedAction {
+    /// They are what the daemon last saw, or there is no record: the removal stands.
+    Delete,
+    /// They differ from the record: an outside write won the race; share it and write it back.
+    MergeBack,
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: removed_action
+/// Pure decision, mirrored by `remove_or_merge` in the disk-coherence proof.
+fn removed_action(has_record: bool, record_equals_removed: bool) -> (r: RemovedAction)
+    ensures
+        (r == RemovedAction::MergeBack) == (has_record && !record_equals_removed),
+{
+    if has_record && !record_equals_removed {
+        RemovedAction::MergeBack
+    } else {
+        RemovedAction::Delete
+    }
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: enum MergePlan
+/// How `merge_disk_content` folds bytes found on disk into the shared document.
+#[derive(PartialEq, Eq, Debug)]
+enum MergePlan {
+    /// The bytes are what the daemon last saw: nothing happened outside.
+    Unchanged,
+    /// The bytes equal the shared text: record them, do not merge (it would apply a change twice).
+    AdoptShared,
+    /// Transform the outside edit (against the record's base) over the shared text.
+    ThreeWay,
+    /// No base to merge against: the outside text becomes the shared text.
+    TakeOutside,
+    /// Not UTF-8: the file becomes binary.
+    Binary,
+}
+// corr-end
+
+// corr: crates/teamtype/src/daemon.rs :: merge_plan
+/// Pure decision, mirrored by `read_merge` in the disk-coherence proof.
+#[expect(clippy::fn_params_excessive_bools)]
+fn merge_plan(
+    record_equals_new: bool,
+    new_is_text: bool,
+    shared_equals_new: bool,
+    record_and_shared_are_text: bool,
+) -> (r: MergePlan)
+    ensures
+        (r == MergePlan::Unchanged) == record_equals_new,
+        (r == MergePlan::Binary) == (!record_equals_new && !new_is_text),
+        (r == MergePlan::AdoptShared) == (!record_equals_new && new_is_text && shared_equals_new),
+        (r == MergePlan::ThreeWay)
+            == (!record_equals_new && new_is_text && !shared_equals_new && record_and_shared_are_text),
+        (r == MergePlan::TakeOutside)
+            == (!record_equals_new && new_is_text && !shared_equals_new && !record_and_shared_are_text),
+{
+    if record_equals_new {
+        MergePlan::Unchanged
+    } else if !new_is_text {
+        MergePlan::Binary
+    } else if shared_equals_new {
+        MergePlan::AdoptShared
+    } else if record_and_shared_are_text {
+        MergePlan::ThreeWay
+    } else {
+        MergePlan::TakeOutside
+    }
+}
+// corr-end
+
+// The plan's flags for a text file in the model (texts are opaque ints, all text): the record
+// equals the bytes, the shared text equals them, and a record and shared text both exist.
+// `read_merge` on a file holding `t` does exactly what the plan says.
+pub proof fn lemma_read_merge_matches_merge_plan(s: Fl, t: int)
+    requires s.d == Some(t),
+    ensures
+        // Unchanged: nothing moves
+        (s.dc == Some(t)) ==> read_merge(s) == s,
+        // AdoptShared: the shared text is kept, only the record changes
+        (s.dc != Some(t) && s.c == Some(t) && s.dc is Some) ==> (read_merge(s).c == s.c && read_merge(s).dc == Some(t)),
+        // ThreeWay: record and shared text exist and differ from the bytes
+        (s.dc != Some(t) && s.c != Some(t) && s.c is Some && s.dc is Some)
+            ==> read_merge(s).c == Some(merge(s.dc->Some_0, s.c->Some_0, t)) && read_merge(s).dc == Some(t),
+        // TakeOutside: no base or no shared text, the outside text is the shared text
+        (s.dc != Some(t) && (s.c is None || s.dc is None)) ==> (read_merge(s).c == Some(t) && read_merge(s).dc == Some(t)),
+{}
+
+// the flags `ensure_file_has_bytes` passes to `displaced_action`:
+// (has record, record equals displaced bytes, displaced bytes empty)
+pub open spec fn displaced_flags(s: Fl, x: int) -> (bool, bool, bool) {
+    (s.dc is Some, s.dc == Some(x), x == empty_t())
+}
+
+// The decision `displaced_action` takes is the model's: W3 merges the displaced bytes `x` (from
+// the record's base, or from the empty base without a record) exactly when `displaced_action`
+// says Merge, and otherwise leaves the shared text alone.
+pub proof fn lemma_w3_matches_displaced_action(s: Fl, x: int)
+    requires s.d == Some(x), s.pc is W3,
+    ensures
+        ({
+            let f = displaced_flags(s, x);
+            let merge_decision = !f.1 && (f.0 || !f.2);
+            &&& merge_decision == ((s.dc is Some && s.dc != Some(x)) || (s.dc is None && x != empty_t()))
+            &&& !merge_decision ==> w3(s).c == s.c
+            &&& merge_decision ==> w3(s).dc == Some(s.lc) && w3(s).d == Some(s.lc)
+        }),
+{}
+
+// `remove_or_merge` (a peer deleted the file, the disk holds `x`) merges the disk bytes back
+// exactly when they differ from the record. The decision `removed_action` covers the case where a
+// record exists and differs (the bytes that were actually removed); without a record the
+// pre-check `unhandled_outside_write` merges (the restart path decides with `pending_recovery`).
+pub proof fn lemma_remove_matches_removed_action(s: Fl, x: int)
+    requires s.d == Some(x),
+    ensures
+        (s.dc is Some && s.dc != Some(x)) ==> remove_or_merge(s).c == Some(x),
+        (s.dc == Some(x)) ==> remove_or_merge(s).c is None && remove_or_merge(s).d is None,
+        s.dc is None ==> remove_or_merge(s).c == Some(x),
+{}
+
+} // verus!
+fn main() {}
