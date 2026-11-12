@@ -9,3 +9,14 @@ Goal: the daemon event loop (`daemon.rs`) stays coherent with several editors an
 - `disk_full.rs` (one file, full lifecycle). Adds creation/removal (`Option`s), editor ownership, failed writes, Git deferral, and ghost `lost` (an outside write displaced at W3 without being merged). Texts are opaque ints; merging is uninterpreted except `axiom_merge_clean`.
 - `tp1_id.rs`: operational-transform 0.6.1 copy; proves `axiom_merge_clean` from the crate code.
 - `negative/`: each file is a model with one fault; each must fail.
+
+## Which model step is tied to which real code (checked by `correspondence/corr.py`)
+`daemon_proof.rs` steps (all on one file; handlers atomic):
+- `bcast` and `from_editor`: `OTServer::apply_crdt_change`, `OTServer::apply_editor_operation`, `OTServer::deltas_for_editor`, `transform_through_operations` and `EditorConnection::{message_from_inside, message_from_editor}` are textual copies (goldens in `correspondence/golden/`) in `../concurrency` and `panic_wired.rs`; `DocumentActor::send_disk_edits` in `panic_wired.rs`.
+- `open` and the editor-side `Edit`: `DocumentActor::process_component_message` (Open and Edit branches) in `../editor_conn_proof`.
+- `close`/`invalidate`/`set_other`: `EditorConnection::{owns, invalidate_file}` and `DocumentActor::remove_file` (same files).
+- not checked textually: the claim that a handler is atomic (it holds `&mut self` and `handle_message` flushes `disk_edits` on every path), and the mapping of a sync message to `bcast` ops (`PatchEffect` to `file_deltas`, trusted; see `../boundary_proof`).
+
+`disk_full.rs` transitions:
+- tied by pure decisions extracted from `daemon.rs`: `merge_plan` (`read_merge`), `displaced_action` (W3 merge), `removed_action` (`remove_or_merge`), plus `pending_recovery` in `../git_persist_proof/crash/model.rs`; each has a lemma linking it to the model's step.
+- not tied textually: the step order inside `try_write_file`, `finish_git`, `retry_removals` and the watcher event bookkeeping (`n`); those are checked by the randomized tests in `daemon_race_tests.rs` and `daemon_save_tests.rs`.
