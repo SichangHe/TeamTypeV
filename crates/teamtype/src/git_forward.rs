@@ -1020,6 +1020,56 @@ mod tests {
         Ok(())
     }
 
+    /// Every way out of `execute` after Git was marked started must end the deferral: here the
+    /// working directory does not exist, so `execute` fails after `git_started` and the worker's
+    /// error path has to call `git_finished`.
+    #[tokio::test]
+    async fn a_failing_git_job_does_not_leave_file_writes_deferred() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
+        git2::Repository::init(root.path())?;
+        std::fs::write(root.path().join("file"), "initial")?;
+        let config = crate::config::AppConfig {
+            base_dir: root.path().to_path_buf(),
+            ..Default::default()
+        };
+        let host = DocumentActorHandle::new(&config, true, true, false);
+        start(host.clone())?;
+        let heads = host.git_heads().await;
+        let (input, _input_writer) = Input::new()?;
+        let (response, mut responses) = mpsc::channel(8);
+        host.git
+            .enqueue(Job {
+                request: Request {
+                    id: 987_655,
+                    args: vec![b"status".to_vec()],
+                    cwd: b"no/such/dir".to_vec(),
+                    heads: heads.clone(),
+                    terminal: None,
+                },
+                response,
+                input,
+            })
+            .await?;
+        let mut failed = false;
+        while let Some(message) = timeout(Duration::from_secs(5), responses.recv()).await? {
+            if matches!(message, Response::Error(_)) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "the job should report an error");
+        // `git_started` returns true only when no Git command is marked running.
+        timeout(Duration::from_secs(5), async {
+            while !host.git_started(heads.clone()).await.unwrap_or(false) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("git_running stayed set after the job failed")?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_panicking_git_worker_does_not_leave_file_writes_deferred() -> Result<()> {
         let root = tempfile::tempdir()?;
