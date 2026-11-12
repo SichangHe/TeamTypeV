@@ -29,6 +29,7 @@ pub struct Fl {
     pub pend: bool,      // a write or removal is deferred (Git) or failed; rescan/finish retries
     pub own: bool,       // some editor has the file open (`!DocumentActor::owns`)
     pub git: bool,       // git_running
+    pub repl: bool,      // ghost: the shared text was replaced by outside bytes created concurrently with it
     pub lost: bool,      // ghost: a write displaced outside bytes (differing from the record, not the
                          // empty file without a record) without merging them into the shared text
 }
@@ -105,10 +106,10 @@ pub open spec fn w3(s: Fl) -> Fl {
     match (s.d, s.dc) {
             (Some(x), Some(b)) if x != b =>
                 Fl { pc: Pc::W4, c: Some(merge(b, s.lc, x)), d: Some(s.lc), dc: Some(s.lc), ..s },
-            // no record (file created outside, its event not yet handled): `merge_disk_content`
-            // without a base keeps the outside bytes (fix on branch tvd-daemon-proof)
+            // no record (file created outside, its event not yet handled): the record becomes the
+            // empty base and `merge_disk_content` merges both creations (equal text: unchanged)
             (Some(x), None) if x != empty_t() =>
-                Fl { pc: Pc::W4, c: if s.c == Some(x) { s.c } else { Some(x) }, d: Some(s.lc), dc: Some(s.lc), ..s },
+                Fl { pc: Pc::W4, c: if s.c == Some(x) { s.c } else { Some(merge(empty_t(), s.lc, x)) }, d: Some(s.lc), dc: Some(s.lc), ..s },
             _ => Fl { pc: Pc::W4, d: Some(s.lc), dc: Some(s.lc), lost: s.lost || displaced_unmerged(s), ..s },
         }
 }
@@ -177,6 +178,7 @@ pub open spec fn inv(s: Fl) -> bool {
     &&& ((s.c is None && !s.git && !s.pend) ==> s.dc is None)
     &&& (((s.pc is W2) || (s.pc is W3) || (s.pc is W4)) ==> s.c is Some)
     &&& !s.lost
+    &&& !s.repl
 }
 
 pub proof fn lemma_step(s: Fl, a: Act)
@@ -198,7 +200,7 @@ pub proof fn theorem_idle_agreement(s: Fl)
 {}
 
 pub proof fn lemma_init(t: int)
-    ensures inv(Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false }),
+    ensures inv(Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false, repl: false }),
 {}
 
 // Non-vacuity: an editor opens the file, the file is deleted on disk, the watcher event is handled:
@@ -206,7 +208,7 @@ pub proof fn lemma_init(t: int)
 // from the shared document.
 pub proof fn example_owned_deletion(t: int)
     ensures ({
-        let s0 = Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false };
+        let s0 = Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false, repl: false };
         let s1 = step(s0, Act::Own(true));
         let s2 = step(s1, Act::Outside(None));
         let s3 = step(s2, Act::Watch);
@@ -220,6 +222,23 @@ pub proof fn example_owned_deletion(t: int)
 {
     axiom_merge_clean(t, empty_t());
 }
+
+
+// Non-vacuity of failed removal: a peer's delete fails to unlink, the record is kept, the retry
+// removes the file; and the same with an outside write in between, which is merged instead.
+pub proof fn example_failed_removal(t: int, u: int)
+    requires u != t,
+    ensures ({
+        let s0 = Fl { pc: Pc::Idle, c: Some(t), dc: Some(t), d: Some(t), n: 0, lc: t, wat: false, wr: false, pend: false, own: false, git: false, lost: false, repl: false };
+        let s1 = step(s0, Act::FailRemove);
+        let s2 = step(s1, Act::Retry);
+        let o1 = step(s1, Act::Outside(Some(u)));
+        let o2 = step(o1, Act::Retry);
+        inv(s1) && s1.d == Some(t) && s1.dc == Some(t) && s1.c is None
+        && s2.c is None && s2.d is None && s2.dc is None && !s2.pend
+        && o2.c == Some(u) && o2.d == Some(u)
+    }),
+{}
 
 } // verus!
 fn main() {}

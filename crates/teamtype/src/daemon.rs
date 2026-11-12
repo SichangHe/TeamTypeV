@@ -1356,6 +1356,10 @@ impl DocumentActor {
             // file without a record holds nothing to lose (it may be the placeholder that
             // opening a new file creates), and merging it would replace the shared text.
             if outside && (self.disk_content.contains_key(file_path) || !displaced.is_empty()) {
+                // Without a record the file did not exist when the daemon last looked, so the
+                // outside file and the shared text were both created from nothing: merge them
+                // from the empty base instead of letting the outside text replace the shared one.
+                self.disk_content.entry(file_path.clone()).or_default();
                 self.merge_disk_content(file_path, displaced);
             }
             if outside && self.persist {

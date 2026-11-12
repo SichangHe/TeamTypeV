@@ -931,6 +931,7 @@ fn outside_created_file_displaced_before_its_watcher_event_is_merged() {
             other => panic!("unexpected {other:?}"),
         };
         assert!(shared.contains("local"), "outside text lost: {shared:?}");
+        assert!(shared.contains("peer"), "shared text replaced by the outside file: {shared:?}");
         assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap(), shared);
     }
 }
