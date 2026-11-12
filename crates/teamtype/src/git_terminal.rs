@@ -24,7 +24,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::signal::unix::{Signal as SignalStream, SignalKind, signal};
 
-use super::{INPUT_CHUNK, InputReader, Job, ProcessGroup, Response, send_output, write_frame};
+use super::{INPUT_CHUNK, InputReader, Job, Output, ProcessGroup, Response, write_frame};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Terminal {
@@ -258,7 +258,8 @@ pub(super) async fn execute(
     let pty = AsyncFd::new(Pty(fd))?;
     let mut input = job.input.reader().await?;
     let mut controls = job.input.reader().await?;
-    send_output(&job.response, Response::Started).await?;
+    let mut sink = Output::new(&job.response);
+    sink.send(Response::Started).await?;
     let mut output = vec![0; INPUT_CHUNK];
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     let mut status: Option<std::process::ExitStatus> = None;
@@ -291,7 +292,7 @@ pub(super) async fn execute(
                         Err(_) => continue,
                     };
                     eof = count == 0;
-                    if !eof { send_output(&job.response, Response::Stdout(output[..count].to_vec())).await?; }
+                    if !eof { sink.send(Response::Stdout(output[..count].to_vec())).await?; }
                 }
                 ready = pty.writable(), if input_open && written < writing.len() => {
                     let mut ready = ready?;

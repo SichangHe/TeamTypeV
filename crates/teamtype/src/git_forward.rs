@@ -26,6 +26,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 
 use crate::daemon::DocumentActorHandle;
+use tracing::warn;
 
 #[path = "git_terminal.rs"]
 mod terminal;
@@ -39,6 +40,13 @@ static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const OUTPUT_TIMEOUT: Duration = Duration::from_mins(3);
+/// How long Git output may wait for a client that does not read before the output is dropped.
+/// Git keeps running meanwhile: a stuck client must not keep file writes and other clients' Git
+/// commands deferred.
+#[cfg(not(test))]
+const STALL_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const STALL_TIMEOUT: Duration = Duration::from_millis(300);
 pub(crate) const INPUT_CHUNK: usize = 16384;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -507,8 +515,8 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     if let Some(terminal) = &job.request.terminal {
         let code = terminal::execute(job, git_program()?, &root, &cwd, terminal).await?;
         handle.git_finished().await?;
-        job.response
-            .send(Response::Exit(code, handle.git_heads().await))
+        Output::new(&job.response)
+            .finish(Response::Exit(code, handle.git_heads().await))
             .await?;
         return Ok(());
     }
@@ -552,6 +560,7 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     });
     let mut stdout = child.stdout.take().context("Missing Git stdout")?;
     let mut stderr = child.stderr.take().context("Missing Git stderr")?;
+    let mut output = Output::new(&job.response);
     let mut out = [0; 16384];
     let mut err = [0; 16384];
     let (mut out_open, mut err_open) = (true, true);
@@ -568,14 +577,14 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
                         let count = count?;
                         out_open = count != 0;
                         if out_open {
-                            send_output(&job.response, Response::Stdout(out[..count].to_vec())).await?;
+                            output.send(Response::Stdout(out[..count].to_vec())).await?;
                         }
                     }
                     count = stderr.read(&mut err), if err_open => {
                         let count = count?;
                         err_open = count != 0;
                         if err_open {
-                            send_output(&job.response, Response::Stderr(err[..count].to_vec())).await?;
+                            output.send(Response::Stderr(err[..count].to_vec())).await?;
                         }
                     }
                 }
@@ -608,8 +617,8 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     let status = result?;
     handle.git_finished().await?;
     let heads = handle.git_heads().await;
-    job.response
-        .send(Response::Exit(
+    output
+        .finish(Response::Exit(
             status
                 .code()
                 .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)),
@@ -809,11 +818,47 @@ fn group_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
-async fn send_output(sender: &mpsc::Sender<Response>, response: Response) -> Result<()> {
-    timeout(OUTPUT_TIMEOUT, sender.send(response))
-        .await
-        .context("Git output was not consumed for three minutes")??;
-    Ok(())
+/// Sends Git output to one client without ever blocking Git on it for long. A client that does
+/// not read for `STALL_TIMEOUT` loses output from then on (it gets a notice if it reads again),
+/// and Git runs to completion.
+pub(crate) struct Output<'a> {
+    sender: &'a mpsc::Sender<Response>,
+    dropped: bool,
+}
+
+impl<'a> Output<'a> {
+    pub(crate) fn new(sender: &'a mpsc::Sender<Response>) -> Self {
+        Self {
+            sender,
+            dropped: false,
+        }
+    }
+
+    pub(crate) async fn send(&mut self, response: Response) -> Result<()> {
+        if self.dropped {
+            return match self.sender.try_send(response) {
+                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+                Err(mpsc::error::TrySendError::Closed(_)) => bail!("Git client disconnected"),
+            };
+        }
+        if let Ok(result) = timeout(STALL_TIMEOUT, self.sender.send(response)).await {
+            Ok(result?)
+        } else {
+            warn!("A Git client stopped reading output; dropping its output so Git can finish.");
+            self.dropped = true;
+            Ok(())
+        }
+    }
+
+    /// Sends the final message, preceded by a notice if output was dropped.
+    pub(crate) async fn finish(&mut self, response: Response) -> Result<()> {
+        if self.dropped {
+            let _ = self.sender.try_send(Response::Stderr(
+                b"Warning: output was dropped because the client stopped reading it\n".to_vec(),
+            ));
+        }
+        self.send(response).await
+    }
 }
 
 #[cfg(test)]
@@ -1017,6 +1062,55 @@ mod tests {
         .await;
         actor.abort();
         result??;
+        Ok(())
+    }
+
+    /// A client that stays connected but never reads Git's output must not keep Git running, and
+    /// with it every file write and other client's command, deferred.
+    #[tokio::test]
+    async fn a_client_that_stops_reading_git_output_does_not_stall_git() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
+        let repository = git2::Repository::init(root.path())?;
+        std::fs::write(root.path().join("file"), "initial")?;
+        // Output far larger than the response channel and the pipe buffers hold.
+        let blob = repository.blob(&vec![b'x'; 8 * 1024 * 1024])?;
+        let config = crate::config::AppConfig {
+            base_dir: root.path().to_path_buf(),
+            ..Default::default()
+        };
+        let host = DocumentActorHandle::new(&config, true, true, false);
+        start(host.clone())?;
+        let heads = host.git_heads().await;
+        let (input, _input_writer) = Input::new()?;
+        let (response, _unread_responses) = mpsc::channel(1);
+        host.git
+            .enqueue(Job {
+                request: Request {
+                    id: 987_656,
+                    args: vec![
+                        b"cat-file".to_vec(),
+                        b"blob".to_vec(),
+                        blob.to_string().into_bytes(),
+                    ],
+                    cwd: vec![],
+                    heads: heads.clone(),
+                    terminal: None,
+                },
+                response,
+                input,
+            })
+            .await?;
+        // The channel holds one message and the client never reads: once the output is dropped
+        // Git finishes and the deferral ends. (`git_started` is true only when no Git runs.)
+        timeout(Duration::from_secs(20), async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            while !host.git_started(heads.clone()).await.unwrap_or(false) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .context("Git stayed running behind a client that does not read")?;
         Ok(())
     }
 
