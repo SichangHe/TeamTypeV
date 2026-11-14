@@ -681,7 +681,7 @@ impl EditorTextDelta {
                             start: Position::try_from_offset(position, content)?,
                             end: Position::try_from_offset(position, content)?,
                         },
-                        replacement: s.clone(),
+                        replacement: s,
                     });
                 }
             }

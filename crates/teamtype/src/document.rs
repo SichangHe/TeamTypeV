@@ -293,7 +293,7 @@ impl Document {
                 let mut path = put.path.clone();
                 path.push((put.obj.clone(), Prop::Map(key.clone())));
                 Some(Patch {
-                    obj: now.clone(),
+                    obj: now,
                     path,
                     action: PatchAction::SpliceText {
                         index: 0,
@@ -1220,7 +1220,7 @@ mod tests {
             variants.push(shuffled);
             // Random-sized batches of a shuffled order.
             let mut chunked = Document::default();
-            let mut order = changes.clone();
+            let mut order = changes;
             order.shuffle(&mut rng);
             while !order.is_empty() {
                 let n = rng.random_range(1..=order.len());

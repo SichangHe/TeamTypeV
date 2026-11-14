@@ -58,7 +58,7 @@
 -                        start: Position::try_from_offset(position, content)?,
 -                        end: Position::try_from_offset(position, content)?,
 -                    },
--                    replacement: s.clone(),
+-                    replacement: s,
 -                });
 +                let start = match Position::try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };
 +                let end = match Position::try_from_offset(position, content) { Ok(p) => p, Err(e) => return Err(e) };

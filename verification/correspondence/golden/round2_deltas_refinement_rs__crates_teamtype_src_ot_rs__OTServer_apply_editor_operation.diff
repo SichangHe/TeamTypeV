@@ -96,7 +96,7 @@
 -        );
 -        self.last_confirmed_editor_content = Self::force_apply(
 -            &self.last_confirmed_editor_content,
--            confirmed_editor_op.clone(),
+-            confirmed_editor_op,
 -        );
 +    let rev_delta = match try_from_rev_ed_delta(rev_editor_delta, self.last_confirmed_editor_content.as_str()) {
 +        Ok(d) => d,

@@ -45,16 +45,6 @@
 -        warn!(
 -            "Editor is {} operations behind, it might have trouble catching up?",
 -            daemon_operations_to_transform
--        );
--    }
--    let confirmed_queue = self.editor_queue.drain(..seen_operations);
--    for confirmed_editor_op in confirmed_queue {
--        debug!(
--            "Applying confirmed operation {:#?} to last confirmed editor content {:?}",
--            &confirmed_editor_op, &self.last_confirmed_editor_content
--        );
--        self.last_confirmed_editor_content = Self::force_apply(
--            &self.last_confirmed_editor_content,
 +    let ghost q0 = ops(self.editor_queue@);
 +    let ghost l0 = self.last_confirmed_editor_content@;
 +    let confirmed_queue = drain_front(&mut self.editor_queue, seen_operations);
@@ -76,24 +66,23 @@
 +        }
 +        self.last_confirmed_editor_content = force_apply(
 +            self.last_confirmed_editor_content.as_str(),
-             confirmed_editor_op.clone(),
++            confirmed_editor_op.clone(),
          );
 +        i += 1;
      }
--    let rev_delta = RevisionedTextDelta::try_from_rev_ed_delta(
+-    let confirmed_queue = self.editor_queue.drain(..seen_operations);
+-    for confirmed_editor_op in confirmed_queue {
+-        debug!(
+-            "Applying confirmed operation {:#?} to last confirmed editor content {:?}",
+-            &confirmed_editor_op, &self.last_confirmed_editor_content
+-        );
+-        self.last_confirmed_editor_content = Self::force_apply(
+-            &self.last_confirmed_editor_content,
+-            confirmed_editor_op,
+-        );
 +    proof { lemma_fold_split(l0, q0, seen_operations as int); }
 +    let rev_delta = match try_from_rev_ed_delta(
-         rev_editor_delta,
--        &self.last_confirmed_editor_content,
--    )
--    .context(
--        "The edit received from the editor has a range that doesn't fit the current content",
--    )?;
--    op_seq = rev_delta.delta.into();
--    debug!(
--        "Applying incoming editor operation {:#?} to last confirmed editor content {:?}",
--        &op_seq, &self.last_confirmed_editor_content
--    );
++        rev_editor_delta,
 +        self.last_confirmed_editor_content.as_str(),
 +    ) {
 +        Ok(x) => x,
@@ -108,14 +97,27 @@
 +    op_seq = op_from_delta(rev_delta.delta);
 +    let ghost l1 = self.last_confirmed_editor_content@;
 +    let ghost e = op_seq@;
-     self.last_confirmed_editor_content =
--        Self::force_apply(&self.last_confirmed_editor_content, op_seq.clone());
--    (op_seq, self.editor_queue) = transform_through_operations(op_seq, &self.editor_queue);
++    self.last_confirmed_editor_content =
 +        force_apply(self.last_confirmed_editor_content.as_str(), op_seq.clone());
 +    let (op_seq2, q2) = transform_through_operations(op_seq, &self.editor_queue);
 +    proof {
 +        assert(ops(self.editor_queue@) =~= q0.subrange(seen_operations as int, q0.len() as int));
-+    }
+     }
+-    let rev_delta = RevisionedTextDelta::try_from_rev_ed_delta(
+-        rev_editor_delta,
+-        &self.last_confirmed_editor_content,
+-    )
+-    .context(
+-        "The edit received from the editor has a range that doesn't fit the current content",
+-    )?;
+-    op_seq = rev_delta.delta.into();
+-    debug!(
+-        "Applying incoming editor operation {:#?} to last confirmed editor content {:?}",
+-        &op_seq, &self.last_confirmed_editor_content
+-    );
+-    self.last_confirmed_editor_content =
+-        Self::force_apply(&self.last_confirmed_editor_content, op_seq.clone());
+-    (op_seq, self.editor_queue) = transform_through_operations(op_seq, &self.editor_queue);
 +    op_seq = op_seq2;
 +    self.editor_queue = q2;
      self.operations.push(op_seq.clone());

@@ -14,7 +14,6 @@ license.workspace = true
 readme = "README.md"
 include = ["*.rs", "*.toml", "src/initial_automerge_doc.bin", "src/git_activate.*"]
 documentation = "https://github.com/SichangHe/TeamTypeV"
-homepage.workspace = true
 repository.workspace = true
 keywords = [
     "collaboration",
