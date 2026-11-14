@@ -5,7 +5,7 @@ fn git_completion_preserves_files_created_in_shared_history() -> Result<()> {
     let dir = setup_filesystem_for_testing();
     let mut actor = DocumentActor::setup_for_testing(&dir);
     let path = RelativePath::new("new-peer-file");
-    assert!(actor.start_git(&[])?);
+    assert!(actor.start_git(&[], true)?);
     actor.crdt_doc.update_text("created during Git", &path);
     actor.write_file(&path);
     assert!(!dir.path().join("new-peer-file").exists());
@@ -18,12 +18,42 @@ fn git_completion_preserves_files_created_in_shared_history() -> Result<()> {
     Ok(())
 }
 
+// A forwarded Git command that only reads files (a diff in a pager can stay open for hours) must
+// not hold back writes of other people's edits: with it running, the shared file was stale on disk
+// and every `agent-edit` found the daemon's text different from the disk's and was rejected.
+#[test]
+fn a_read_only_git_command_does_not_defer_file_writes() -> Result<()> {
+    let dir = setup_filesystem_for_testing();
+    let mut actor = DocumentActor::setup_for_testing(&dir);
+    let path = RelativePath::new("shared-file");
+    actor.crdt_doc.update_text("first", &path);
+    actor.write_file(&path);
+    assert!(actor.start_git(&[], false)?);
+    actor.crdt_doc.update_text("first and a peer's edit", &path);
+    actor.write_file(&path);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("shared-file"))?,
+        "first and a peer's edit",
+        "the write waited for a command that only reads"
+    );
+    // A command that writes files still defers.
+    actor.finish_git()?;
+    assert!(actor.start_git(&[], true)?);
+    actor.crdt_doc.update_text("changed while Git writes", &path);
+    actor.write_file(&path);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("shared-file"))?,
+        "first and a peer's edit"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn opening_missing_file_during_git_requires_retry_without_creating_it() -> Result<()> {
     let dir = setup_filesystem_for_testing();
     let mut actor = DocumentActor::setup_for_testing(&dir);
     let (_uri, _reader) = open_test_editor(&mut actor, &RelativePath::new("file1")).await;
-    assert!(actor.start_git(&[])?);
+    assert!(actor.start_git(&[], true)?);
     let path = RelativePath::new("new-file");
     let request = EditorProtocolMessageFromEditor::Open {
         uri: actor
@@ -546,7 +576,7 @@ fn finish_git_writes_every_deferred_edit_and_clears_the_records() -> Result<()> 
     let dir = setup_filesystem_for_testing();
     let mut actor = actor_with_pending_peer_edit(&dir)?;
     let path = RelativePath::new("shared");
-    assert!(actor.start_git(&[])?);
+    assert!(actor.start_git(&[], true)?);
     actor.write_file(&path);
     assert_eq!(std::fs::read(dir.path().join("shared"))?, b"line1\n");
     actor.finish_git()?;
@@ -684,7 +714,7 @@ fn kill_after_scanning_git_changes_before_the_pending_write_does_not_apply_them_
     let dir = setup_filesystem_for_testing();
     let path = RelativePath::new("shared");
     let mut actor = actor_with_pending_peer_edit(&dir)?;
-    assert!(actor.start_git(&[])?);
+    assert!(actor.start_git(&[], true)?);
     // Git rewrites the file while the peer's edit waits; Git finishes and the daemon scans it, then
     // saves the document (the persister) before the deferred write.
     std::fs::write(dir.path().join("shared"), "git\nline1\n")?;

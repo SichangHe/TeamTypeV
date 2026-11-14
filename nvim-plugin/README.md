@@ -34,6 +34,10 @@ mkdir -p "$HOME/.local/share/nvim/site/pack/plugins/start"
 ln -s "$HOME/TeamTypeV/nvim-plugin" "$HOME/.local/share/nvim/site/pack/plugins/start/teamtypev"
 ```
 
+### Git inside Neovim
+
+To use Git through TeamTypeV from plugins such as Diffview.nvim, run `source .teamtypev/activate` in the shared directory's shell (fish: `source .teamtypev/activate.fish`) and start Neovim from that shell, so Neovim's subprocesses find the forwarding `git`. See [forwarded Git commands](../book/src/git-integration-synchronized.md).
+
 ### Plugin managers
 
 Point your plugin manager at the `nvim-plugin` directory in your TeamTypeV checkout. The upstream `teamtype/teamtype-nvim` repository does not contain TeamTypeV's changes.

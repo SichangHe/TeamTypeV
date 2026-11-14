@@ -114,6 +114,8 @@ pub enum DocMessage {
     },
     GitStarted {
         heads: Vec<ChangeHash>,
+        /// False for commands that only read the files: nothing is deferred while they run.
+        defer: bool,
         response_tx: oneshot::Sender<Result<bool>>,
     },
     GitFinished {
@@ -379,8 +381,12 @@ impl DocumentActor {
                 };
                 let _ = response_tx.send(result);
             }
-            DocMessage::GitStarted { heads, response_tx } => {
-                let result = self.start_git(&heads);
+            DocMessage::GitStarted {
+                heads,
+                defer,
+                response_tx,
+            } => {
+                let result = self.start_git(&heads, defer);
                 let _ = response_tx.send(result);
             }
             DocMessage::GitFinished { response_tx } => {
@@ -1628,12 +1634,14 @@ impl DocumentActor {
     }
 
     /// Defers shared-file I/O at the same actor boundary that flushes pre-command edits.
-    fn start_git(&mut self, heads: &[ChangeHash]) -> Result<bool> {
+    fn start_git(&mut self, heads: &[ChangeHash], defer: bool) -> Result<bool> {
         if self.git_running || !self.crdt_doc.has_changes(heads) {
             return Ok(false);
         }
         self.flush_git_files()?;
-        self.git_running = true;
+        // A command that only reads the files (a diff in a pager can stay open for hours) must
+        // not hold back file writes, rescans and other people's commands.
+        self.git_running = defer;
         Ok(true)
     }
 
@@ -2031,10 +2039,14 @@ impl DocumentActorHandle {
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Document actor stopped")))
     }
 
-    pub async fn git_started(&self, heads: Vec<ChangeHash>) -> Result<bool> {
+    pub async fn git_started(&self, heads: Vec<ChangeHash>, defer: bool) -> Result<bool> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.send_message(DocMessage::GitStarted { heads, response_tx })
-            .await;
+        self.send_message(DocMessage::GitStarted {
+            heads,
+            defer,
+            response_tx,
+        })
+        .await;
         response_rx
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Document actor stopped")))

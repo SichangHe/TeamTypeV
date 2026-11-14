@@ -20,6 +20,8 @@ git commit
 deactivate
 ```
 
+Neovim: run `source .teamtypev/activate` in the shell, then start `nvim` from that shell. Plugins such as Diffview.nvim and gitsigns run `git` as a subprocess and use the PATH Neovim started with; a Neovim started earlier, from a launcher, or from another terminal runs the system Git. Diffview.nvim asks Git for the repository's top-level directory and starts its later commands there; forwarded `rev-parse --show-toplevel`, `--git-dir`, `--absolute-git-dir`, and `--git-common-dir` report the directory of the machine that runs them, translated to your shared directory. Diffview also passes `-c gc.auto=0 -c core.quotePath=false`; these two settings are accepted and any other `-c` is refused. Plugins that read `.git` directly, such as libgit2-based ones, cannot use forwarding.
+
 In fish, use `source .teamtypev/activate.fish`. Activation puts `.teamtypev/bin/git` first on PATH; programs launched from that shell inherit it. Repeated activation is safe. `deactivate` restores the previous PATH and any previous `deactivate` function. Restart applications that were already running. Activation files contain an absolute path; restart the joiner after moving its directory.
 
 For automatic activation with direnv, create `.envrc` on the joiner containing:
@@ -31,6 +33,8 @@ source .teamtypev/activate
 Run `direnv allow`. Direnv evaluates this in bash and exports the changed PATH to bash, zsh, or fish. It restores the environment on leaving the directory; shell functions such as `deactivate` are not exported.
 
 The wrapper finds the shared root from the current directory. It applies throughout the activated shell; outside the shared directory, run `deactivate` to use ordinary Git. A preexisting joiner's `.git` is left untouched; Git without the wrapper still uses that local repository. Tools that read `.git` directly, including libgit2-based integrations, cannot treat the joiner's files as a local repository. Tools that invoke the Git executable can use forwarding through the inherited PATH.
+
+Commands that only read files (`diff`, `log`, `show`, `status`, `blame`, `ls-files`, `ls-tree`, `rev-parse`, `rev-list`, `cat-file`, `shortlog`, `describe`, `grep`, `whatchanged`, without options that write a file or run a program) do not defer file writes, so a diff left open in a pager does not stop others' edits from reaching the files. Other commands defer them until they end.
 
 The sharer runs forwarded commands one at a time. Each command waits until that joiner's earlier edits have reached the sharer's document and files. Changes must have been sent by the editor plugin; before Git runs, the sharer flushes open buffers to disk. You can keep typing while Git runs. The daemon collects those edits and merges them with Git's completed changes before writing files again. On the sharer, saving or opening a file that does not exist yet reports a retry message during the command; retry after Git finishes. Existing files can still be opened. Changes made by other participants can also be included. Staging is shared: coordinate `add` and `commit` if several people are preparing commits.
 

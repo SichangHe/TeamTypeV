@@ -441,15 +441,16 @@ fn unchanged_edit_updates_snapshot_without_daemon() {
     );
 }
 
-#[test]
-fn edit_refuses_daemon_content_that_changed_before_barrier() {
-    let dir = tempfile::tempdir().expect("temporary project");
-    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata directory");
-    std::fs::write(dir.path().join("note.txt"), "disk content\n").expect("initial file");
-    successful(agent(dir.path(), &["agent-read", "--file", "note.txt"]));
-    let listener = UnixListener::bind(dir.path().join(".teamtypev/socket")).expect("daemon socket");
+/// A fake daemon that holds `daemon_text` while the disk has "disk content\n": it answers the
+/// agent's open with a catch-up edit, then follows the protocol. Returns the lines the agent sent
+/// after the barrier.
+fn fake_daemon_with_other_text(
+    dir: &Path,
+    catch_up: serde_json::Value,
+) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+    let listener = UnixListener::bind(dir.join(".teamtypev/socket")).expect("daemon socket");
     listener.set_nonblocking(true).expect("nonblocking accept");
-    let server = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut socket = loop {
             match listener.accept() {
@@ -468,22 +469,91 @@ fn edit_refuses_daemon_content_that_changed_before_barrier() {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("socket timeout");
         let mut reader = BufReader::new(socket.try_clone().expect("read socket"));
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("open request");
-        let open: serde_json::Value = serde_json::from_str(&line).expect("open JSON");
+        let mut read = || {
+            let mut line = String::new();
+            let count = reader.read_line(&mut line).expect("agent line");
+            (count != 0)
+                .then(|| serde_json::from_str::<serde_json::Value>(&line).expect("agent JSON"))
+        };
+        let open = read().expect("open request");
         assert_eq!(open["method"], "open");
         assert_eq!(open["params"]["content"], "disk content\n");
-        assert_eq!(open["params"]["savesFile"], false);
-        line.clear();
-        reader.read_line(&mut line).expect("barrier request");
-        let barrier: serde_json::Value = serde_json::from_str(&line).expect("barrier JSON");
+        let barrier = read().expect("barrier request");
         assert_eq!(barrier["method"], "cursor");
-        assert_eq!(barrier["params"]["ranges"], serde_json::json!([]));
-        let changed = serde_json::json!({"jsonrpc": "2.0", "method": "edit", "params": {"uri": open["params"]["uri"], "revision": 0, "delta": []}});
-        writeln!(socket, "{changed}").expect("unsaved edit notification");
-        line.clear();
-        assert_eq!(reader.read_line(&mut line).expect("agent disconnects"), 0);
-    });
+        let mut catch_up = catch_up;
+        catch_up["params"]["uri"] = open["params"]["uri"].clone();
+        writeln!(socket, "{catch_up}").expect("catch-up edit");
+        writeln!(socket, r#"{{"jsonrpc":"2.0","id":2,"result":"success"}}"#)
+            .expect("barrier response");
+        let mut after = vec![];
+        while let Some(message) = read() {
+            let id = message["id"].clone();
+            after.push(message);
+            writeln!(
+                socket,
+                r#"{{"jsonrpc":"2.0","id":{id},"result":"success"}}"#
+            )
+            .expect("response");
+        }
+        after
+    })
+}
+
+fn insert_at_line_start(text: &str) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "method": "edit", "params": {"uri": "", "revision": 0, "delta": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "replacement": text}]}})
+}
+
+/// The daemon holds other text than the disk (a participant typed, or a Git command defers writes):
+/// the edit is computed on the daemon's text and sent as an editor that has seen the catch-up
+/// edit, so nothing the daemon holds is overwritten and the edit is not rejected.
+#[test]
+fn edit_applies_on_top_of_the_daemons_other_text() {
+    let dir = tempfile::tempdir().expect("temporary project");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata directory");
+    std::fs::write(dir.path().join("note.txt"), "disk content\n").expect("initial file");
+    successful(agent(dir.path(), &["agent-read", "--file", "note.txt"]));
+    let server = fake_daemon_with_other_text(dir.path(), insert_at_line_start("typed "));
+    let output = agent(
+        dir.path(),
+        &[
+            "agent-edit",
+            "--file",
+            "note.txt",
+            "--old",
+            "disk",
+            "--new",
+            "replacement",
+        ],
+    );
+    let after = server.join().expect("protocol assertions");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(after[0]["method"], "edit");
+    assert_eq!(
+        after[0]["params"]["revision"], 1,
+        "the agent has seen the catch-up edit"
+    );
+    // The daemon's text is "typed disk content\n"; "disk" starts at column 6.
+    assert_eq!(
+        after[0]["params"]["delta"][0]["range"]["start"]["character"],
+        6
+    );
+    assert_eq!(after[0]["params"]["delta"][0]["replacement"], "replacement");
+    assert_eq!(after[1]["method"], "close");
+}
+
+#[test]
+fn edit_says_which_text_differs_when_the_target_is_gone_from_the_daemons_text() {
+    let dir = tempfile::tempdir().expect("temporary project");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata directory");
+    std::fs::write(dir.path().join("note.txt"), "disk content\n").expect("initial file");
+    successful(agent(dir.path(), &["agent-read", "--file", "note.txt"]));
+    // The participant replaced "disk" with "peer".
+    let catch_up = serde_json::json!({"jsonrpc": "2.0", "method": "edit", "params": {"uri": "", "revision": 0, "delta": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}}, "replacement": "peer"}]}});
+    let server = fake_daemon_with_other_text(dir.path(), catch_up);
     let output = agent(
         dir.path(),
         &[
@@ -498,9 +568,18 @@ fn edit_refuses_daemon_content_that_changed_before_barrier() {
     );
     server.join().expect("protocol assertions");
     assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("file changed while editing, or an editor has unsaved changes")
+        stderr.contains("the text to replace is not in the file"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the daemon's text of the file differs from the disk's, first difference at line 1, column 1"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Git command forwarded through TeamTypeV"),
+        "{stderr}"
     );
     assert_eq!(
         std::fs::read_to_string(dir.path().join("note.txt")).expect("unchanged disk content"),

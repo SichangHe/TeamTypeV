@@ -97,17 +97,17 @@ pub async fn run(directory: &Path, file: &Path, old: &str, new: &str) -> Result<
     let expected = String::from_utf8(teamtypev::sandbox::read_file(directory, &path)?)
         .with_context(|| format!("Could not read {}", path.display()))?;
     let replacement = replace_once(&expected, old, new)?;
-    let Some(op) = single_op(&expected, &replacement)? else {
+    if single_op(&expected, &replacement)?.is_none() {
         return Ok(replacement);
-    };
+    }
     let uri = AbsolutePath::try_from(path)?.to_file_uri().to_string();
-    tokio::time::timeout(TIMEOUT, exchange(directory, uri, expected, op))
+    tokio::time::timeout(TIMEOUT, exchange(directory, uri, expected, old, new))
         .await
         .context("Daemon did not answer the agent edit in time")??;
     Ok(replacement)
 }
 
-async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTextOp) -> Result<()> {
+async fn exchange(directory: &Path, uri: String, disk: String, old: &str, new: &str) -> Result<()> {
     let (mut from_daemon, mut to_daemon) = UnixJSONRPCForwarder {}
         .connect_stream(directory)
         .await
@@ -117,7 +117,7 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
             OPEN_ID,
             EditorProtocolMessageFromEditor::Open {
                 uri: uri.clone(),
-                content: expected,
+                content: disk.clone(),
                 saves_file: false,
                 daemon_writes: true,
             },
@@ -137,47 +137,126 @@ async fn exchange(directory: &Path, uri: String, expected: String, op: EditorTex
         };
         to_daemon.send(serde_json::to_string(&request)?).await?;
     }
-    let mut edit = Some(IncomingMessage::Request {
-        id: EDIT_ID.into(),
-        payload: EditorProtocolMessageFromEditor::Edit {
-            uri: uri.clone(),
-            revision: 0,
-            delta: EditorTextDelta(vec![op]),
-        },
-    });
+    // The text the daemon holds, as this connection learns it: the disk's text plus every edit
+    // the daemon sent before the barrier. It differs from the disk while file writes wait (for
+    // example during a forwarded Git command) or when another participant edits at this moment.
+    // The edit is computed against that text and sent as an editor that has seen those edits, so
+    // nothing the daemon holds is overwritten.
+    let mut daemon_text = disk.clone();
+    let mut seen = 0;
+    let mut edit_sent = false;
+    let close = |uri: &str, id: usize| {
+        serde_json::to_string(&IncomingMessage::Request {
+            id: id.into(),
+            payload: EditorProtocolMessageFromEditor::Close {
+                uri: uri.to_owned(),
+            },
+        })
+    };
     while let Some(line) = from_daemon.next().await {
         let message: Value = serde_json::from_str(&line?)?;
         if let Some(error) = message.get("error") {
             bail!("Agent edit rejected: {error}");
         }
-        if message["method"] == "edit" && message["params"]["uri"] == uri.as_str() && edit.is_some()
-        {
-            bail!(
-                "Agent edit rejected: the file changed while editing, or an editor has unsaved changes; try again"
-            );
+        if message["method"] == "edit" && message["params"]["uri"] == uri.as_str() && !edit_sent {
+            let delta =
+                serde_json::from_value::<EditorTextDelta>(message["params"]["delta"].clone())
+                    .context("Agent edit rejected: the daemon sent an edit that cannot be read")?;
+            let Some(next) = apply_editor_delta(&daemon_text, &delta) else {
+                bail!(
+                    "Agent edit rejected: the daemon sent an edit that does not fit its text of the file ({} characters)",
+                    daemon_text.chars().count()
+                );
+            };
+            daemon_text = next;
+            seen += 1;
         }
-        if message["id"] == BARRIER_ID
-            && let Some(edit) = edit.take()
-        {
+        if message["id"] == BARRIER_ID && !edit_sent {
+            edit_sent = true;
+            let replacement = replace_once(&daemon_text, old, new).map_err(|error| {
+                anyhow::anyhow!(
+                    "{error:#}; the text on disk had it, but the daemon's text of the file differs from the disk's, {}. {DAEMON_BEHIND}",
+                    first_difference(&disk, &daemon_text),
+                )
+            })?;
+            let Some(op) = single_op(&daemon_text, &replacement)? else {
+                // The daemon's text already has the replacement.
+                to_daemon.send(close(&uri, EDIT_ID + 1)?).await?;
+                continue;
+            };
+            let edit = IncomingMessage::Request {
+                id: EDIT_ID.into(),
+                payload: EditorProtocolMessageFromEditor::Edit {
+                    uri: uri.clone(),
+                    revision: seen,
+                    delta: EditorTextDelta(vec![op]),
+                },
+            };
             to_daemon.send(serde_json::to_string(&edit)?).await?;
         }
         if message["id"] == EDIT_ID {
-            let close = IncomingMessage::Request {
-                id: (EDIT_ID + 1).into(),
-                payload: EditorProtocolMessageFromEditor::Close { uri },
-            };
-            to_daemon.send(serde_json::to_string(&close)?).await?;
+            to_daemon.send(close(&uri, EDIT_ID + 1)?).await?;
+        }
+        if message["id"] == EDIT_ID + 1 {
             // The daemon writes the file to disk when it handles the close.
-            while let Some(line) = from_daemon.next().await {
-                let message: Value = serde_json::from_str(&line?)?;
-                if message["id"] == EDIT_ID + 1 {
-                    return Ok(());
-                }
-            }
-            break;
+            return Ok(());
         }
     }
     bail!("Daemon closed the connection before confirming the agent edit")
+}
+
+const DAEMON_BEHIND: &str = "Known causes: the file changed on disk a moment ago and the daemon has not read it yet; a Git command forwarded through TeamTypeV is running on the sharer (file writes wait until it ends, and a pager left open keeps it running); another participant edited the file just now. Read the file again and retry.";
+
+/// `text` after the daemon's edit, whose ranges all refer to `text`, or `None` if it does not fit.
+fn apply_editor_delta(text: &str, delta: &EditorTextDelta) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut ops = vec![];
+    for op in &delta.0 {
+        let (start, len) = op.range.as_relative(text).ok()?;
+        ops.push((start, len, op.replacement.as_str()));
+    }
+    ops.sort_by_key(|(start, _, _)| *start);
+    let mut out = String::new();
+    let mut at = 0;
+    for (start, len, replacement) in ops {
+        if start < at || start + len > chars.len() {
+            return None;
+        }
+        out.extend(&chars[at..start]);
+        out.push_str(replacement);
+        at = start + len;
+    }
+    out.extend(&chars[at..]);
+    Some(out)
+}
+
+/// Where `disk` and `daemon` first differ, with a few characters of each.
+fn first_difference(disk: &str, daemon: &str) -> String {
+    let common = disk
+        .chars()
+        .zip(daemon.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let line = disk.chars().take(common).filter(|c| *c == '\n').count() + 1;
+    let column = disk
+        .chars()
+        .take(common)
+        .collect::<String>()
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    let snippet = |text: &str| -> String {
+        let snippet: String = text.chars().skip(common).take(40).collect();
+        format!("{snippet:?}")
+    };
+    format!(
+        "first difference at line {line}, column {column}: the disk has {} there, the daemon has {} (disk {} characters, daemon {})",
+        snippet(disk),
+        snippet(daemon),
+        disk.chars().count(),
+        daemon.chars().count()
+    )
 }
 
 // 🧑 "Does TeamTypeV give you a good way to see diffs from your last read/write? How should it be

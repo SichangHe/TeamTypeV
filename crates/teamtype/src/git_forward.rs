@@ -482,7 +482,8 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
         bail!("Only the sharer executes Git");
     }
     timeout(CONNECT_TIMEOUT, async {
-        while !handle.git_started(job.request.heads.clone()).await? {
+        let defer = !only_reads(&job.request.args);
+        while !handle.git_started(job.request.heads.clone(), defer).await? {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         Ok::<(), anyhow::Error>(())
@@ -560,6 +561,7 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     });
     let mut stdout = child.stdout.take().context("Missing Git stdout")?;
     let mut stderr = child.stderr.take().context("Missing Git stderr")?;
+    let marks_root = reports_paths(&job.request.args);
     let mut output = Output::new(&job.response);
     let mut out = [0; 16384];
     let mut err = [0; 16384];
@@ -577,7 +579,12 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
                         let count = count?;
                         out_open = count != 0;
                         if out_open {
-                            output.send(Response::Stdout(out[..count].to_vec())).await?;
+                            let chunk = if marks_root {
+                                replace_bytes(&out[..count], root.as_os_str().as_bytes(), ROOT_MARKER)
+                            } else {
+                                out[..count].to_vec()
+                            };
+                            output.send(Response::Stdout(chunk)).await?;
                         }
                     }
                     count = stderr.read(&mut err), if err_open => {
@@ -736,6 +743,11 @@ pub async fn client(directory: Option<&Path>, args: Vec<OsString>) -> Result<i32
                     stderr.flush().await?;
                 }
                 Response::Stdout(bytes) => {
+                    let bytes = if bytes.windows(ROOT_MARKER.len()).any(|w| w == ROOT_MARKER) {
+                        replace_bytes(&bytes, ROOT_MARKER, root.as_os_str().as_bytes())
+                    } else {
+                        bytes
+                    };
                     if let Err(error) = async {
                         stdout.write_all(&bytes).await?;
                         stdout.flush().await
@@ -889,10 +901,116 @@ async fn receive_input<R: AsyncRead + Unpin>(
     }
 }
 
+/// Stands for the sharer's directory in the output of Git queries that report absolute paths
+/// (`rev-parse --show-toplevel`, `--git-dir`): the client puts its own directory there, so tools
+/// such as Diffview.nvim that start Git with that path as the working directory find it.
+const ROOT_MARKER: &[u8] = b"\x1fTEAMTYPEV-ROOT\x1f";
+
+/// `rev-parse` with an option that prints a directory of the repository.
+fn reports_paths(args: &[Vec<u8>]) -> bool {
+    let mut words = args.iter();
+    let subcommand = loop {
+        match words.next() {
+            Some(arg) if arg.as_slice() == b"-c" => {
+                words.next();
+            }
+            Some(arg) if arg.starts_with(b"-") => {}
+            Some(arg) => break arg,
+            None => return false,
+        }
+    };
+    subcommand.as_slice() == b"rev-parse"
+        && args.iter().any(|arg| {
+            [
+                b"--show-toplevel".as_slice(),
+                b"--git-dir",
+                b"--absolute-git-dir",
+                b"--git-common-dir",
+                b"--show-superproject-working-tree",
+            ]
+            .contains(&arg.as_slice())
+        })
+}
+
+/// `bytes` with every `from` replaced by `to`.
+fn replace_bytes(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some(at) = rest.windows(from.len()).position(|window| window == from) {
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(to);
+        rest = &rest[at + from.len()..];
+    }
+    out.extend_from_slice(rest);
+    out
+}
+
+/// Subcommands that only read the shared files.
+const READ_ONLY: [&[u8]; 14] = [
+    b"diff",
+    b"log",
+    b"show",
+    b"status",
+    b"blame",
+    b"ls-files",
+    b"ls-tree",
+    b"rev-parse",
+    b"rev-list",
+    b"cat-file",
+    b"shortlog",
+    b"describe",
+    b"grep",
+    b"whatchanged",
+];
+
+/// Whether Git only reads the shared files: such a command (a diff in a pager can stay open for
+/// hours) does not defer file writes, rescans or other people's commands. The allowlist is by the
+/// subcommand; options that write a file or run a configured program on the command line are
+/// excluded.
+fn only_reads(args: &[Vec<u8>]) -> bool {
+    let mut words = args.iter();
+    let subcommand = loop {
+        match words.next() {
+            Some(arg) if arg.as_slice() == b"-c" => {
+                words.next();
+            }
+            Some(arg) if arg.starts_with(b"-") => {}
+            Some(arg) => break arg,
+            None => return false,
+        }
+    };
+    READ_ONLY.contains(&subcommand.as_slice())
+        && !args.iter().any(|arg| {
+            arg.starts_with(b"--output")
+                || arg.starts_with(b"-O")
+                || arg.starts_with(b"--open-files-in-pager")
+                || arg.starts_with(b"--ext-diff")
+                || arg.starts_with(b"--exec")
+        })
+}
+
+/// Configuration that tools such as Diffview.nvim pass with `-c` on every command. Any other `-c`
+/// is refused: it can name a program to run (`core.fsmonitor`, `core.pager`, aliases).
+const HARMLESS_CONFIG: [&[u8]; 4] = [
+    b"gc.auto=0",
+    b"core.quotePath=false",
+    b"core.quotePath=true",
+    b"core.quotepath=false",
+];
+
 fn validate_args(args: &[Vec<u8>]) -> Result<()> {
-    for arg in args {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         if !arg.starts_with(b"-") {
             return Ok(());
+        }
+        if arg.as_slice() == b"-c" {
+            match args.next() {
+                Some(setting) if HARMLESS_CONFIG.contains(&setting.as_slice()) => continue,
+                _ => bail!(
+                    "Git global option -c is only allowed for gc.auto=0 and core.quotePath when forwarding"
+                ),
+            }
         }
         if ![
             b"--no-pager".as_slice(),
@@ -1105,7 +1223,7 @@ mod tests {
         // Git finishes and the deferral ends. (`git_started` is true only when no Git runs.)
         timeout(Duration::from_secs(20), async {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            while !host.git_started(heads.clone()).await.unwrap_or(false) {
+            while !host.git_started(heads.clone(), true).await.unwrap_or(false) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
@@ -1155,7 +1273,7 @@ mod tests {
         assert!(failed, "the job should report an error");
         // `git_started` returns true only when no Git command is marked running.
         timeout(Duration::from_secs(5), async {
-            while !host.git_started(heads.clone()).await.unwrap_or(false) {
+            while !host.git_started(heads.clone(), true).await.unwrap_or(false) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -1197,7 +1315,7 @@ mod tests {
         timeout(Duration::from_secs(5), async {
             loop {
                 if PANICKED.load(Ordering::SeqCst)
-                    && host.git_started(heads.clone()).await.unwrap_or(false)
+                    && host.git_started(heads.clone(), true).await.unwrap_or(false)
                 {
                     break;
                 }
@@ -1454,7 +1572,6 @@ mod tests {
         for option in [
             "-C",
             "-C/",
-            "-c",
             "-ccore.fsmonitor=evil",
             "--git-dir=/",
             "--work-tree=/",
@@ -1470,6 +1587,136 @@ mod tests {
             );
         }
         assert!(validate_args(&[b"--no-pager".to_vec(), b"log".to_vec(), b"-c".to_vec()]).is_ok());
+        for setting in [
+            "core.fsmonitor=evil",
+            "core.pager=evil",
+            "alias.log=!evil",
+            "gc.auto=1",
+        ] {
+            assert!(
+                validate_args(&[b"-c".to_vec(), setting.into(), b"log".to_vec()]).is_err(),
+                "{setting}"
+            );
+        }
+        assert!(validate_args(&[b"-c".to_vec()]).is_err());
+        assert!(
+            validate_args(&[
+                b"-P".to_vec(),
+                b"-c".to_vec(),
+                b"gc.auto=0".to_vec(),
+                b"-c".to_vec(),
+                b"core.quotePath=false".to_vec(),
+                b"log".to_vec(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn only_commands_that_read_files_do_not_defer_file_writes() {
+        let a = |words: &[&str]| {
+            words
+                .iter()
+                .map(|w| w.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert!(only_reads(&a(&["diff"])));
+        assert!(only_reads(&a(&["-P", "-c", "gc.auto=0", "log", "--stat"])));
+        assert!(only_reads(&a(&["--no-pager", "status", "-s"])));
+        for words in [
+            &["checkout", "main"][..],
+            &["commit", "-m", "x"],
+            &["add", "-p"],
+            &["diff", "--output=file"],
+            &["log", "--output", "file"],
+            &["grep", "-Oless", "x"],
+            &["stash"],
+            &["-c", "gc.auto=0"],
+            &[],
+        ] {
+            assert!(!only_reads(&a(words)), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn root_markers_replace_the_sharers_directory_in_path_queries() {
+        let a = |words: &[&str]| {
+            words
+                .iter()
+                .map(|w| w.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert!(reports_paths(&a(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel"
+        ])));
+        assert!(reports_paths(&a(&[
+            "-P",
+            "-c",
+            "gc.auto=0",
+            "rev-parse",
+            "--git-dir"
+        ])));
+        assert!(!reports_paths(&a(&["rev-parse", "HEAD"])));
+        assert!(!reports_paths(&a(&["log", "--git-dir"])));
+        let sharer = b"/sharer/repo";
+        let marked = replace_bytes(b"/sharer/repo\n/sharer/repo/.git\n", sharer, ROOT_MARKER);
+        assert!(!marked.windows(sharer.len()).any(|w| w == sharer));
+        assert_eq!(
+            replace_bytes(&marked, ROOT_MARKER, b"/joiner"),
+            b"/joiner\n/joiner/.git\n"
+        );
+    }
+
+    /// Diffview.nvim starts Git with the reported top-level as its working directory; on a joiner
+    /// that is the joiner's directory, not the sharer's, which may not exist there.
+    #[tokio::test]
+    async fn path_queries_report_the_requesters_directory() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join(".teamtypev"))?;
+        git2::Repository::init(root.path())?;
+        std::fs::write(root.path().join("file"), "initial")?;
+        let config = crate::config::AppConfig {
+            base_dir: root.path().to_path_buf(),
+            ..Default::default()
+        };
+        let host = DocumentActorHandle::new(&config, true, true, false);
+        start(host.clone())?;
+        let heads = host.git_heads().await;
+        let (input, _input_writer) = Input::new()?;
+        let (response, mut responses) = mpsc::channel(8);
+        host.git
+            .enqueue(Job {
+                request: Request {
+                    id: 987_657,
+                    args: vec![b"rev-parse".to_vec(), b"--show-toplevel".to_vec()],
+                    cwd: vec![],
+                    heads,
+                    terminal: None,
+                },
+                response,
+                input,
+            })
+            .await?;
+        let mut stdout = vec![];
+        while let Some(message) = timeout(Duration::from_secs(5), responses.recv()).await? {
+            match message {
+                Response::Stdout(bytes) => stdout.extend(bytes),
+                Response::Exit(..) => break,
+                _ => {}
+            }
+        }
+        let root_bytes = root.path().canonicalize()?;
+        assert!(
+            !stdout
+                .windows(root_bytes.as_os_str().len())
+                .any(|w| w == root_bytes.as_os_str().as_bytes()),
+            "the sharer's directory leaked: {:?}",
+            String::from_utf8_lossy(&stdout)
+        );
+        assert_eq!(stdout, [ROOT_MARKER, b"\n"].concat());
+        Ok(())
     }
 
     #[tokio::test]
