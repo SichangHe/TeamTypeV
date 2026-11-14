@@ -79,10 +79,8 @@
 -            "Applying confirmed operation {:#?} to last confirmed editor content {:?}",
 -            &confirmed_editor_op, &self.last_confirmed_editor_content
 -        );
--        self.last_confirmed_editor_content = Self::force_apply(
--            &self.last_confirmed_editor_content,
--            confirmed_editor_op,
--        );
+-        self.last_confirmed_editor_content =
+-            Self::force_apply(&self.last_confirmed_editor_content, confirmed_editor_op);
 +    proof { lemma_fold_split(l0, q0, seen_operations as int); }
 +    let rev_delta = match try_from_rev_ed_delta(
 +        rev_editor_delta,
