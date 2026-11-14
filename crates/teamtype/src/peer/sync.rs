@@ -52,6 +52,8 @@ pub trait Connection<T>: Send + Sync {
 /// Maintains the sync state.
 pub struct SyncActor {
     peer_state: AutomergeSyncState,
+    /// The last sync message sent: repeating it on this reliable connection changes nothing.
+    last_sync_message: Option<Vec<u8>>,
     document_handle: DocumentActorHandle,
     connection: Box<dyn Connection<PeerMessage>>,
     pending_git: HashMap<u64, tokio::sync::mpsc::Sender<Response>>,
@@ -67,6 +69,15 @@ pub struct SyncActor {
     git_input_acks: HashMap<u64, tokio::sync::mpsc::Sender<()>>,
     git_uploads: HashMap<u64, tokio::task::AbortHandle>,
     git_tasks: tokio::task::JoinSet<()>,
+}
+
+/// Whether `message` equals the last one sent; records it as the last one otherwise.
+fn repeats(last: &mut Option<Vec<u8>>, message: &[u8]) -> bool {
+    if last.as_deref() == Some(message) {
+        return true;
+    }
+    *last = Some(message.to_vec());
+    false
 }
 
 impl SyncActor {
@@ -92,6 +103,7 @@ impl SyncActor {
             git_output,
             git_output_rx,
             peer_state: AutomergeSyncState::new(),
+            last_sync_message: None,
             document_handle,
             connection,
         }
@@ -261,9 +273,15 @@ impl SyncActor {
             .context("Could not read response from Document channel")?;
         self.peer_state = ps;
         if let Some(message) = message {
-            self.connection
-                .send(PeerMessage::Sync(message.encode()))
-                .await?;
+            let encoded = message.encode();
+            // Two peers that both wait for a change only a third peer has answer each other's
+            // identical requests forever (each message makes the other generate one), burning
+            // CPU and bandwidth until the third peer connects. Sending the same message again
+            // on an ordered, reliable connection cannot help.
+            if repeats(&mut self.last_sync_message, &encoded) {
+                return Ok(());
+            }
+            self.connection.send(PeerMessage::Sync(encoded)).await?;
         }
         Ok(())
     }
@@ -385,6 +403,45 @@ mod tests {
     use crate::document::{Content, Document};
     use crate::path::RelativePath;
     use std::process::Command;
+
+    fn from_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    /// Two peers that both hold a change whose dependency only a third peer has (found by the
+    /// randomized replay test hanging in CI): Automerge keeps generating the same request and
+    /// answer for both, so they would exchange messages for ever.
+    #[test]
+    fn two_peers_missing_the_same_dependency_stop_repeating_themselves() {
+        const A: &str = "856f4a838d974ad000de0102106f0caf78d94656e659dd3cf3331972b610786b682fd7094c2084883c7c987890b601debc3a32f25aa15fa5fec603d29cf4d5fddad54a3e79d91414c22d96fb7340650701030303130323024003430256020e010602081104130815162104230934024206560457058001068101028301027e01007e01007e020802007e00017f000207000203010500000203017f03040500070300000502007f0602017e0566696c657306737461746573030466696c6500050201080003017c02057a0203010505020003040501050005167873616d650200020106000200020501856f4a832eb3d2f3016b01d5e32ee254fa2362d457d7c88498a8bef22a978284163986afeff6ba6b2314e6107f689c143f63f2111c613c6672ec8f89020900000110786b682fd7094c2084883c7c987890b608010202021506340142025602570170027f017f017f0466696c65017f017f17787f00";
+        const B: &str = "856f4a838d974ad000de0102106f0caf78d94656e659dd3cf3331972b610786b682fd7094c2084883c7c987890b601debc3a32f25aa15fa5fec603d29cf4d5fddad54a3e79d91414c22d96fb7340650701030303130323024003430256020e010602081104130815162104230934024206560457058001068101028301027e01007e01007e020802007e00017f000207000203010500000203017f03040500070300000502007f0602017e0566696c657306737461746573030466696c6500050201080003017c02057a0203010505020003040501050005167873616d650200020106000200020501856f4a832eb3d2f3016b01d5e32ee254fa2362d457d7c88498a8bef22a978284163986afeff6ba6b2314e6107f689c143f63f2111c613c6672ec8f89020900000110786b682fd7094c2084883c7c987890b608010202021506340142025602570170027f017f017f0466696c65017f017f17787f00";
+        let (mut a, mut b) = (Document::load(&from_hex(A)), Document::load(&from_hex(B)));
+        let (mut sa, mut sb) = (AutomergeSyncState::new(), AutomergeSyncState::new());
+        let (mut last_a, mut last_b) = (None, None);
+        let mut sent = 0;
+        for _ in 0..200 {
+            let (ma, mb) = (
+                a.generate_sync_message(&mut sa),
+                b.generate_sync_message(&mut sb),
+            );
+            let ma = ma.filter(|m| !repeats(&mut last_a, &m.clone().encode()));
+            let mb = mb.filter(|m| !repeats(&mut last_b, &m.clone().encode()));
+            if ma.is_none() && mb.is_none() {
+                break;
+            }
+            sent += usize::from(ma.is_some()) + usize::from(mb.is_some());
+            if let Some(m) = ma {
+                let _ = b.receive_sync_message_log_patches(m, &mut sb);
+            }
+            if let Some(m) = mb {
+                let _ = a.receive_sync_message_log_patches(m, &mut sa);
+            }
+        }
+        assert!(sent < 12, "{sent} messages: the exchange did not settle");
+    }
 
     struct UnusedConnection;
 

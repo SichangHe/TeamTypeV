@@ -723,10 +723,21 @@ mod tests {
     }
 
     /// Exchanges sync messages until both sides are idle; returns patches `b` received.
+    ///
+    /// Two documents that both hold a change waiting for a dependency that only a third document
+    /// has ask each other for it forever, sending the same messages (Automerge's sync protocol
+    /// has no way to say "I do not have it either"). A round that repeats the previous one
+    /// without changing either document ends the exchange; the missing change arrives when one
+    /// of them syncs with the document that has it. This is what made the randomized replay test
+    /// hang in CI once in a few dozen runs (the documents' actor ids are random).
     fn sync(a: &mut Document, b: &mut Document) -> Vec<Patch> {
         let (mut sa, mut sb) = (AutomergeSyncState::new(), AutomergeSyncState::new());
         let mut received = vec![];
+        let mut previous = None;
+        let mut rounds = 0;
         loop {
+            rounds += 1;
+            assert!(rounds < 10_000, "sync did not settle");
             let (ma, mb) = (
                 a.generate_sync_message(&mut sa),
                 b.generate_sync_message(&mut sb),
@@ -734,6 +745,16 @@ mod tests {
             if ma.is_none() && mb.is_none() {
                 return received;
             }
+            let round = (
+                ma.as_ref().map(|m| m.clone().encode()),
+                mb.as_ref().map(|m| m.clone().encode()),
+                a.get_heads(),
+                b.get_heads(),
+            );
+            if previous.as_ref() == Some(&round) {
+                return received;
+            }
+            previous = Some(round);
             if let Some(m) = ma {
                 received.extend(b.receive_sync_message_log_patches(m, &mut sb));
             }
