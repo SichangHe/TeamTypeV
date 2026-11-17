@@ -20,6 +20,7 @@ pub mod ot;
 mod patch_shape_tests;
 pub mod path;
 pub mod peer;
+pub mod perf;
 pub mod sandbox;
 #[cfg(test)]
 mod sync_liveness_tests;

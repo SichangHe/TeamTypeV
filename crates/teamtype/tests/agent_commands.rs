@@ -745,3 +745,44 @@ async fn edit_through_document_daemon_persists_and_refreshes_snapshot() {
     assert!(diff.contains("-keep\n+changed\n"), "{diff}");
     assert!(!diff.contains("before"), "{diff}");
 }
+
+/// `teamtypev perf` prints the latest session's timeline and totals from the bounded log in
+/// `.teamtypev`, and a command that starts the daemon-free paths records itself there.
+#[test]
+fn perf_prints_the_recorded_timeline_and_agent_commands_record_themselves() {
+    let dir = tempfile::tempdir().expect("temporary project");
+    std::fs::create_dir(dir.path().join(".teamtypev")).expect("metadata directory");
+    assert!(
+        successful(agent(dir.path(), &["perf"])).contains("No timing records yet"),
+        "an empty directory has no records"
+    );
+    std::fs::write(dir.path().join("note.txt"), "text\n").expect("file");
+    successful(agent(dir.path(), &["agent-read", "--file", "note.txt"]));
+    // An edit that changes nothing finishes without a daemon and records its duration.
+    successful(agent(
+        dir.path(),
+        &[
+            "agent-edit",
+            "--file",
+            "note.txt",
+            "--old",
+            "text",
+            "--new",
+            "text",
+        ],
+    ));
+    let report = successful(agent(dir.path(), &["perf"]));
+    assert!(report.contains("proc.start"), "{report}");
+    assert!(report.contains("agent_edit.run"), "{report}");
+    assert!(report.contains("Totals since start"), "{report}");
+    let log = dir.path().join(".teamtypev/perf.log");
+    let text = std::fs::read_to_string(log).expect("perf log");
+    assert!(
+        !text.contains("note.txt"),
+        "file names must not be recorded: {text}"
+    );
+    assert!(
+        !text.contains(&dir.path().display().to_string()),
+        "paths must not be recorded: {text}"
+    );
+}

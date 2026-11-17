@@ -41,6 +41,7 @@ use crate::editor_protocol::{
 use crate::git_forward;
 use crate::path::{AbsolutePath, FileUri, RelativePath};
 use crate::peer;
+use crate::perf;
 use crate::sandbox;
 use crate::types::{
     ComponentMessage, CursorId, CursorState, EphemeralMessage, FileTextDelta, PatchEffect,
@@ -141,6 +142,31 @@ pub enum DocMessage {
     ReceiveEphemeral(EphemeralMessage),
 }
 
+impl DocMessage {
+    /// A fixed name for the timing records; it never contains file names or content.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::GetContent { .. } => "doc.GetContent",
+            Self::FromEditor(..) => "doc.FromEditor",
+            Self::ToEditor(..) => "doc.ToEditor",
+            Self::FromWatcher(_) => "doc.FromWatcher",
+            Self::RescanFiles => "doc.RescanFiles",
+            Self::GitHeads { .. } => "doc.GitHeads",
+            Self::GitReady { .. } => "doc.GitReady",
+            Self::GitStarted { .. } => "doc.GitStarted",
+            Self::GitFinished { .. } => "doc.GitFinished",
+            Self::HistoryId { .. } => "doc.HistoryId",
+            Self::Persist => "doc.Persist",
+            Self::RandomEdit => "doc.RandomEdit",
+            Self::ReceiveSyncMessage { .. } => "doc.ReceiveSyncMessage",
+            Self::GenerateSyncMessage { .. } => "doc.GenerateSyncMessage",
+            Self::NewEditorConnection(..) => "doc.NewEditorConnection",
+            Self::CloseEditorConnection(_) => "doc.CloseEditorConnection",
+            Self::ReceiveEphemeral(_) => "doc.ReceiveEphemeral",
+        }
+    }
+}
+
 impl fmt::Debug for DocMessage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let repr = match self {
@@ -196,6 +222,8 @@ pub struct DocumentActor {
     git_running: bool,
     deferred_writes: HashSet<RelativePath>,
     deferred_removals: HashSet<RelativePath>,
+    /// While `Some`, written files whose pending records are cleared together at the end.
+    unmark_batch: Option<Vec<RelativePath>>,
     /// Displaced files whose bytes are merged into the document but not yet saved with it.
     displaced_unsaved: Vec<PathBuf>,
     /// Test fault injection: pretend the process is killed right after a save, before the
@@ -232,7 +260,13 @@ impl DocumentActor {
             );
             let bytes = sandbox::read_file(&app_config.base_dir, &persistence_file)
                 .unwrap_or_else(|_| panic!("Could not read file '{}'", persistence_file.display()));
-            Document::try_load(&bytes).unwrap_or_else(|error| {
+            let load_timer = perf::timer("doc.load");
+            let loaded = Document::try_load(&bytes);
+            load_timer.done(&[
+                ("bytes", bytes.len() as u64),
+                ("ok", u64::from(loaded.is_ok())),
+            ]);
+            loaded.unwrap_or_else(|error| {
                 // Never crash-loop on a damaged save: keep it for inspection and start empty.
                 error!("Persisted document is unreadable ({error:#}); setting it aside.");
                 let _ = sandbox::rename_file(
@@ -263,6 +297,7 @@ impl DocumentActor {
             git_running: false,
             deferred_writes: HashSet::new(),
             deferred_removals: HashSet::new(),
+            unmark_batch: None,
             displaced_unsaved: Vec::new(),
             #[cfg(test)]
             kill_before_displaced_cleanup: None,
@@ -363,9 +398,8 @@ impl DocumentActor {
                 }
                 self.read_current_content_from_dir(false);
                 if !self.git_running {
-                    for path in std::mem::take(&mut self.deferred_writes) {
-                        self.write_file(&path);
-                    }
+                    let paths = std::mem::take(&mut self.deferred_writes);
+                    self.write_files_batched(paths);
                 }
             }
             DocMessage::GitHeads { response_tx } => {
@@ -420,10 +454,13 @@ impl DocumentActor {
             } => {
                 let heads_before_sync_message = self.get_heads();
 
+                let timer = perf::timer("sync.apply");
                 let patches = self.apply_sync_message_to_doc(message, &mut peer_state);
+                timer.done(&[("patches", patches.len() as u64)]);
 
                 let patch_effects = PatchEffect::from_crdt_patches(&patches);
                 // Before any save of the document that includes these changes.
+                let timer = perf::timer("sync.mark_pending");
                 self.mark_pending(patch_effects.iter().filter_map(|effect| match effect {
                     PatchEffect::FileChange(delta) => Some(delta.file_path.clone()),
                     PatchEffect::FileRemoval(path) | PatchEffect::FileBytes(path, _) => {
@@ -431,8 +468,13 @@ impl DocumentActor {
                     }
                     PatchEffect::NoEffect => None,
                 }));
+                timer.done(&[("effects", patch_effects.len() as u64)]);
+                let timer = perf::timer("sync.effects");
 
                 let mut file_deltas = vec![];
+                // Files whose new content is written after all effects, once each: a file that a
+                // peer created is reported as a removal (a new text object) and then as edits.
+                let mut rewrite: HashSet<RelativePath> = HashSet::new();
 
                 for patch_effect in patch_effects {
                     match patch_effect {
@@ -446,7 +488,7 @@ impl DocumentActor {
                             if self.owns(&file_path) && self.crdt_doc.file_exists(&file_path) {
                                 // A peer's file of the same name replaced ours; no further
                                 // patch arrives for it if it is empty.
-                                self.write_file(&file_path);
+                                rewrite.insert(file_path);
                             } else if self.owns(&file_path) {
                                 info!("Removing file {file_path}.");
                                 if self.git_running {
@@ -519,8 +561,12 @@ impl DocumentActor {
                     }
                 }
 
-                self.write_files_changed_in_file_deltas(&file_deltas);
+                timer.done(&[]);
+                let timer = perf::timer("sync.write_files");
+                self.write_files_changed_in_file_deltas(&file_deltas, rewrite);
+                timer.done(&[("deltas", file_deltas.len() as u64)]);
 
+                let timer = perf::timer("sync.broadcast");
                 for file_text_delta in &file_deltas {
                     let message = ComponentMessage::Edit {
                         file_path: file_text_delta.file_path.clone(),
@@ -528,6 +574,7 @@ impl DocumentActor {
                     };
                     self.broadcast_to_editors(None, &message).await;
                 }
+                timer.done(&[("editors", self.editor_connections.len() as u64)]);
 
                 if response_tx.send(peer_state).is_err() {
                     warn!("Failed to send peer state in response to ReceiveSyncMessage.");
@@ -593,16 +640,27 @@ impl DocumentActor {
             *left -= 1;
         }
         let persistence_file = self.app_config.base_dir.join(".teamtypev/doc");
-        let result = if self.save_fully {
+        let timer = perf::timer("persist");
+        let (result, saved_bytes, full) = if self.save_fully {
             debug!("Persisting CRDT document fully.");
             let bytes = self.crdt_doc.save();
             // Atomic: a crash while rewriting must not leave a truncated document.
-            sandbox::replace_file(&self.app_config.base_dir, &persistence_file, &bytes).map(|_| ())
+            (
+                sandbox::replace_file(&self.app_config.base_dir, &persistence_file, &bytes)
+                    .map(|_| ()),
+                bytes.len() as u64,
+                1,
+            )
         } else {
             debug!("Persisting CRDT document incrementally.");
             let bytes = self.crdt_doc.save_incremental();
-            sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes)
+            (
+                sandbox::append_file(&self.app_config.base_dir, &persistence_file, &bytes),
+                bytes.len() as u64,
+                0,
+            )
         };
+        timer.done(&[("bytes", saved_bytes), ("full", full)]);
         // Saving advances Automerge's incremental cursor even when disk I/O fails.
         self.save_fully = result.is_err();
         if result.is_ok() {
@@ -670,6 +728,22 @@ impl DocumentActor {
             document::Content::String(text) => Some(text.as_bytes().to_vec()),
             document::Content::Bytes(bytes) => Some(bytes.clone()),
         }
+    }
+
+    fn unmark_pending_many(&self, paths: &[RelativePath]) {
+        if !self.persist || paths.is_empty() {
+            return;
+        }
+        let timer = perf::timer("pending.unmark_many");
+        let mut list = self.read_pending();
+        let before = list.len();
+        for path in paths {
+            list.remove(path);
+        }
+        if list.len() != before {
+            self.write_pending(&list);
+        }
+        timer.done(&[("files", paths.len() as u64)]);
     }
 
     fn unmark_pending(&self, path: &RelativePath) {
@@ -1262,16 +1336,32 @@ impl DocumentActor {
         });
     }
 
-    fn write_files_changed_in_file_deltas(&mut self, file_deltas: &[FileTextDelta]) {
+    fn write_files_changed_in_file_deltas(
+        &mut self,
+        file_deltas: &[FileTextDelta],
+        also_write: HashSet<RelativePath>,
+    ) {
         // Collect file paths into a set, so we don't write files multiple times on complex
         // patches.
-        let mut file_paths = HashSet::new();
+        let mut file_paths = also_write;
         for FileTextDelta { file_path, .. } in file_deltas {
-            file_paths.insert(file_path);
+            file_paths.insert(file_path.clone());
         }
 
+        self.write_files_batched(file_paths);
+    }
+
+    /// Writes each file, clearing the pending-write records once at the end. Clearing a record
+    /// rewrites the whole list, so doing it per file made a join of many files quadratic. A kill
+    /// before the clearing leaves records of files that are already written, which a restart
+    /// recognizes as finished.
+    fn write_files_batched(&mut self, file_paths: impl IntoIterator<Item = RelativePath>) {
+        self.unmark_batch = Some(vec![]);
         for file_path in file_paths {
-            self.write_file(file_path);
+            self.write_file(&file_path);
+        }
+        if let Some(done) = self.unmark_batch.take() {
+            self.unmark_pending_many(&done);
         }
     }
 
@@ -1293,7 +1383,9 @@ impl DocumentActor {
             self.deferred_writes.insert(file_path.clone());
             anyhow::bail!("Git is running; retry saving when the command finishes");
         }
+        let timer = perf::timer("file.write");
         let result = self.write_file_now(file_path);
+        timer.done(&[("failed", u64::from(result.is_err()))]);
         if result.is_err() {
             // Keep the shared file: a rescan must not read it as deleted on disk, and the next
             // rescan (any watcher event) writes it again.
@@ -1311,13 +1403,24 @@ impl DocumentActor {
                 document::Content::String(text) => text.as_bytes(),
                 document::Content::Bytes(bytes) => bytes,
             };
-            self.ensure_file_has_bytes(file_path, bytes)?;
+            let timer = perf::timer("file.write.ensure");
+            let ensured = self.ensure_file_has_bytes(file_path, bytes);
+            timer.done(&[("bytes", bytes.len() as u64)]);
+            ensured?;
             if self.current_file_content(file_path) == Some(&content) {
                 break;
             }
         }
-        self.unmark_pending(file_path);
+        let timer = perf::timer("file.write.unmark");
+        if let Some(batch) = &mut self.unmark_batch {
+            batch.push(file_path.clone());
+        } else {
+            self.unmark_pending(file_path);
+        }
+        timer.done(&[]);
+        let timer = perf::timer("file.write.marker");
         self.crdt_doc.remove_file(&base_marker(file_path));
+        timer.done(&[]);
         Ok(())
     }
 
@@ -1551,7 +1654,10 @@ impl DocumentActor {
             return;
         }
         debug!("Reading current contents from disk (init: {init}).");
+        let scan_timer = perf::timer("scan.dir");
+        let enumerate_timer = perf::timer("scan.enumerate");
         let mut paths = sandbox::enumerate_non_ignored_files(&self.app_config);
+        enumerate_timer.done(&[("files", paths.len() as u64)]);
         paths.extend(
             self.crdt_doc
                 .files()
@@ -1561,6 +1667,7 @@ impl DocumentActor {
         );
         paths.sort();
         paths.dedup();
+        let scanned = paths.len() as u64;
         for file_path in paths {
             match sandbox::read_file(&self.app_config.base_dir, &file_path) {
                 Ok(bytes) => {
@@ -1618,6 +1725,7 @@ impl DocumentActor {
                 self.remove_file(&relative_file_path);
             }
         }
+        scan_timer.done(&[("files", scanned), ("init", u64::from(init))]);
         let _ = self.doc_changed_ping_tx.send(());
     }
 
@@ -1916,7 +2024,11 @@ impl DocumentActor {
             tokio::select! {
                 message = self.doc_message_rx.recv() => {
                     let Some(message) = message else { break };
+                    let kind = message.kind();
+                    let queued = self.doc_message_rx.len() as u64;
+                    let timer = perf::timer(kind);
                     self.handle_message(message).await;
+                    timer.done(&[("queued", queued)]);
                 }
                 () = sleep(WRITE_RETRY_INTERVAL), if retry_pending => {
                     self.handle_message(DocMessage::RescanFiles).await;
@@ -1963,6 +2075,7 @@ impl DocumentActorHandle {
         let (ephemeral_message_tx, _ephemeral_message_rx) =
             broadcast::channel::<EphemeralMessage>(100);
 
+        let timer = perf::timer("doc.startup");
         let mut actor = DocumentActor::new(
             doc_message_rx,
             doc_changed_ping_tx.clone(),
@@ -1972,6 +2085,7 @@ impl DocumentActorHandle {
             is_host,
             persist,
         );
+        timer.done(&[("files", actor.crdt_doc.files().len() as u64)]);
 
         let git = git_forward::GitHandle::new();
         tokio::spawn(async move { actor.run().await });
@@ -2099,9 +2213,20 @@ impl Daemon {
     pub async fn new(app_config: AppConfig, init: bool, persist: bool) -> Result<Self> {
         let is_host = app_config.is_host();
 
+        let timer = perf::timer("daemon.document_actor");
         let document_handle = DocumentActorHandle::new(&app_config, init, is_host, persist);
+        timer.done(&[]);
 
         let base_dir = &app_config.base_dir;
+
+        // Records the pending timing totals, so that a log sent later is complete even if the
+        // process is stopped abruptly.
+        tokio::spawn(async {
+            loop {
+                sleep(Duration::from_secs(20)).await;
+                perf::flush();
+            }
+        });
 
         // Start socket listener.
         let socket_path = base_dir
@@ -2120,10 +2245,12 @@ impl Daemon {
         }
 
         // Start connection manager.
+        let timer = perf::timer("daemon.endpoint_bind");
         let connection_manager =
             peer::ConnectionManager::new(&app_config, document_handle.clone(), base_dir)
                 .await
                 .expect("Failed to start connection manager");
+        timer.done(&[]);
         let address = connection_manager.secret_address();
 
         if app_config.emit_secret_address {
@@ -2143,7 +2270,13 @@ impl Daemon {
         }
         if let Some(config::Peer::SecretAddress(ref secret_address)) = app_config.peer {
             let mut n_attempts_left = INITIAL_CONNECT_ATTEMPTS;
-            while let Err(err) = connection_manager.connect(secret_address.clone()).await {
+            let mut attempt = 0u64;
+            loop {
+                attempt += 1;
+                let timer = perf::timer("daemon.initial_connect");
+                let result = connection_manager.connect(secret_address.clone()).await;
+                timer.done(&[("attempt", attempt), ("ok", u64::from(result.is_ok()))]);
+                let Err(err) = result else { break };
                 n_attempts_left -= 1;
                 if n_attempts_left == 0 {
                     return Err(err.context("Failed to connect to specified peer"));
@@ -2667,6 +2800,40 @@ mod tests {
                     .exists()
             );
             assert!(!Path::new("/tmp/tt-escape-abs").exists());
+        }
+
+        /// Writing many files clears their pending records with one rewrite of the list: one
+        /// rewrite per file made a join of thousands of files quadratic.
+        #[test]
+        fn batched_writes_clear_pending_records_together() {
+            let dir = setup_filesystem_for_testing();
+            let mut actor = DocumentActor::setup_for_testing(&dir);
+            actor.persist = true;
+            std::fs::create_dir_all(dir.path().join(".teamtypev")).expect("dir");
+            let paths: Vec<RelativePath> = (0..50)
+                .map(|n| RelativePath::new(&format!("many/file{n}")))
+                .collect();
+            for path in &paths {
+                actor.crdt_doc.update_text("content\n", path);
+            }
+            actor.mark_pending(paths.iter().cloned());
+            assert_eq!(actor.read_pending().len(), paths.len());
+            let list = actor.pending_list();
+            let before = std::fs::metadata(&list).expect("list").len();
+            actor.write_files_batched(paths.iter().cloned());
+            assert!(
+                actor.read_pending().is_empty(),
+                "records left after the writes"
+            );
+            assert!(std::fs::metadata(&list).expect("list").len() < before);
+            for path in &paths {
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join(path.display().to_string()))
+                        .expect("written"),
+                    "content\n"
+                );
+            }
+            assert!(actor.unmark_batch.is_none());
         }
 
         #[test]

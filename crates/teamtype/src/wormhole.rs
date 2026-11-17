@@ -11,6 +11,8 @@ use magic_wormhole::{AppConfig, AppID, Code, MailboxConnection, Wormhole, transf
 use tokio::time::sleep;
 use tracing::{info, warn};
 
+use crate::perf;
+
 const NETWORK_RETRY: Duration = Duration::from_mins(5);
 
 pub async fn put_secret_address_into_wormhole(address: &str, magic_wormhole_relay: Option<String>) {
@@ -19,7 +21,10 @@ pub async fn put_secret_address_into_wormhole(address: &str, magic_wormhole_rela
 
     tokio::spawn(async move {
         loop {
-            let Ok(mailbox_connection) = MailboxConnection::create(config.clone(), 2).await else {
+            let timer = perf::timer("wormhole.create_code");
+            let created = MailboxConnection::create(config.clone(), 2).await;
+            timer.done(&[("ok", u64::from(created.is_ok()))]);
+            let Ok(mailbox_connection) = created else {
                 warn!(
                     "Failed to register a new join code via Magic Wormhole. Automatic retry in {:?}. Peers who joined before can still re-connect without a code.",
                     NETWORK_RETRY
@@ -58,10 +63,15 @@ pub async fn get_secret_address_from_wormhole(
 ) -> Result<String> {
     let config = build_magic_wormhole_config(magic_wormhole_relay);
 
-    let mut wormhole =
-        Wormhole::connect(MailboxConnection::connect(config, Code::from_str(code)?, false).await?)
-            .await?;
+    let timer = perf::timer("wormhole.mailbox");
+    let mailbox = MailboxConnection::connect(config, Code::from_str(code)?, false).await?;
+    timer.done(&[]);
+    let timer = perf::timer("wormhole.key_exchange");
+    let mut wormhole = Wormhole::connect(mailbox).await?;
+    timer.done(&[]);
+    let timer = perf::timer("wormhole.receive");
     let bytes = wormhole.receive().await?;
+    timer.done(&[("bytes", bytes.len() as u64)]);
     Ok(String::from_utf8(bytes)?)
 }
 

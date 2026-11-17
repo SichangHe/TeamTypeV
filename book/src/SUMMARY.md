@@ -24,6 +24,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
     - [Offline support](offline-support.md)
     - [Configuration](configuration.md)
     - [Workarounds](workarounds.md)
+    - [When something feels slow](performance.md)
 - [TeamTypeV in practice](in-practice.md)
     - [Pair programming](pair-programming.md)
     - [Shared notes](shared-notes.md)

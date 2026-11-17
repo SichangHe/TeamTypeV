@@ -67,6 +67,11 @@ async fn main() -> Result<()> {
         exit(code);
     }
 
+    if matches!(cli.command, Commands::Perf) {
+        print!("{}", teamtypev::perf::report(&get_directory(None, &cli)?));
+        return Ok(());
+    }
+
     let temporary_directory = get_temporary_directory(&cli)?;
     let directory = get_directory(temporary_directory.as_ref(), &cli)?;
     setup_teamtypev_directory(&directory, temporary_directory.as_ref())
@@ -77,7 +82,13 @@ async fn main() -> Result<()> {
     // will go away but the remote networking connections would stay up! This is a fundamental issue
     // with the daemon module and merits refactoring so the long running socket and network
     // listeners properly listen to the mpsc channel or receive and process a cancellation token.
+    if !matches!(cli.command, Commands::Client) {
+        teamtypev::perf::init(&directory);
+        teamtypev::perf::event("proc.start", &[]);
+    }
+
     let _handle = match cli.command {
+        Commands::Perf => unreachable!("Handled before the daemon starts"),
         Commands::Client => return run_client(directory.clone()).await,
         Commands::Git { .. } => unreachable!("Handled before directory setup"),
         Commands::Tunnel { .. } => unreachable!("Handled before the directory setup"),
@@ -97,7 +108,10 @@ async fn main() -> Result<()> {
                     (None, None) => bail!("Missing content for the agent edit"),
                 });
             agent_edit::prepare_snapshot(&directory, &agent, &file)?;
+            let timer = teamtypev::perf::timer("agent_edit.run");
             let content = agent_edit::run(&directory, &file, &old?, &new?).await?;
+            timer.done(&[]);
+            teamtypev::perf::flush();
             if let Err(error) =
                 agent_edit::save_snapshot(&directory, &agent, &file, content.as_bytes())
             {
@@ -112,10 +126,15 @@ async fn main() -> Result<()> {
             return agent_edit::diff(&directory, &agent, file.as_deref());
         }
         Commands::Join { .. } => {
+            let timer = teamtypev::perf::timer("join.resolve_peer");
             let join_config = parse_join_config(cli.command, directory.clone()).await?;
+            timer.done(&[]);
+            // Waiting for the user to answer is not part of the join's time.
             confirm_overwrite(&join_config.base_dir)?;
             let marker = join_marker(&join_config.base_dir);
+            let timer = teamtypev::perf::timer("join.daemon_start");
             let daemon = run_daemon(join_config, false).await?;
+            timer.done(&[]);
             // Only a join that connected counts, so that a failed one asks again.
             sandbox::write_file(&directory, &marker, b"")?;
             Ok(daemon)
@@ -127,6 +146,7 @@ async fn main() -> Result<()> {
     }?;
 
     trap_shutdown().await;
+    teamtypev::perf::flush();
 
     Ok(())
 }
@@ -312,7 +332,8 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
         | Commands::Tunnel { .. }
         | Commands::AgentEdit { .. }
         | Commands::AgentRead { .. }
-        | Commands::AgentDiff { .. } => Ok(None),
+        | Commands::AgentDiff { .. }
+        | Commands::Perf => Ok(None),
     }
 }
 

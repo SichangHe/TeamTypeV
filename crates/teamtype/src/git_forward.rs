@@ -28,6 +28,8 @@ use tokio::time::timeout;
 use crate::daemon::DocumentActorHandle;
 use tracing::warn;
 
+use crate::perf;
+
 #[path = "git_terminal.rs"]
 mod terminal;
 
@@ -294,6 +296,7 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
                 .map(|arg| String::from_utf8_lossy(arg))
                 .collect::<Vec<_>>()
                 .join(" ");
+            let job_timer = perf::timer("git.job");
             let execution = execute(&worker_handle, &job);
             tokio::pin!(execution);
             let result = loop {
@@ -305,6 +308,7 @@ pub fn start(handle: DocumentActorHandle) -> Result<()> {
                     }
                 }
             };
+            job_timer.done(&[("failed", u64::from(result.is_err()))]);
             if let Err(error) = result {
                 let error = match worker_handle.git_finished().await {
                     Ok(()) => error,
@@ -481,6 +485,7 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     if !handle.is_host() {
         bail!("Only the sharer executes Git");
     }
+    let wait_timer = perf::timer("git.start_wait");
     timeout(CONNECT_TIMEOUT, async {
         let defer = !only_reads(&job.request.args);
         while !handle.git_started(job.request.heads.clone(), defer).await? {
@@ -490,6 +495,7 @@ async fn execute(handle: &DocumentActorHandle, job: &Job) -> Result<()> {
     })
     .await
     .context("The joiner's edits did not reach the sharer; Git was not run")??;
+    wait_timer.done(&[]);
     #[cfg(test)]
     if job.request.id == PANIC_JOB_ID.load(Ordering::SeqCst) {
         PANICKED.store(true, Ordering::SeqCst);

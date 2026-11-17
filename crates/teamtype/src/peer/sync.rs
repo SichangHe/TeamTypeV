@@ -15,6 +15,7 @@ use tracing::{debug, error};
 
 use crate::daemon::{DocMessage, DocumentActorHandle};
 use crate::git_forward::{Request, Response};
+use crate::perf;
 use crate::types::EphemeralMessage;
 
 #[derive(Deserialize, Serialize)]
@@ -109,6 +110,8 @@ impl SyncActor {
         let (response_tx, response_rx) = oneshot::channel();
         match message {
             PeerMessage::Sync(message_buf) => {
+                let timer = perf::timer("sync.receive");
+                let bytes = message_buf.len() as u64;
                 let message = AutomergeSyncMessage::decode(&message_buf)?;
                 self.document_handle
                     .send_message(DocMessage::ReceiveSyncMessage {
@@ -120,6 +123,8 @@ impl SyncActor {
                 self.peer_state = response_rx
                     .await
                     .expect("Couldn't read response from Document channel");
+                // Includes the wait for the document actor; `doc.ReceiveSyncMessage` is its share.
+                timer.done(&[("bytes", bytes)]);
             }
             PeerMessage::Ephemeral(cursor) => {
                 self.document_handle
@@ -257,6 +262,7 @@ impl SyncActor {
     }
 
     async fn generate_sync_message(&mut self) -> Result<()> {
+        let timer = perf::timer("sync.generate");
         let (response_tx, response_rx) = oneshot::channel();
         self.document_handle
             .send_message(DocMessage::GenerateSyncMessage {
@@ -275,9 +281,14 @@ impl SyncActor {
             // CPU and bandwidth until the third peer connects. Sending the same message again
             // on an ordered, reliable connection cannot help.
             if repeats(&mut self.last_sync_message, &encoded) {
+                perf::event("sync.repeat_skipped", &[]);
                 return Ok(());
             }
+            let bytes = encoded.len() as u64;
+            timer.done(&[("bytes", bytes)]);
+            let send_timer = perf::timer("sync.send");
             self.connection.send(PeerMessage::Sync(encoded)).await?;
+            send_timer.done(&[("bytes", bytes)]);
         }
         Ok(())
     }

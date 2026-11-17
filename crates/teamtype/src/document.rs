@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     path::RelativePath,
+    perf,
     types::{EditorTextDelta, PatchEffect, TextDelta},
 };
 
@@ -117,21 +118,28 @@ impl Document {
         message: AutomergeSyncMessage,
         peer_state: &mut AutomergeSyncState,
     ) -> Result<Vec<Patch>> {
+        let timer = perf::timer("doc.sync.text_objects");
         let before = self.visible_text_objects();
+        timer.done(&[("files", self.files.len() as u64)]);
         let mut patch_log = PatchLog::active();
         let state_before = peer_state.clone();
-        if let Err(error) =
+        let timer = perf::timer("doc.sync.automerge");
+        let received =
             self.doc
                 .sync()
-                .receive_sync_message_log_patches(peer_state, message, &mut patch_log)
-        {
+                .receive_sync_message_log_patches(peer_state, message, &mut patch_log);
+        timer.done(&[]);
+        if let Err(error) = received {
             *peer_state = state_before;
             return Err(error.into());
         }
+        let timer = perf::timer("doc.sync.patches");
         let patches =
             self.replaced_text_objects_as_puts(self.doc.make_patches(&mut patch_log), &before);
+        timer.done(&[("patches", patches.len() as u64)]);
 
         // Update files cache.
+        let cache_timer = perf::timer("doc.sync.cache");
         for patch in &patches {
             match PatchEffect::from_patch(patch) {
                 PatchEffect::FileChange(file_text_delta) => {
@@ -200,6 +208,7 @@ impl Document {
             }
         }
 
+        cache_timer.done(&[]);
         Ok(patches)
     }
 

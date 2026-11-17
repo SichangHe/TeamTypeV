@@ -81,6 +81,11 @@ pub enum Commands {
         #[command(flatten)]
         shared_flags: ShareJoinFlags,
     },
+    /// Print where time went in the latest run (joining, syncing, writing files), from the
+    /// timing records TeamTypeV keeps in `.teamtypev/perf.log`. Paste the output into a message
+    /// when something feels slow. The records hold durations and counts only, never file names,
+    /// text, or secret addresses, and use at most 512 KiB.
+    Perf,
     /// Open a JSON-RPC connection to the TeamTypeV daemon on stdin/stdout. Used by text editor plugins.
     Client,
     /// Reach the port a sharer forwards (`share --forward-port`) on localhost. Needs no shared

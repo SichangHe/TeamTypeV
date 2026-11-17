@@ -36,6 +36,7 @@ use url::Url;
 use self::sync::{Connection, PeerMessage, SyncActor};
 use crate::config::AppConfig;
 use crate::daemon::DocumentActorHandle;
+use crate::perf;
 
 pub(crate) mod sync;
 mod tunnel;
@@ -463,11 +464,16 @@ impl EndpointActor {
                 self.connecting.insert(
                     peer_id,
                     tokio::spawn(async move {
+                        let timer = perf::timer("peer.dial");
                         let result =
                             timeout(connect_timeout, endpoint.connect(endpoint_addr, ALPN))
                                 .await
                                 .map_err(anyhow::Error::from)
                                 .and_then(|result| result.map_err(anyhow::Error::from));
+                        timer.done(&[
+                            ("attempt", previous_attempts as u64 + 1),
+                            ("ok", u64::from(result.is_ok())),
+                        ]);
                         let _ = message_tx
                             .send(EndpointMessage::Connected {
                                 secret_address,
@@ -545,10 +551,16 @@ impl EndpointActor {
                 );
 
                 if let Some(remote) = self.endpoint.remote_info(peer_id).await {
-                    secret_address.endpoint_addr = EndpointAddr::from_parts(
-                        peer_id,
-                        remote.into_addrs().map(TransportAddrInfo::into_addr),
+                    let addrs: Vec<_> = remote
+                        .into_addrs()
+                        .map(TransportAddrInfo::into_addr)
+                        .collect();
+                    let direct = addrs.iter().filter(|addr| addr.is_ip()).count() as u64;
+                    perf::event(
+                        "peer.addresses",
+                        &[("direct", direct), ("relay", addrs.len() as u64 - direct)],
                     );
+                    secret_address.endpoint_addr = EndpointAddr::from_parts(peer_id, addrs);
                 }
 
                 if let Some(response_tx) = response_tx {
@@ -827,8 +839,10 @@ impl EndpointActor {
         auth: PeerAuth,
     ) -> Result<()> {
         let result = async {
+            let timer = perf::timer("peer.handshake");
             let stream =
                 timeout(PEER_TIMEOUT, PeerMessageStream::new(conn.clone(), auth)).await??;
+            timer.done(&[]);
             let syncer = SyncActor::new(document_handle, Box::new(stream));
             syncer.run().await
         }
