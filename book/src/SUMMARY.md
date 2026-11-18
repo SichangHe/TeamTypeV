@@ -20,7 +20,7 @@ SPDX-License-Identifier: CC-BY-SA-4.0
     - [Local first](local-first.md)
 - [Features](features.md)
     - [File events](file-events.md)
-    - [Ignored files](ignored-files.md)
+    - [Ignored files and images](ignored-files.md)
     - [Offline support](offline-support.md)
     - [Configuration](configuration.md)
     - [Workarounds](workarounds.md)
