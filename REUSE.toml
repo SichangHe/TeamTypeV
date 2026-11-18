@@ -13,7 +13,7 @@ SPDX-FileCopyrightText = "2026 Steven Hé (Sīchàng) <stevensichanghe@gmail.com
 SPDX-License-Identifier = "AGPL-3.0-or-later"
 
 [[annotations]]
-path = ["docs/decisions/*.md", "docs/git-forwarding.md", "docs/project-name.md", "emacs-plugin/DESIGN.md", "verification/**/*.md"]
+path = ["docs/decisions/*.md", "docs/git-forwarding.md", "docs/project-name.md", "emacs-plugin/DESIGN.md", "verification/**/*.md", "crates/teamtype/src/guide/*.md"]
 SPDX-FileCopyrightText = "2026 Steven Hé (Sīchàng) <stevensichanghe@gmail.com>"
 SPDX-License-Identifier = "CC-BY-SA-4.0"
 

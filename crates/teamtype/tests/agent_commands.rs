@@ -786,3 +786,31 @@ fn perf_prints_the_recorded_timeline_and_agent_commands_record_themselves() {
         "paths must not be recorded: {text}"
     );
 }
+
+/// The help pages are reachable from the main help, and `guide files` names the fix for images
+/// that a `.gitignore` hides.
+#[test]
+fn guide_is_pointed_to_from_the_help_and_explains_hidden_images() {
+    let dir = tempfile::tempdir().expect("project");
+    for args in [&["--help"][..], &["share", "--help"], &["join", "--help"]] {
+        let output = successful(agent(dir.path(), args));
+        assert!(output.contains("teamtypev guide"), "{args:?}: {output}");
+    }
+    let page = successful(agent(dir.path(), &["guide", "images"]));
+    assert!(
+        page.contains(".teamtypevignore") && page.contains("!*.png"),
+        "{page}"
+    );
+    let index = successful(agent(dir.path(), &["guide"]));
+    assert!(index.contains("files") && index.contains("slow"), "{index}");
+    let unknown = agent(dir.path(), &["guide", "nonsense"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("No help page called"));
+    assert!(
+        !dir.path()
+            .join(".teamtypev")
+            .read_dir()
+            .is_ok_and(|mut d| d.next().is_some()),
+        "reading help must not change the directory"
+    );
+}

@@ -54,6 +54,19 @@ async fn main() -> Result<()> {
 
     logging::initialize().context("Failed to initialize logging")?;
 
+    if let Commands::Guide { topic } = &cli.command {
+        return match teamtypev::guide::page(topic.as_deref()) {
+            Ok(text) => {
+                print!("{text}");
+                Ok(())
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                exit(2);
+            }
+        };
+    }
+
     if let Commands::Tunnel {
         secret_address,
         port,
@@ -91,7 +104,9 @@ async fn main() -> Result<()> {
         Commands::Perf => unreachable!("Handled before the daemon starts"),
         Commands::Client => return run_client(directory.clone()).await,
         Commands::Git { .. } => unreachable!("Handled before directory setup"),
-        Commands::Tunnel { .. } => unreachable!("Handled before the directory setup"),
+        Commands::Guide { .. } | Commands::Tunnel { .. } => {
+            unreachable!("Handled before the directory setup")
+        }
         Commands::AgentEdit {
             file,
             old,
@@ -333,6 +348,7 @@ fn get_temporary_directory(cli: &Cli) -> Result<Option<TempDir>> {
         | Commands::AgentEdit { .. }
         | Commands::AgentRead { .. }
         | Commands::AgentDiff { .. }
+        | Commands::Guide { .. }
         | Commands::Perf => Ok(None),
     }
 }

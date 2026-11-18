@@ -13,6 +13,7 @@ pub mod editor;
 pub mod editor_connection;
 pub mod editor_protocol;
 pub mod git_forward;
+pub mod guide;
 pub mod jsonrpc_forwarder;
 pub mod logging;
 pub mod ot;

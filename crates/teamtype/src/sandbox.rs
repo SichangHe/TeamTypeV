@@ -590,6 +590,70 @@ mod tests {
         assert!(read_file(&project_dir, &project_dir.join("nonexistent")).is_err());
     }
 
+    /// The documented fix for images that a `.gitignore` hides (`teamtypev guide files`): a
+    /// `.teamtypevignore` with a negation brings them back, in the same directory or at the
+    /// root, and a `.gitignore` above the shared directory hides them to begin with.
+    #[test]
+    fn teamtypevignore_negation_brings_back_images_hidden_by_gitignore() {
+        let parent = tempdir().expect("parent directory");
+        let project_dir = parent.path().join("project");
+        fs::create_dir_all(project_dir.join("design/draft")).expect("directories");
+        for name in [
+            "design/draft/plot.png",
+            "design/draft/other.jpg",
+            "design/top.png",
+        ] {
+            fs::write(project_dir.join(name), b"\x89PNG").expect("image");
+        }
+        let app_config = AppConfig {
+            base_dir: project_dir.clone(),
+            ..AppConfig::default()
+        };
+        let shared = |config: &AppConfig, name: &str| {
+            enumerate_non_ignored_files(config).contains(&project_dir.join(name))
+        };
+        fs::write(project_dir.join(".gitignore"), b"design/draft/*.png\n").expect("gitignore");
+        assert!(
+            !shared(&app_config, "design/draft/plot.png"),
+            "hidden by .gitignore"
+        );
+        assert!(shared(&app_config, "design/draft/other.jpg"));
+        assert!(shared(&app_config, "design/top.png"));
+
+        // In the subdirectory.
+        fs::write(
+            project_dir.join("design/draft/.teamtypevignore"),
+            b"!*.png\n",
+        )
+        .expect("ignore");
+        assert!(shared(&app_config, "design/draft/plot.png"), "brought back");
+        fs::remove_file(project_dir.join("design/draft/.teamtypevignore")).expect("remove");
+        assert!(!shared(&app_config, "design/draft/plot.png"));
+
+        // At the root, naming the files.
+        fs::write(
+            project_dir.join(".teamtypevignore"),
+            b"!design/draft/*.png\n",
+        )
+        .expect("ignore");
+        assert!(
+            shared(&app_config, "design/draft/plot.png"),
+            "brought back from the root"
+        );
+        fs::remove_file(project_dir.join(".teamtypevignore")).expect("remove");
+        fs::remove_file(project_dir.join(".gitignore")).expect("remove");
+
+        // A .gitignore above the shared directory applies too.
+        fs::write(parent.path().join(".gitignore"), b"*.png\n").expect("parent gitignore");
+        assert!(
+            !shared(&app_config, "design/top.png"),
+            "hidden by the parent's .gitignore"
+        );
+        fs::write(project_dir.join(".teamtypevignore"), b"!*.png\n").expect("ignore");
+        assert!(shared(&app_config, "design/top.png"));
+        assert!(shared(&app_config, "design/draft/plot.png"));
+    }
+
     #[test]
     fn obeys_teamtypevignore() {
         let dir = temp_dir_setup();

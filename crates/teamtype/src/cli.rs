@@ -13,6 +13,10 @@ use clap::{Args, Parser, Subcommand};
 // 🧑 "change all mentioning of TeamType ... let's do TeamTypeV instead of X"
 #[command(about = "TeamTypeV: collaborative editing of local text files.", long_about = None)]
 #[command(propagate_version = true)]
+#[command(after_help = "More help:
+  teamtypev guide           list the help pages
+  teamtypev guide files     a file or image does not show up for the other person
+  teamtypev guide slow      joining or syncing feels slow")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -56,6 +60,10 @@ pub struct ShareJoinFlags {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Share a directory with a new peer.
+    #[command(
+        after_help = "A file or image missing for the other person? It is probably ignored \
+        (for example by a .gitignore). Run `teamtypev guide files`."
+    )]
     Share {
         /// Re-initialize the history of the shared directory. You will loose previous history.
         #[arg(long)]
@@ -75,11 +83,21 @@ pub enum Commands {
         shared_flags: ShareJoinFlags,
     },
     /// Join a shared directory via a join code, or connect to the most recent one.
+    #[command(
+        after_help = "A file or image missing here? The sharer's ignore rules decide what \
+        is shared. Run `teamtypev guide files`. Joining feels slow? Run `teamtypev guide slow`."
+    )]
     Join {
         /// Specify to connect to a new peer. Otherwise, try to connect to the most recent peer.
         join_code: Option<String>,
         #[command(flatten)]
         shared_flags: ShareJoinFlags,
+    },
+    /// Show a help page, for example `teamtypev guide files` when an image does not show up for
+    /// the other person. Without a topic, list the pages.
+    Guide {
+        /// The page to show: files (also images, ignore) or slow (also perf).
+        topic: Option<String>,
     },
     /// Print where time went in the latest run (joining, syncing, writing files), from the
     /// timing records TeamTypeV keeps in `.teamtypev/perf.log`. Paste the output into a message
